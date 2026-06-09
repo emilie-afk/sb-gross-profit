@@ -260,7 +260,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <div class="card"><div class="label">Total Revenue</div><div class="value" id="c-revenue">—</div><div class="sub" id="c-orders">— orders</div></div>
       <div class="card"><div class="label">Total COGS</div><div class="value" id="c-cogs">—</div></div>
       <div class="card accent"><div class="label">Gross Profit</div><div class="value" id="c-gp">—</div><div class="sub" id="c-gpm">GP%: —</div></div>
-      <div class="card"><div class="label">Shipping Net</div><div class="value" id="c-ship-delta">—</div><div class="sub">Collected − Paid</div></div>
+      <div class="card"><div class="label">Shipping Collected</div><div class="value" id="c-ship-collected">—</div><div class="sub">From customers</div></div>
+      <div class="card" style="grid-column:span 2"><div class="label">Shipping Paid</div><div style="display:flex;align-items:baseline;gap:16px"><div class="value" id="c-ship-paid">—</div><div class="sub" id="c-ship-net" style="font-size:.8rem">Net: —</div></div><div id="c-ship-vendor-breakdown"></div></div>
       <div class="card warn" id="c-missing-wrap" style="display:none"><div class="label">Missing Cost</div><div class="value" id="c-missing">0</div><div class="sub">line items</div></div>
     </div>
 
@@ -551,9 +552,20 @@ function renderDashboard(lines) {
   const totalShipCollected = Object.values(s.shipByType).reduce((a,v) => a + v.collected, 0);
   const totalShipPaid      = Object.values(s.shipByType).reduce((a,v) => a + v.paid, 0);
   const shipNet = totalShipCollected - totalShipPaid;
-  const shipEl  = document.getElementById('c-ship-delta');
-  shipEl.textContent = fmt(shipNet);
-  shipEl.className   = 'value ' + (shipNet >= 0 ? 'pos' : 'neg');
+  document.getElementById('c-ship-collected').textContent = fmt(totalShipCollected);
+  document.getElementById('c-ship-paid').textContent      = fmt(totalShipPaid);
+  const netEl = document.getElementById('c-ship-net');
+  netEl.textContent  = 'Net: ' + fmt(shipNet);
+  netEl.style.color  = shipNet >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // Vendor breakdown under Shipping Paid card
+  const vSS  = s.shipByVendor['ShipStation'];
+  const vHP  = s.shipByVendor['HP Dropship'];
+  document.getElementById('c-ship-vendor-breakdown').innerHTML =
+    `<div style="display:flex;gap:16px;margin-top:6px;flex-wrap:wrap">
+      <span style="font-size:.72rem;color:var(--muted)">ShipStation <span style="color:var(--text);font-weight:600">${fmt(vSS.paid)}</span> <span style="color:var(--muted)">(${vSS.orders} orders)</span></span>
+      <span style="font-size:.72rem;color:var(--muted)">HP Dropship <span style="color:var(--text);font-weight:600">${fmt(vHP.paid)}</span> <span style="color:var(--muted)">(${vHP.orders} orders)</span></span>
+    </div>`;
 
   const orders = new Set(lines.map(l => l.orderNum)).size;
   document.getElementById('c-orders').textContent = `${orders.toLocaleString()} orders`;
