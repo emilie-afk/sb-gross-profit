@@ -553,7 +553,7 @@ function renderDashboard(lines) {
 
   // Cards
   document.getElementById('c-revenue').textContent     = fmt(s.totalRevenue);
-  document.getElementById('c-revenue-sub').textContent = `Products ${fmt(s.productRevenue)} + Ship ${fmt(s.totalShipCollected)}`;
+  document.getElementById('c-revenue-sub').textContent = `Incl. shipping & taxes`;
   document.getElementById('c-cogs').textContent        = fmt(s.totalCogs);
   document.getElementById('c-gp').textContent          = fmt(s.totalGp);
   document.getElementById('c-gpm').textContent         = `GP%: ${s.gpPct.toFixed(1)}%`;
