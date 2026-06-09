@@ -268,7 +268,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const orderNumClean = orderNum.replace(/^#/, '');
     const ssRate        = shipStationCosts.get(orderNumClean) || null;
 
-    const lineRevenue = Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
+    const lineRevenue = cleanMoney(row['Total']) ?? Math.round(unitPrice * qty * 100) / 100;
     const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts);
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
@@ -346,7 +346,8 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
 // ─── Aggregation helpers ──────────────────────────────────────────────────────
 
 export function summarize(lineItems) {
-  let totalRevenue = 0, totalCogs = 0, totalGp = 0;
+  let productRevenue = 0, totalCogs = 0;
+  let totalShipCollected = 0, totalShipPaid = 0;
   let missingCost = 0;
   const byStore = {};
   const byChannel = {};
@@ -358,9 +359,8 @@ export function summarize(lineItems) {
   };
 
   for (const li of lineItems) {
-    totalRevenue += li.lineRevenue || 0;
-    totalCogs    += li.lineCogs   || 0;
-    if (li.lineGp !== null) totalGp += li.lineGp;
+    productRevenue += li.lineRevenue || 0;
+    totalCogs      += li.lineCogs   || 0;
     if (li.costSource === 'COST MISSING') missingCost++;
 
     // By store
@@ -368,7 +368,6 @@ export function summarize(lineItems) {
     if (!byStore[s]) byStore[s] = { revenue:0, cogs:0, gp:0, orders:new Set() };
     byStore[s].revenue += li.lineRevenue || 0;
     byStore[s].cogs    += li.lineCogs   || 0;
-    if (li.lineGp !== null) byStore[s].gp += li.lineGp;
     byStore[s].orders.add(li.orderNum);
 
     // By channel
@@ -376,11 +375,13 @@ export function summarize(lineItems) {
       const c = li.source;
       if (!byChannel[c]) byChannel[c] = { revenue:0, gp:0 };
       byChannel[c].revenue += li.lineRevenue || 0;
-      if (li.lineGp !== null) byChannel[c].gp += li.lineGp;
     }
 
     // Shipping by order type
     if (li.shipCollected !== null) {
+      totalShipCollected += li.shipCollected || 0;
+      if (li.shipPaid !== null) totalShipPaid += li.shipPaid;
+
       const t = li.orderCat || 'Other';
       if (!shipByType[t]) shipByType[t] = { collected:0, paid:0, delta:0, orders:0, noDelta:0 };
       shipByType[t].collected += li.shipCollected || 0;
@@ -405,7 +406,15 @@ export function summarize(lineItems) {
   for (const s of Object.values(byStore)) s.orders = s.orders.size;
   for (const v of Object.values(shipByVendor)) v.orders = v.orders.size;
 
-  const gpPct = totalRevenue > 0 ? (totalGp / totalRevenue * 100) : 0;
+  // GP = (product revenue + shipping collected) - COGS - shipping paid
+  const totalRevenue = Math.round((productRevenue + totalShipCollected) * 100) / 100;
+  const totalGp      = Math.round((totalRevenue - totalCogs - totalShipPaid) * 100) / 100;
+  const gpPct        = totalRevenue > 0 ? Math.round(totalGp / totalRevenue * 1000) / 10 : 0;
 
-  return { totalRevenue, totalCogs, totalGp, gpPct, missingCost, byStore, byChannel, shipByType, shipByVendor };
+  // Back-fill store/channel GP with the same formula (product only, no shipping split)
+  for (const s of Object.values(byStore))   s.gp = Math.round((s.revenue - s.cogs) * 100) / 100;
+  for (const c of Object.values(byChannel)) c.gp = Math.round((c.revenue - (byChannel[c]?.cogs||0)) * 100) / 100;
+
+  return { totalRevenue, productRevenue, totalShipCollected, totalShipPaid,
+           totalCogs, totalGp, gpPct, missingCost, byStore, byChannel, shipByType, shipByVendor };
 }
