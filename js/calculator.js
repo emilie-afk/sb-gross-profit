@@ -5,14 +5,25 @@
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const MCG_TIER = { '2inch': 4.00, '4inch': 6.00, 'sub': 3.00 };
+const MCG_TIER = {
+  '2inch':      4.00,  // Succulents 2"
+  '2inch_pot':  5.00,  // Succulents 2" Pot Upgrade
+  '4inch':      6.00,  // Succulents 4"
+  '4inch_pot':  7.20,  // Succulents 4" Pot Upgrade
+  'sub':        3.00,  // Subscription 2"
+  'sub_pot':    4.00,  // Subscription 2" Pot Upgrade
+  'faire_pack': 1.15,  // Faire Pack 2" (64-pack)
+  'faire_2':    3.00,  // Faire Ala Carte 2"
+  'faire_4':    5.00,  // Faire Ala Carte 4"
+};
 
 const MCG_PREFIXES = [
   'S1','S2','S3','SX','C2','C3','CX',
   'EEZZ','EBZZ','EEVZ','PPKZ','PPJZ',
-  'RAKN','RAJZ','MODERNPOT','1001','1002','1005','1014',
+  'RAKN','RAKZ','RAJZ','MODERNPOT','1001','1002','1005','1014',
   '1050','1055','1064','1075','1079','1083','1090','1110',
-  '1114','1237','1253','1264','1311','1313','1340','BD-','4X-','E1031'
+  '1114','1237','1253','1264','1311','1313','1340','BD-','4X-','E1031',
+  'SUB'
 ];
 
 const HP_SHIP_RATES = [
@@ -56,20 +67,59 @@ function isMcgSku(sku) {
   return MCG_PREFIXES.some(p => s.startsWith(p.toUpperCase()));
 }
 
-function mcgTierCost(sku) {
+function mcgTierCost(sku, mcgCosts) {
   const s = sku.toUpperCase();
-  if (s.startsWith('SUB'))                                  return [MCG_TIER.sub,   'MCG tier (subscription)'];
-  if (s.startsWith('S2')||s.startsWith('C2')||s.startsWith('E1031')) return [MCG_TIER['2inch'],'MCG tier (2")'];
-  if (['S3','C3','SX','CX','S1'].some(p=>s.startsWith(p))) return [MCG_TIER['4inch'],'MCG tier (4")'];
+  // If it's already in mcgCosts (Total sheet), skip tier fallback — caller handles this
+  // Faire Pack: 4X- prefix
+  if (s.startsWith('4X-'))                                  return [MCG_TIER.faire_pack, 'MCG tier (Faire Pack 2")'];
+  // Faire Ala Carte: BD- prefix, or SKU contains FAIRE
+  if (s.startsWith('BD-') || s.includes('FAIRE')) {
+    if (['S3','C3','SX','CX','S1'].some(p=>s.includes(p))) return [MCG_TIER.faire_4,    'MCG tier (Faire 4")'];
+    return [MCG_TIER.faire_2,                                                            'MCG tier (Faire 2")'];
+  }
+  // Subscription pot upgrade
+  if (s.startsWith('SUB') && (s.includes('POT') || s.includes('UPGRADE')))
+                                                            return [MCG_TIER.sub_pot,   'MCG tier (Sub Pot Upgrade)'];
+  // Subscription base
+  if (s.startsWith('SUB'))                                  return [MCG_TIER.sub,       'MCG tier (subscription)'];
+  // 2" pot upgrade: S2/C2 + POT or UPGRADE in SKU
+  if ((s.startsWith('S2')||s.startsWith('C2')) && (s.includes('POT')||s.includes('UPGRADE')))
+                                                            return [MCG_TIER['2inch_pot'],'MCG tier (2" Pot Upgrade)'];
+  // 4" pot upgrade: S3/C3/SX/CX/S1 + POT or UPGRADE in SKU
+  if (['S3','C3','SX','CX','S1'].some(p=>s.startsWith(p)) && (s.includes('POT')||s.includes('UPGRADE')))
+                                                            return [MCG_TIER['4inch_pot'],'MCG tier (4" Pot Upgrade)'];
+  // 2" base
+  if (s.startsWith('S2')||s.startsWith('C2')||s.startsWith('E1031'))
+                                                            return [MCG_TIER['2inch'],   'MCG tier (2")'];
+  // 4" base
+  if (['S3','C3','SX','CX','S1'].some(p=>s.startsWith(p))) return [MCG_TIER['4inch'],   'MCG tier (4")'];
   return [null, null];
 }
 
 function getCost(sku, vendor, mcgCosts, productCosts) {
   const key = (sku || '').toUpperCase().trim();
-  if (mcgCosts[key] !== undefined)    return [mcgCosts[key],    'MCG Total sheet'];
+
+  // Composite SKU: "S3KY2997+EEZZ7650" = two products bundled — sum both costs
+  if (key.includes('+')) {
+    const parts = key.split('+').map(p => p.trim()).filter(Boolean);
+    let total = 0;
+    const labels = [];
+    for (const part of parts) {
+      const [c, l] = getCost(part, vendor, mcgCosts, productCosts);
+      if (c === null) return [null, 'COST MISSING'];
+      total += c;
+      labels.push(`${part}:${l}`);
+    }
+    return [Math.round(total * 100) / 100, 'Bundle (' + labels.join(' + ') + ')'];
+  }
+
+  // 1. MCG Total sheet has the exact cost — always wins
+  if (mcgCosts[key] !== undefined)     return [mcgCosts[key],     'MCG Total sheet'];
+  // 2. Other product costs sheet (HP, Air Plant Shop, Live to Give)
   if (productCosts[key] !== undefined) return [productCosts[key], 'Products export'];
+  // 3. MCG tier fallback — only for SKUs that look like MCG but aren't in Total sheet yet
   if (isMcgSku(sku)) {
-    const [cost, label] = mcgTierCost(sku);
+    const [cost, label] = mcgTierCost(sku, mcgCosts);
     if (cost !== null) return [cost, label];
   }
   return [null, 'COST MISSING'];
@@ -227,6 +277,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
 
     // Shipping (order-level, first row only)
     let shipCollected = null, shipPaid = null, shipDelta = null, shipNote = null;
+    let shipPaidSS = null, shipPaidHP = null;
     let isFreeShip = '';
 
     if (isFirstRow) {
@@ -237,29 +288,43 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
         const hpW    = orderHpWeight.get(orderNum) || 0;
         const hpRate = hpW > 0 ? hpShipRate(hpW) : custShipping;
         shipPaid  = hpRate;
+        shipPaidSS = 0; shipPaidHP = hpRate;
         shipDelta = Math.round((custShipping - hpRate) * 100) / 100;
         shipNote  = `HP pass-through (${hpW.toFixed(2)}lb)`;
 
       } else if (orderCat === 'Pure 17381') {
         shipPaid  = ssRate;
+        shipPaidSS = ssRate || 0; shipPaidHP = 0;
         shipDelta = ssRate !== null ? Math.round((custShipping - ssRate) * 100) / 100 : null;
         shipNote  = 'ShipStation';
 
       } else if (orderCat === 'Pure Free Ship') {
-        shipPaid  = 0;
-        shipDelta = 0;
-        shipNote  = 'Ships free';
+        shipPaid  = ssRate;
+        shipPaidSS = ssRate || 0; shipPaidHP = 0;
+        shipDelta = ssRate !== null ? Math.round((custShipping - ssRate) * 100) / 100 : null;
+        shipNote  = ssRate !== null ? 'ShipStation (free to customer)' : 'ShipStation (no rate found)';
 
       } else if (orderCat === 'Mixed (17381 + HP Dropship)') {
         const hpW    = orderHpWeight.get(orderNum) || 0;
         const hpRate = hpShipRate(hpW);
-        shipPaid  = Math.round(((ssRate || 0) + hpRate) * 100) / 100;
+        shipPaidSS = ssRate || 0; shipPaidHP = hpRate;
+        shipPaid  = Math.round((shipPaidSS + hpRate) * 100) / 100;
         shipDelta = ssRate !== null
           ? Math.round((custShipping - hpRate - ssRate) * 100) / 100 : null;
         shipNote  = `17381:ShipStation + HP:${hpW.toFixed(2)}lb=$${hpRate.toFixed(2)}`;
 
+      } else if (orderCat === 'Mixed (HP + Free Ship)') {
+        const hpW    = orderHpWeight.get(orderNum) || 0;
+        const hpRate = hpShipRate(hpW);
+        shipPaidSS = ssRate || 0; shipPaidHP = hpRate;
+        shipPaid  = Math.round((shipPaidSS + hpRate) * 100) / 100;
+        shipDelta = ssRate !== null
+          ? Math.round((custShipping - hpRate - ssRate) * 100) / 100 : null;
+        shipNote  = `SS + HP:${hpW.toFixed(2)}lb=$${hpRate.toFixed(2)}`;
+
       } else {
         shipPaid  = ssRate;
+        shipPaidSS = ssRate || 0; shipPaidHP = 0;
         shipDelta = ssRate !== null ? Math.round((custShipping - ssRate) * 100) / 100 : null;
         shipNote  = orderCat;
       }
@@ -269,7 +334,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       orderNum, date, source, orderCat: isFirstRow ? orderCat : null,
       store, vendor, sku, product, qty,
       unitPrice, lineRevenue, unitCost, costSource, lineCogs, lineGp, lineGpPct,
-      shipCollected, isFreeShip, shipPaid, shipDelta, shipNote
+      shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote
     });
 
     orderSeen.add(orderNum);
@@ -286,6 +351,11 @@ export function summarize(lineItems) {
   const byStore = {};
   const byChannel = {};
   const shipByType = {};
+  // Shipping paid breakdown by vendor
+  const shipByVendor = {
+    'ShipStation':    { paid: 0, orders: new Set() },
+    'HP Dropship':    { paid: 0, orders: new Set() },
+  };
 
   for (const li of lineItems) {
     totalRevenue += li.lineRevenue || 0;
@@ -318,13 +388,24 @@ export function summarize(lineItems) {
       if (li.shipDelta !== null) shipByType[t].delta   += li.shipDelta;
       else shipByType[t].noDelta++;
       shipByType[t].orders++;
+
+      // Shipping paid by vendor
+      if (li.shipPaidSS !== null) {
+        shipByVendor['ShipStation'].paid += li.shipPaidSS;
+        if (li.shipPaidSS > 0) shipByVendor['ShipStation'].orders.add(li.orderNum);
+      }
+      if (li.shipPaidHP !== null) {
+        shipByVendor['HP Dropship'].paid += li.shipPaidHP;
+        if (li.shipPaidHP > 0) shipByVendor['HP Dropship'].orders.add(li.orderNum);
+      }
     }
   }
 
   // Convert Set → count
   for (const s of Object.values(byStore)) s.orders = s.orders.size;
+  for (const v of Object.values(shipByVendor)) v.orders = v.orders.size;
 
   const gpPct = totalRevenue > 0 ? (totalGp / totalRevenue * 100) : 0;
 
-  return { totalRevenue, totalCogs, totalGp, gpPct, missingCost, byStore, byChannel, shipByType };
+  return { totalRevenue, totalCogs, totalGp, gpPct, missingCost, byStore, byChannel, shipByType, shipByVendor };
 }
