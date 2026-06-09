@@ -160,6 +160,24 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 @keyframes spin{to{transform:rotate(360deg)}}
 #loading p{color:var(--muted);font-size:.85rem}
 
+/* Saved files */
+.saved-section{margin-top:20px;padding-top:16px;border-top:1px solid var(--border)}
+.saved-section h3{font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px}
+.saved-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.saved-label{font-size:.7rem;color:var(--muted);margin-bottom:4px}
+.saved-chip{
+  display:flex;align-items:center;gap:6px;
+  padding:5px 10px;background:var(--surface2);border:1px solid var(--border);
+  border-radius:6px;font-size:.75rem;cursor:pointer;transition:all .15s;max-width:220px;
+}
+.saved-chip:hover{border-color:var(--accent);color:var(--accent)}
+.saved-chip.active{border-color:var(--accent);background:rgba(110,231,183,.08);color:var(--accent)}
+.saved-chip .chip-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
+.saved-chip .chip-date{color:var(--muted);font-size:.68rem;white-space:nowrap}
+.saved-chip .chip-del{color:var(--muted);font-size:.9rem;line-height:1;flex-shrink:0}
+.saved-chip .chip-del:hover{color:var(--red)}
+.no-saved{color:var(--muted);font-size:.75rem;font-style:italic}
+
 /* Misc */
 .missing-warn{
   background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);
@@ -219,6 +237,16 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
         <div id="upload-error" class="error-msg" style="display:none"></div>
         <button class="calc-btn" id="calc-btn" onclick="runCalc()" disabled>Calculate Gross Profit</button>
+
+        <!-- Saved files -->
+        <div class="saved-section">
+          <h3>Saved files</h3>
+          <div class="saved-label">Shopify Orders</div>
+          <div class="saved-row" id="saved-orders"></div>
+          <div class="saved-label" style="margin-top:8px">ShipStation</div>
+          <div class="saved-row" id="saved-ship"></div>
+        </div>
+
       </div>
     </div>
   </div>
@@ -311,24 +339,133 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 import { parseCSV, parseShipStation, calculate, summarize } from './js/calculator.js';
 
 // ─── State ────────────────────────────────────────────────────────
-let ordersFiles = [], shipFile = null;
+let ordersFiles = [], shipFile = null;        // File objects from <input>
+let savedOrdersTexts = null, savedShipText = null;  // texts from saved selection
 let allLines = [], filteredLines = [], sortKey = 'date', sortAsc = false;
 let currentPage = 1;
 const PAGE_SIZE = 100;
 
+// ─── localStorage helpers ─────────────────────────────────────────
+const LS_KEY = 'gp_saved_files';
+const MAX_ORDERS = 8, MAX_SHIP = 4;
+
+function lsLoad() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { return []; }
+}
+function lsSave(arr) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch(e) {
+    console.warn('localStorage full, skipping save:', e);
+  }
+}
+function saveFilesToLS(name, type, text) {
+  let arr = lsLoad();
+  // Deduplicate by name+type
+  arr = arr.filter(f => !(f.name === name && f.type === type));
+  arr.push({ id: Date.now(), name, type, savedAt: new Date().toLocaleDateString(), text });
+  // Trim to max
+  const orders = arr.filter(f => f.type === 'orders').slice(-MAX_ORDERS);
+  const ship   = arr.filter(f => f.type === 'ship').slice(-MAX_SHIP);
+  lsSave([...orders, ...ship]);
+}
+function deleteFromLS(id) {
+  lsSave(lsLoad().filter(f => f.id !== id));
+  renderSavedFiles();
+}
+
+// ─── Render saved file chips ──────────────────────────────────────
+function renderSavedFiles() {
+  const all = lsLoad();
+  ['orders','ship'].forEach(type => {
+    const el = document.getElementById('saved-' + type);
+    const files = all.filter(f => f.type === type);
+    if (!files.length) {
+      el.innerHTML = '<span class="no-saved">None saved yet</span>';
+      return;
+    }
+    el.innerHTML = files.map(f => `
+      <div class="saved-chip" id="chip-${f.id}" onclick="selectSaved(${f.id},'${type}')">
+        <span class="chip-name" title="${f.name}">${f.name}</span>
+        <span class="chip-date">${f.savedAt}</span>
+        <span class="chip-del" onclick="event.stopPropagation();deleteFromLS(${f.id})" title="Remove">×</span>
+      </div>`).join('');
+  });
+}
+
+// Track which saved IDs are currently selected
+let selectedSavedOrders = new Set(), selectedSavedShip = null;
+
+window.selectSaved = (id, type) => {
+  const all = lsLoad();
+  const file = all.find(f => f.id === id);
+  if (!file) return;
+
+  if (type === 'orders') {
+    if (selectedSavedOrders.has(id)) {
+      selectedSavedOrders.delete(id);
+      document.getElementById('chip-' + id)?.classList.remove('active');
+    } else {
+      selectedSavedOrders.add(id);
+      document.getElementById('chip-' + id)?.classList.add('active');
+    }
+    // Collect all selected saved orders texts
+    savedOrdersTexts = [...selectedSavedOrders].map(sid => all.find(f => f.id === sid)?.text).filter(Boolean);
+    const names = [...selectedSavedOrders].map(sid => all.find(f => f.id === sid)?.name).filter(Boolean);
+    if (savedOrdersTexts.length) {
+      document.getElementById('name-orders').textContent = names.join(', ');
+      document.getElementById('zone-orders').classList.add('has-file');
+    } else {
+      savedOrdersTexts = null;
+      document.getElementById('name-orders').textContent = '';
+      document.getElementById('zone-orders').classList.remove('has-file');
+    }
+  } else {
+    if (selectedSavedShip === id) {
+      selectedSavedShip = null;
+      document.getElementById('chip-' + id)?.classList.remove('active');
+      savedShipText = null;
+      document.getElementById('name-ship').textContent = '';
+      document.getElementById('zone-ship').classList.remove('has-file');
+    } else {
+      if (selectedSavedShip) document.getElementById('chip-' + selectedSavedShip)?.classList.remove('active');
+      selectedSavedShip = id;
+      document.getElementById('chip-' + id)?.classList.add('active');
+      savedShipText = file.text;
+      document.getElementById('name-ship').textContent = file.name;
+      document.getElementById('zone-ship').classList.add('has-file');
+    }
+  }
+  document.getElementById('calc-btn').disabled =
+    ordersFiles.length === 0 && (!savedOrdersTexts || savedOrdersTexts.length === 0);
+};
+
+// Init saved files on load
+renderSavedFiles();
+
 // ─── File handling ────────────────────────────────────────────────
-window.handleFile = (input, type) => {
+window.handleFile = async (input, type) => {
   if (type === 'orders') {
     ordersFiles = Array.from(input.files);
     document.getElementById('name-orders').textContent =
       ordersFiles.map(f => f.name).join(', ');
     document.getElementById('zone-orders').classList.add('has-file');
+    // Save each file to localStorage
+    for (const f of ordersFiles) {
+      const text = await f.text();
+      saveFilesToLS(f.name, 'orders', text);
+    }
+    renderSavedFiles();
   } else {
     shipFile = input.files[0] || null;
     document.getElementById('name-ship').textContent = shipFile ? shipFile.name : '';
-    if (shipFile) document.getElementById('zone-ship').classList.add('has-file');
+    if (shipFile) {
+      document.getElementById('zone-ship').classList.add('has-file');
+      const text = await shipFile.text();
+      saveFilesToLS(shipFile.name, 'ship', text);
+      renderSavedFiles();
+    }
   }
-  document.getElementById('calc-btn').disabled = ordersFiles.length === 0;
+  document.getElementById('calc-btn').disabled =
+    ordersFiles.length === 0 && (!savedOrdersTexts || savedOrdersTexts.length === 0);
 };
 
 window.handleDrop = (ev, type) => {
@@ -356,15 +493,19 @@ window.runCalc = async () => {
     ]);
 
     setLoadingMsg('Parsing orders…');
-    const orderTexts = await Promise.all(ordersFiles.map(f => f.text()));
+    // Use freshly uploaded files if present, otherwise fall back to saved selection
+    const orderTexts = ordersFiles.length
+      ? await Promise.all(ordersFiles.map(f => f.text()))
+      : (savedOrdersTexts || []);
+    if (!orderTexts.length) throw new Error('No orders file selected.');
     let orderRows = [];
     for (const txt of orderTexts) orderRows = orderRows.concat(parseCSV(txt));
 
     let shipCosts = new Map();
-    if (shipFile) {
+    const shipText = shipFile ? await shipFile.text() : savedShipText;
+    if (shipText) {
       setLoadingMsg('Parsing ShipStation…');
-      const txt = await shipFile.text();
-      shipCosts = parseShipStation(parseCSV(txt));
+      shipCosts = parseShipStation(parseCSV(shipText));
     }
 
     setLoadingMsg('Calculating gross profit…');
@@ -607,14 +748,17 @@ window.newFiles = () => {
   document.getElementById('dashboard').style.display = 'none';
   document.getElementById('upload-screen').style.display = '';
   document.getElementById('btn-new-files').style.display = 'none';
-  // Reset file inputs
+  // Reset file inputs and saved selections
   ordersFiles = []; shipFile = null;
+  savedOrdersTexts = null; savedShipText = null;
+  selectedSavedOrders = new Set(); selectedSavedShip = null;
   document.getElementById('name-orders').textContent = '';
   document.getElementById('name-ship').textContent = '';
   document.getElementById('zone-orders').classList.remove('has-file');
   document.getElementById('zone-ship').classList.remove('has-file');
   document.getElementById('calc-btn').disabled = true;
   document.getElementById('upload-error').style.display = 'none';
+  renderSavedFiles(); // re-render chips without active state
 };
 
 window.clearDates = () => {
