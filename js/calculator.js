@@ -268,7 +268,8 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const orderNumClean = orderNum.replace(/^#/, '');
     const ssRate        = shipStationCosts.get(orderNumClean) || null;
 
-    const lineRevenue = cleanMoney(row['Total']) ?? Math.round(unitPrice * qty * 100) / 100;
+    const orderTotal  = isFirstRow ? (cleanMoney(row['Total']) || 0) : 0;  // order-level total (first row only)
+    const lineRevenue = Math.round(unitPrice * qty * 100) / 100;           // per-line revenue for GP breakdown
     const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts);
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
@@ -333,7 +334,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     lineItems.push({
       orderNum, date, source, orderCat: isFirstRow ? orderCat : null,
       store, vendor, sku, product, qty,
-      unitPrice, lineRevenue, unitCost, costSource, lineCogs, lineGp, lineGpPct,
+      unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote
     });
 
@@ -346,7 +347,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
 // ─── Aggregation helpers ──────────────────────────────────────────────────────
 
 export function summarize(lineItems) {
-  let productRevenue = 0, totalCogs = 0;
+  let totalRevenueSrc = 0, productRevenue = 0, totalCogs = 0;
   let totalShipCollected = 0, totalShipPaid = 0;
   let missingCost = 0;
   const byStore = {};
@@ -359,8 +360,9 @@ export function summarize(lineItems) {
   };
 
   for (const li of lineItems) {
-    productRevenue += li.lineRevenue || 0;
-    totalCogs      += li.lineCogs   || 0;
+    totalRevenueSrc += li.orderTotal  || 0;  // sum of Shopify order Totals
+    productRevenue  += li.lineRevenue || 0;  // sum of line revenues (for per-line GP table)
+    totalCogs       += li.lineCogs   || 0;
     if (li.costSource === 'COST MISSING') missingCost++;
 
     // By store
@@ -406,8 +408,9 @@ export function summarize(lineItems) {
   for (const s of Object.values(byStore)) s.orders = s.orders.size;
   for (const v of Object.values(shipByVendor)) v.orders = v.orders.size;
 
-  // GP = (product revenue + shipping collected) - COGS - shipping paid
-  const totalRevenue = Math.round((productRevenue + totalShipCollected) * 100) / 100;
+  // Total Revenue = sum of Shopify order Totals (already includes shipping collected + taxes)
+  // GP = Total Revenue - COGS - Shipping Paid
+  const totalRevenue = Math.round(totalRevenueSrc * 100) / 100;
   const totalGp      = Math.round((totalRevenue - totalCogs - totalShipPaid) * 100) / 100;
   const gpPct        = totalRevenue > 0 ? Math.round(totalGp / totalRevenue * 1000) / 10 : 0;
 
