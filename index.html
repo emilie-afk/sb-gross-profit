@@ -182,7 +182,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <div class="sub" id="topbar-sub">Succulents Box Analytics</div>
       </div>
     </div>
-    <button class="logout-btn" onclick="logout()">Sign out</button>
+    <div style="display:flex;gap:8px">
+      <button class="logout-btn" id="btn-new-files" onclick="newFiles()" style="display:none">↑ New files</button>
+      <button class="logout-btn" onclick="logout()">Sign out</button>
+    </div>
   </div>
 
   <!-- Upload screen -->
@@ -262,6 +265,13 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <option value="missing">Missing cost only</option>
         <option value="free">Free shipping</option>
       </select>
+    </div>
+    <div class="table-controls" style="margin-top:8px">
+      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap">Date from</label>
+      <input type="date" class="filter-select" id="filter-date-from" onchange="filterTable()" style="min-width:140px">
+      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap">to</label>
+      <input type="date" class="filter-select" id="filter-date-to" onchange="filterTable()" style="min-width:140px">
+      <button class="logout-btn" onclick="clearDates()" style="font-size:.75rem;white-space:nowrap">Clear dates</button>
       <span class="count-badge" id="row-count"></span>
     </div>
     <div class="table-wrap">
@@ -364,9 +374,16 @@ window.runCalc = async () => {
 
     document.getElementById('upload-screen').style.display = 'none';
     document.getElementById('dashboard').style.display = 'block';
+    document.getElementById('btn-new-files').style.display = '';
     const dateRange = getDateRange(allLines);
     document.getElementById('topbar-sub').textContent =
       `${allLines.length.toLocaleString()} line items · ${dateRange}`;
+    // Pre-fill date pickers with actual data range
+    const dates = allLines.map(l => l.date).filter(Boolean).sort();
+    if (dates.length) {
+      document.getElementById('filter-date-from').value = dates[0];
+      document.getElementById('filter-date-to').value   = dates[dates.length - 1];
+    }
   } catch(e) {
     errEl.textContent = 'Error: ' + e.message;
     errEl.style.display = 'block';
@@ -497,16 +514,20 @@ function buildFilters(lines) {
 }
 
 window.filterTable = () => {
-  const q     = document.getElementById('search').value.toLowerCase();
-  const store = document.getElementById('filter-store').value;
-  const chan   = document.getElementById('filter-channel').value;
-  const cost   = document.getElementById('filter-cost').value;
+  const q       = document.getElementById('search').value.toLowerCase();
+  const store   = document.getElementById('filter-store').value;
+  const chan     = document.getElementById('filter-channel').value;
+  const cost     = document.getElementById('filter-cost').value;
+  const dateFrom = document.getElementById('filter-date-from').value;
+  const dateTo   = document.getElementById('filter-date-to').value;
 
   filteredLines = allLines.filter(li => {
     if (store && li.store !== store) return false;
     if (chan  && li.source !== chan)  return false;
     if (cost === 'missing' && li.costSource !== 'COST MISSING') return false;
     if (cost === 'free'    && li.isFreeShip !== 'YES')           return false;
+    if (dateFrom && li.date && li.date < dateFrom) return false;
+    if (dateTo   && li.date && li.date > dateTo)   return false;
     if (q && !`${li.orderNum} ${li.sku} ${li.product} ${li.store}`.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -580,6 +601,27 @@ function fmt(n) {
 }
 function gpClass(v)    { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg'; }
 function deltaClass(v) { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg'; }
+
+// ─── New files / clear dates ──────────────────────────────────────
+window.newFiles = () => {
+  document.getElementById('dashboard').style.display = 'none';
+  document.getElementById('upload-screen').style.display = '';
+  document.getElementById('btn-new-files').style.display = 'none';
+  // Reset file inputs
+  ordersFiles = []; shipFile = null;
+  document.getElementById('name-orders').textContent = '';
+  document.getElementById('name-ship').textContent = '';
+  document.getElementById('zone-orders').classList.remove('has-file');
+  document.getElementById('zone-ship').classList.remove('has-file');
+  document.getElementById('calc-btn').disabled = true;
+  document.getElementById('upload-error').style.display = 'none';
+};
+
+window.clearDates = () => {
+  document.getElementById('filter-date-from').value = '';
+  document.getElementById('filter-date-to').value   = '';
+  filterTable();
+};
 
 // ─── Auth ─────────────────────────────────────────────────────────
 window.logout = () => { window.location.href = '/__logout'; };
