@@ -441,6 +441,13 @@ window.selectSaved = (id, type) => {
 
 // Init saved files on load
 renderSavedFiles();
+// Auto-select all saved orders files + most recent ship file so Calculate is ready immediately
+(function autoSelectSaved() {
+  const all = lsLoad();
+  all.filter(f => f.type === 'orders').forEach(f => selectSaved(f.id, 'orders'));
+  const ships = all.filter(f => f.type === 'ship');
+  if (ships.length) selectSaved(ships[ships.length - 1].id, 'ship');
+})();
 
 // ─── File handling ────────────────────────────────────────────────
 window.handleFile = async (input, type) => {
