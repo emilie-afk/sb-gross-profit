@@ -1,0 +1,7 @@
+[build]
+  command = "python build.py"
+  publish = "."
+
+[[edge_functions]]
+  path = "/*"
+  function = "auth"

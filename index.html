@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GP Dashboard — Succulents Box</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+/* ─── Reset & base ─────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f172a;--surface:#1e293b;--surface2:#273448;--border:#334155;
+  --text:#f1f5f9;--muted:#94a3b8;--accent:#6ee7b7;--accent2:#38bdf8;
+  --red:#f87171;--yellow:#fbbf24;--green:#6ee7b7;
+  --radius:10px;--shadow:0 4px 24px rgba(0,0,0,.4);
+}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5}
+a{color:var(--accent);text-decoration:none}
+button{cursor:pointer;font-family:inherit}
+
+/* ─── Layout ────────────────────────────────────────────────────── */
+#app{min-height:100vh}
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 24px;background:var(--surface);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:100;
+}
+.topbar-left{display:flex;align-items:center;gap:10px}
+.topbar h1{font-size:1rem;font-weight:600;color:var(--text)}
+.topbar .sub{font-size:.75rem;color:var(--muted)}
+.logout-btn{
+  padding:6px 14px;background:transparent;border:1px solid var(--border);
+  border-radius:6px;color:var(--muted);font-size:.8rem;transition:all .2s;
+}
+.logout-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+.main{padding:24px;max-width:1400px;margin:0 auto}
+
+/* ─── Upload screen ─────────────────────────────────────────────── */
+#upload-screen{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:calc(100vh - 60px);gap:24px;
+}
+.upload-card{
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:40px;width:100%;max-width:560px;box-shadow:var(--shadow);
+}
+.upload-card h2{font-size:1.1rem;margin-bottom:6px}
+.upload-card p{color:var(--muted);font-size:.85rem;margin-bottom:28px}
+.upload-row{display:flex;flex-direction:column;gap:14px}
+.upload-zone{
+  border:2px dashed var(--border);border-radius:8px;padding:24px 20px;
+  text-align:center;transition:all .2s;cursor:pointer;
+}
+.upload-zone:hover,.upload-zone.drag{border-color:var(--accent);background:rgba(110,231,183,.05)}
+.upload-zone.has-file{border-color:var(--accent);border-style:solid}
+.upload-zone input[type=file]{display:none}
+.upload-zone .icon{font-size:1.6rem;margin-bottom:6px}
+.upload-zone .label{font-weight:500;font-size:.9rem}
+.upload-zone .hint{color:var(--muted);font-size:.75rem;margin-top:4px}
+.upload-zone .filename{color:var(--accent);font-size:.8rem;margin-top:4px}
+.calc-btn{
+  width:100%;padding:12px;background:var(--accent);color:#0f172a;
+  border:none;border-radius:8px;font-size:.95rem;font-weight:700;
+  margin-top:8px;transition:background .2s;
+}
+.calc-btn:hover:not(:disabled){background:#34d399}
+.calc-btn:disabled{opacity:.5;cursor:not-allowed}
+.error-msg{
+  padding:10px 14px;background:#450a0a;border:1px solid #7f1d1d;
+  border-radius:6px;color:var(--red);font-size:.8rem;margin-top:10px;
+}
+
+/* ─── Dashboard ─────────────────────────────────────────────────── */
+#dashboard{display:none}
+.section-title{font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:12px}
+
+/* Summary cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:28px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px}
+.card .label{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.card .value{font-size:1.6rem;font-weight:700;margin-top:4px;color:var(--text)}
+.card .sub{font-size:.75rem;color:var(--muted);margin-top:2px}
+.card.accent .value{color:var(--accent)}
+.card.warn .value{color:var(--yellow)}
+
+/* Charts row */
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:28px}
+@media(max-width:760px){.charts{grid-template-columns:1fr}}
+.chart-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.chart-card h3{font-size:.8rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:16px}
+.chart-wrap{position:relative;height:220px}
+
+/* Shipping table */
+.ship-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:28px}
+.ship-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.ship-card .type{font-size:.72rem;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+.ship-card .row{display:flex;justify-content:space-between;font-size:.8rem;padding:3px 0;border-bottom:1px solid var(--border)}
+.ship-card .row:last-child{border:none;font-weight:600;font-size:.85rem;margin-top:4px;padding-top:6px}
+.pos{color:var(--green)} .neg{color:var(--red)}
+
+/* Orders table */
+.table-controls{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+.search-input{
+  flex:1;min-width:180px;padding:8px 12px;background:var(--surface);
+  border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85rem;outline:none;
+}
+.search-input:focus{border-color:var(--accent)}
+.filter-select{
+  padding:8px 10px;background:var(--surface);border:1px solid var(--border);
+  border-radius:6px;color:var(--text);font-size:.85rem;outline:none;
+}
+.filter-select:focus{border-color:var(--accent)}
+.count-badge{font-size:.75rem;color:var(--muted);white-space:nowrap;padding:8px 0}
+
+.table-wrap{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:.78rem}
+thead{position:sticky;top:0;z-index:10}
+th{
+  background:#1a2845;padding:10px 12px;text-align:left;
+  font-size:.7rem;font-weight:600;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.06em;white-space:nowrap;border-bottom:1px solid var(--border);cursor:pointer;
+  user-select:none;
+}
+th:hover{color:var(--text)}
+th .sort-icon{margin-left:4px;opacity:.4}
+th.sorted .sort-icon{opacity:1;color:var(--accent)}
+td{padding:9px 12px;border-bottom:1px solid rgba(51,65,85,.5);white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--surface2)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+td.missing{color:var(--red)}
+td.pos{color:var(--green)} td.neg{color:var(--red)}
+.badge{
+  display:inline-block;padding:2px 7px;border-radius:4px;font-size:.68rem;
+  font-weight:600;text-transform:uppercase;letter-spacing:.04em;
+}
+.badge-free{background:rgba(251,191,36,.15);color:var(--yellow)}
+.badge-missing{background:rgba(248,113,113,.15);color:var(--red)}
+
+.pagination{display:flex;align-items:center;justify-content:space-between;margin-top:14px;flex-wrap:wrap;gap:8px}
+.pagination button{
+  padding:6px 12px;background:var(--surface);border:1px solid var(--border);
+  border-radius:6px;color:var(--text);font-size:.8rem;transition:all .15s;
+}
+.pagination button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+.pagination button:disabled{opacity:.4;cursor:not-allowed}
+.page-info{font-size:.8rem;color:var(--muted)}
+
+/* Loading overlay */
+#loading{
+  display:none;position:fixed;inset:0;background:rgba(15,23,42,.85);
+  align-items:center;justify-content:center;z-index:999;flex-direction:column;gap:12px;
+}
+#loading.active{display:flex}
+.spinner{
+  width:40px;height:40px;border:3px solid var(--border);
+  border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loading p{color:var(--muted);font-size:.85rem}
+
+/* Misc */
+.missing-warn{
+  background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);
+  border-radius:6px;padding:10px 14px;font-size:.8rem;color:var(--red);margin-bottom:16px;
+}
+</style>
+</head>
+<body>
+<div id="loading"><div class="spinner"></div><p id="loading-msg">Processing…</p></div>
+
+<div id="app">
+  <!-- Top bar -->
+  <div class="topbar">
+    <div class="topbar-left">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#6ee7b7" stroke-width="2">
+        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+      </svg>
+      <div>
+        <div class="topbar h1" style="font-size:.95rem;font-weight:600">GP Dashboard</div>
+        <div class="sub" id="topbar-sub">Succulents Box Analytics</div>
+      </div>
+    </div>
+    <button class="logout-btn" onclick="logout()">Sign out</button>
+  </div>
+
+  <!-- Upload screen -->
+  <div id="upload-screen">
+    <div class="upload-card">
+      <h2>Upload your exports</h2>
+      <p>Files are processed entirely in your browser — nothing is uploaded to any server.</p>
+      <div class="upload-row">
+
+        <div class="upload-zone" id="zone-orders" onclick="document.getElementById('input-orders').click()"
+             ondragover="ev.preventDefault();this.classList.add('drag')"
+             ondragleave="this.classList.remove('drag')"
+             ondrop="handleDrop(event,'orders')">
+          <input type="file" id="input-orders" accept=".csv" multiple onchange="handleFile(this,'orders')">
+          <div class="icon">📦</div>
+          <div class="label">Shopify Orders CSV</div>
+          <div class="hint">Export from Shopify Admin → Orders → Export</div>
+          <div class="filename" id="name-orders"></div>
+        </div>
+
+        <div class="upload-zone" id="zone-ship" onclick="document.getElementById('input-ship').click()"
+             ondragover="event.preventDefault();this.classList.add('drag')"
+             ondragleave="this.classList.remove('drag')"
+             ondrop="handleDrop(event,'ship')">
+          <input type="file" id="input-ship" accept=".csv" onchange="handleFile(this,'ship')">
+          <div class="icon">🚚</div>
+          <div class="label">ShipStation CSV <span style="color:var(--muted);font-weight:400">(optional)</span></div>
+          <div class="hint">ShipStation → Reports → Shipments → Export</div>
+          <div class="filename" id="name-ship"></div>
+        </div>
+
+        <div id="upload-error" class="error-msg" style="display:none"></div>
+        <button class="calc-btn" id="calc-btn" onclick="runCalc()" disabled>Calculate Gross Profit</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="dashboard" class="main">
+
+    <!-- Summary cards -->
+    <div class="section-title">Overview</div>
+    <div class="cards">
+      <div class="card"><div class="label">Total Revenue</div><div class="value" id="c-revenue">—</div><div class="sub" id="c-orders">— orders</div></div>
+      <div class="card"><div class="label">Total COGS</div><div class="value" id="c-cogs">—</div></div>
+      <div class="card accent"><div class="label">Gross Profit</div><div class="value" id="c-gp">—</div><div class="sub" id="c-gpm">GP%: —</div></div>
+      <div class="card"><div class="label">Shipping Net</div><div class="value" id="c-ship-delta">—</div><div class="sub">Collected − Paid</div></div>
+      <div class="card warn" id="c-missing-wrap" style="display:none"><div class="label">Missing Cost</div><div class="value" id="c-missing">0</div><div class="sub">line items</div></div>
+    </div>
+
+    <!-- Charts -->
+    <div class="section-title">Breakdown</div>
+    <div class="charts">
+      <div class="chart-card">
+        <h3>Gross Profit by Store</h3>
+        <div class="chart-wrap"><canvas id="chart-store"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <h3>Revenue by Channel</h3>
+        <div class="chart-wrap"><canvas id="chart-channel"></canvas></div>
+      </div>
+    </div>
+
+    <!-- Shipping analysis -->
+    <div class="section-title">Shipping Analysis</div>
+    <div class="ship-grid" id="ship-grid"></div>
+
+    <!-- Orders table -->
+    <div class="section-title" style="margin-top:28px">Order Detail</div>
+    <div id="missing-warn" class="missing-warn" style="display:none"></div>
+    <div class="table-controls">
+      <input class="search-input" id="search" placeholder="Search order #, SKU, product…" oninput="filterTable()">
+      <select class="filter-select" id="filter-store" onchange="filterTable()"><option value="">All stores</option></select>
+      <select class="filter-select" id="filter-channel" onchange="filterTable()"><option value="">All channels</option></select>
+      <select class="filter-select" id="filter-cost" onchange="filterTable()">
+        <option value="">All cost status</option>
+        <option value="missing">Missing cost only</option>
+        <option value="free">Free shipping</option>
+      </select>
+      <span class="count-badge" id="row-count"></span>
+    </div>
+    <div class="table-wrap">
+      <table id="data-table">
+        <thead>
+          <tr>
+            <th onclick="sortBy('orderNum')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('source')">Channel <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('store')">Store <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('sku')">SKU <span class="sort-icon">↕</span></th>
+            <th>Product</th>
+            <th onclick="sortBy('qty')" class="num">Qty <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('lineRevenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('lineCogs')" class="num">COGS <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('lineGp')" class="num">GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('lineGpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
+            <th class="num">Ship Collected</th>
+            <th class="num">Ship Paid</th>
+            <th onclick="sortBy('shipDelta')" class="num">Ship Δ <span class="sort-icon">↕</span></th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody id="table-body"></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev" onclick="changePage(-1)">← Prev</button>
+      <span class="page-info" id="page-info"></span>
+      <button id="btn-next" onclick="changePage(1)">Next →</button>
+    </div>
+
+  </div><!-- /dashboard -->
+</div>
+
+<script type="module">
+import { parseCSV, parseShipStation, calculate, summarize } from './js/calculator.js';
+
+// ─── State ────────────────────────────────────────────────────────
+let ordersFiles = [], shipFile = null;
+let allLines = [], filteredLines = [], sortKey = 'date', sortAsc = false;
+let currentPage = 1;
+const PAGE_SIZE = 100;
+
+// ─── File handling ────────────────────────────────────────────────
+window.handleFile = (input, type) => {
+  if (type === 'orders') {
+    ordersFiles = Array.from(input.files);
+    document.getElementById('name-orders').textContent =
+      ordersFiles.map(f => f.name).join(', ');
+    document.getElementById('zone-orders').classList.add('has-file');
+  } else {
+    shipFile = input.files[0] || null;
+    document.getElementById('name-ship').textContent = shipFile ? shipFile.name : '';
+    if (shipFile) document.getElementById('zone-ship').classList.add('has-file');
+  }
+  document.getElementById('calc-btn').disabled = ordersFiles.length === 0;
+};
+
+window.handleDrop = (ev, type) => {
+  ev.preventDefault();
+  document.getElementById(type === 'orders' ? 'zone-orders' : 'zone-ship').classList.remove('drag');
+  const files = Array.from(ev.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
+  if (!files.length) return;
+  const input = document.getElementById(type === 'orders' ? 'input-orders' : 'input-ship');
+  const dt = new DataTransfer();
+  files.forEach(f => dt.items.add(f));
+  input.files = dt.files;
+  window.handleFile(input, type);
+};
+
+// ─── Run calculation ──────────────────────────────────────────────
+window.runCalc = async () => {
+  const errEl = document.getElementById('upload-error');
+  errEl.style.display = 'none';
+  showLoading('Loading cost tables…');
+  try {
+    const [mcgCosts, productCosts, skuWeights] = await Promise.all([
+      fetch('./data/mcg_total.json').then(r => r.json()),
+      fetch('./data/product_costs.json').then(r => r.json()),
+      fetch('./data/sku_weights.json').then(r => r.json()),
+    ]);
+
+    setLoadingMsg('Parsing orders…');
+    const orderTexts = await Promise.all(ordersFiles.map(f => f.text()));
+    let orderRows = [];
+    for (const txt of orderTexts) orderRows = orderRows.concat(parseCSV(txt));
+
+    let shipCosts = new Map();
+    if (shipFile) {
+      setLoadingMsg('Parsing ShipStation…');
+      const txt = await shipFile.text();
+      shipCosts = parseShipStation(parseCSV(txt));
+    }
+
+    setLoadingMsg('Calculating gross profit…');
+    await new Promise(r => setTimeout(r, 20)); // allow UI to update
+    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights);
+    renderDashboard(allLines);
+
+    document.getElementById('upload-screen').style.display = 'none';
+    document.getElementById('dashboard').style.display = 'block';
+    const dateRange = getDateRange(allLines);
+    document.getElementById('topbar-sub').textContent =
+      `${allLines.length.toLocaleString()} line items · ${dateRange}`;
+  } catch(e) {
+    errEl.textContent = 'Error: ' + e.message;
+    errEl.style.display = 'block';
+    console.error(e);
+  }
+  hideLoading();
+};
+
+function getDateRange(lines) {
+  const dates = lines.map(l => l.date).filter(Boolean).sort();
+  if (!dates.length) return '';
+  return dates[0] === dates[dates.length-1] ? dates[0] : `${dates[0]} → ${dates[dates.length-1]}`;
+}
+
+// ─── Render dashboard ─────────────────────────────────────────────
+function renderDashboard(lines) {
+  const s = summarize(lines);
+
+  // Cards
+  document.getElementById('c-revenue').textContent = fmt(s.totalRevenue);
+  document.getElementById('c-cogs').textContent    = fmt(s.totalCogs);
+  document.getElementById('c-gp').textContent      = fmt(s.totalGp);
+  document.getElementById('c-gpm').textContent     = `GP%: ${s.gpPct.toFixed(1)}%`;
+  const totalShipCollected = Object.values(s.shipByType).reduce((a,v) => a + v.collected, 0);
+  const totalShipPaid      = Object.values(s.shipByType).reduce((a,v) => a + v.paid, 0);
+  const shipNet = totalShipCollected - totalShipPaid;
+  const shipEl  = document.getElementById('c-ship-delta');
+  shipEl.textContent = fmt(shipNet);
+  shipEl.className   = 'value ' + (shipNet >= 0 ? 'pos' : 'neg');
+
+  const orders = new Set(lines.map(l => l.orderNum)).size;
+  document.getElementById('c-orders').textContent = `${orders.toLocaleString()} orders`;
+
+  if (s.missingCost > 0) {
+    document.getElementById('c-missing-wrap').style.display = '';
+    document.getElementById('c-missing').textContent = s.missingCost;
+    document.getElementById('missing-warn').style.display = '';
+    document.getElementById('missing-warn').textContent =
+      `⚠ ${s.missingCost} line items have missing cost data (highlighted in table). Add SKU costs to products_export or mcg_total to fix.`;
+  }
+
+  renderCharts(s);
+  renderShipping(s.shipByType);
+  buildFilters(lines);
+  filterTable();
+}
+
+// ─── Charts ────────────────────────────────────────────────────────
+let chartStore = null, chartChannel = null;
+
+function renderCharts(s) {
+  const palette = ['#6ee7b7','#38bdf8','#f472b6','#fbbf24','#a78bfa','#fb923c','#34d399','#60a5fa'];
+
+  // GP by store
+  const stores = Object.entries(s.byStore)
+    .filter(([,v]) => v.gp !== 0)
+    .sort((a,b) => b[1].gp - a[1].gp);
+  if (chartStore) chartStore.destroy();
+  chartStore = new Chart(document.getElementById('chart-store'), {
+    type: 'bar',
+    data: {
+      labels: stores.map(([k]) => k.replace('Succulents Box (17381)','SB 17381')),
+      datasets: [{
+        label: 'Gross Profit',
+        data: stores.map(([,v]) => v.gp),
+        backgroundColor: palette,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#94a3b8', font:{size:10} }, grid:{color:'#1e293b'} },
+        y: { ticks: { color: '#94a3b8', font:{size:10}, callback: v => '$'+Math.round(v).toLocaleString() }, grid:{color:'#334155'} }
+      }
+    }
+  });
+
+  // Revenue by channel
+  const channels = Object.entries(s.byChannel).sort((a,b) => b[1].revenue - a[1].revenue);
+  if (chartChannel) chartChannel.destroy();
+  chartChannel = new Chart(document.getElementById('chart-channel'), {
+    type: 'doughnut',
+    data: {
+      labels: channels.map(([k]) => k || 'Unknown'),
+      datasets: [{ data: channels.map(([,v]) => v.revenue), backgroundColor: palette, borderWidth: 0 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'right', labels: { color:'#94a3b8', font:{size:11}, boxWidth:12 } },
+        tooltip: { callbacks: { label: ctx => ` $${Math.round(ctx.parsed).toLocaleString()}` }}
+      }
+    }
+  });
+}
+
+// ─── Shipping cards ────────────────────────────────────────────────
+function renderShipping(shipByType) {
+  const grid = document.getElementById('ship-grid');
+  grid.innerHTML = '';
+  for (const [type, v] of Object.entries(shipByType)) {
+    const delta = v.delta;
+    const html = `
+      <div class="ship-card">
+        <div class="type">${type}</div>
+        <div class="row"><span>Orders</span><span>${v.orders}</span></div>
+        <div class="row"><span>Collected</span><span>${fmt(v.collected)}</span></div>
+        <div class="row"><span>Paid</span><span>${fmt(v.paid)}</span></div>
+        <div class="row">
+          <span>Net</span>
+          <span class="${delta >= 0 ? 'pos':'neg'}">${fmt(delta)}</span>
+        </div>
+      </div>`;
+    grid.insertAdjacentHTML('beforeend', html);
+  }
+}
+
+// ─── Table ─────────────────────────────────────────────────────────
+function buildFilters(lines) {
+  const stores   = [...new Set(lines.map(l => l.store).filter(Boolean))].sort();
+  const channels = [...new Set(lines.map(l => l.source).filter(Boolean))].sort();
+  const storeEl   = document.getElementById('filter-store');
+  const chanEl    = document.getElementById('filter-channel');
+  storeEl.innerHTML   = '<option value="">All stores</option>'   + stores.map(s => `<option>${s}</option>`).join('');
+  chanEl.innerHTML    = '<option value="">All channels</option>' + channels.map(c => `<option>${c}</option>`).join('');
+}
+
+window.filterTable = () => {
+  const q     = document.getElementById('search').value.toLowerCase();
+  const store = document.getElementById('filter-store').value;
+  const chan   = document.getElementById('filter-channel').value;
+  const cost   = document.getElementById('filter-cost').value;
+
+  filteredLines = allLines.filter(li => {
+    if (store && li.store !== store) return false;
+    if (chan  && li.source !== chan)  return false;
+    if (cost === 'missing' && li.costSource !== 'COST MISSING') return false;
+    if (cost === 'free'    && li.isFreeShip !== 'YES')           return false;
+    if (q && !`${li.orderNum} ${li.sku} ${li.product} ${li.store}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  // Apply sort
+  filteredLines.sort((a,b) => {
+    let va = a[sortKey], vb = b[sortKey];
+    if (va === null || va === undefined) va = sortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = sortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return sortAsc ? va - vb : vb - va;
+  });
+
+  currentPage = 1;
+  document.getElementById('row-count').textContent = `${filteredLines.length.toLocaleString()} rows`;
+  renderPage();
+};
+
+window.sortBy = key => {
+  if (sortKey === key) sortAsc = !sortAsc; else { sortKey = key; sortAsc = false; }
+  document.querySelectorAll('th.sorted').forEach(t => t.classList.remove('sorted'));
+  event.currentTarget.classList.add('sorted');
+  filterTable();
+};
+
+window.changePage = dir => {
+  const max = Math.ceil(filteredLines.length / PAGE_SIZE);
+  currentPage = Math.max(1, Math.min(max, currentPage + dir));
+  renderPage();
+};
+
+function renderPage() {
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const page  = filteredLines.slice(start, start + PAGE_SIZE);
+  const total = Math.ceil(filteredLines.length / PAGE_SIZE);
+  document.getElementById('page-info').textContent = `Page ${currentPage} of ${total || 1}`;
+  document.getElementById('btn-prev').disabled = currentPage <= 1;
+  document.getElementById('btn-next').disabled = currentPage >= total;
+
+  const tbody = document.getElementById('table-body');
+  tbody.innerHTML = page.map(li => {
+    const missing = li.costSource === 'COST MISSING';
+    const rowCls  = missing ? 'style="background:rgba(248,113,113,.06)"' : '';
+    return `<tr ${rowCls}>
+      <td>${li.orderNum}</td>
+      <td>${li.date || ''}</td>
+      <td>${li.source || ''}</td>
+      <td>${li.store || ''}</td>
+      <td style="font-family:monospace">${li.sku}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${li.product}">${li.product}</td>
+      <td class="num">${li.qty}</td>
+      <td class="num">${fmt(li.lineRevenue)}</td>
+      <td class="num ${missing ? 'missing' : ''}">${missing ? '—' : fmt(li.lineCogs)}</td>
+      <td class="num ${gpClass(li.lineGp)}">${li.lineGp !== null ? fmt(li.lineGp) : '—'}</td>
+      <td class="num ${gpClass(li.lineGpPct)}">${li.lineGpPct !== null ? li.lineGpPct.toFixed(1)+'%' : '—'}</td>
+      <td class="num">${li.shipCollected !== null ? fmt(li.shipCollected) : ''}</td>
+      <td class="num">${li.shipPaid !== null ? fmt(li.shipPaid) : ''}</td>
+      <td class="num ${deltaClass(li.shipDelta)}">${li.shipDelta !== null ? fmt(li.shipDelta) : ''}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)" title="${li.shipNote||''}">
+        ${li.isFreeShip ? '<span class="badge badge-free">Free</span> ' : ''}
+        ${missing ? '<span class="badge badge-missing">No cost</span> ' : ''}
+        ${li.shipNote ? `<span style="font-size:.72rem">${li.shipNote}</span>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function fmt(n) {
+  if (n === null || n === undefined) return '—';
+  return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function gpClass(v)    { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg'; }
+function deltaClass(v) { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg'; }
+
+// ─── Auth ─────────────────────────────────────────────────────────
+window.logout = () => { window.location.href = '/__logout'; };
+
+// ─── Loading ──────────────────────────────────────────────────────
+function showLoading(msg) {
+  document.getElementById('loading').classList.add('active');
+  setLoadingMsg(msg);
+}
+function hideLoading() { document.getElementById('loading').classList.remove('active'); }
+function setLoadingMsg(m) { document.getElementById('loading-msg').textContent = m; }
+window.setLoadingMsg = setLoadingMsg;
+</script>
+</body>
+</html>
