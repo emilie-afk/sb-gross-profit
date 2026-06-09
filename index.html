@@ -257,12 +257,12 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     <!-- Summary cards -->
     <div class="section-title">Overview</div>
     <div class="cards">
-      <div class="card"><div class="label">Total Revenue</div><div class="value" id="c-revenue">—</div><div class="sub" id="c-orders">— orders</div></div>
+      <div class="card"><div class="label">Total Revenue</div><div class="value" id="c-revenue">—</div><div class="sub" id="c-revenue-sub" style="font-size:.7rem;color:var(--muted)"></div><div class="sub" id="c-orders">— orders</div></div>
       <div class="card"><div class="label">Total COGS</div><div class="value" id="c-cogs">—</div></div>
       <div class="card accent"><div class="label">Gross Profit</div><div class="value" id="c-gp">—</div><div class="sub" id="c-gpm">GP%: —</div></div>
       <div class="card"><div class="label">Shipping Collected</div><div class="value" id="c-ship-collected">—</div><div class="sub">From customers</div></div>
       <div class="card" style="grid-column:span 2"><div class="label">Shipping Paid</div><div style="display:flex;align-items:baseline;gap:16px"><div class="value" id="c-ship-paid">—</div><div class="sub" id="c-ship-net" style="font-size:.8rem">Net: —</div></div><div id="c-ship-vendor-breakdown"></div></div>
-      <div class="card warn" id="c-missing-wrap" style="display:none"><div class="label">Missing Cost</div><div class="value" id="c-missing">0</div><div class="sub">line items</div></div>
+      <div class="card warn" id="c-missing-wrap" style="display:none"><div class="label">Missing Cost</div><div class="value" id="c-missing">0</div><div class="sub">line items</div><button onclick="downloadMissingCosts()" style="margin-top:8px;padding:4px 10px;font-size:.72rem;background:transparent;border:1px solid var(--yellow);color:var(--yellow);border-radius:4px;cursor:pointer">↓ Download SKUs</button></div>
     </div>
 
     <!-- Charts -->
@@ -552,15 +552,14 @@ function renderDashboard(lines) {
   const s = summarize(lines);
 
   // Cards
-  document.getElementById('c-revenue').textContent = fmt(s.totalRevenue);
-  document.getElementById('c-cogs').textContent    = fmt(s.totalCogs);
-  document.getElementById('c-gp').textContent      = fmt(s.totalGp);
-  document.getElementById('c-gpm').textContent     = `GP%: ${s.gpPct.toFixed(1)}%`;
-  const totalShipCollected = Object.values(s.shipByType).reduce((a,v) => a + v.collected, 0);
-  const totalShipPaid      = Object.values(s.shipByType).reduce((a,v) => a + v.paid, 0);
-  const shipNet = totalShipCollected - totalShipPaid;
-  document.getElementById('c-ship-collected').textContent = fmt(totalShipCollected);
-  document.getElementById('c-ship-paid').textContent      = fmt(totalShipPaid);
+  document.getElementById('c-revenue').textContent     = fmt(s.totalRevenue);
+  document.getElementById('c-revenue-sub').textContent = `Products ${fmt(s.productRevenue)} + Ship ${fmt(s.totalShipCollected)}`;
+  document.getElementById('c-cogs').textContent        = fmt(s.totalCogs);
+  document.getElementById('c-gp').textContent          = fmt(s.totalGp);
+  document.getElementById('c-gpm').textContent         = `GP%: ${s.gpPct.toFixed(1)}%`;
+  const shipNet = s.totalShipCollected - s.totalShipPaid;
+  document.getElementById('c-ship-collected').textContent = fmt(s.totalShipCollected);
+  document.getElementById('c-ship-paid').textContent      = fmt(s.totalShipPaid);
   const netEl = document.getElementById('c-ship-net');
   netEl.textContent  = 'Net: ' + fmt(shipNet);
   netEl.style.color  = shipNet >= 0 ? 'var(--green)' : 'var(--red)';
@@ -778,6 +777,23 @@ window.newFiles = () => {
   document.getElementById('calc-btn').disabled = true;
   document.getElementById('upload-error').style.display = 'none';
   renderSavedFiles(); // re-render chips without active state
+};
+
+window.downloadMissingCosts = () => {
+  const missing = allLines.filter(l => l.costSource === 'COST MISSING');
+  const seen = new Set();
+  const rows = [['SKU','Vendor','Product']];
+  for (const l of missing) {
+    const key = l.sku + '|' + l.vendor;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push([l.sku, l.vendor, l.product]);
+  }
+  const csv = rows.map(r => r.map(v => `"${(v||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'missing_costs.csv';
+  a.click();
 };
 
 window.clearDates = () => {
