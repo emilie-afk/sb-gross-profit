@@ -139,11 +139,31 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 .badge-missing{background:rgba(248,113,113,.15);color:var(--red)}
 .badge-influencer{background:rgba(167,139,250,.2);color:#a78bfa}
 
-.view-tabs{display:flex;gap:6px;margin-bottom:12px}
+.view-tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
 .view-tab{padding:6px 16px;background:var(--surface);border:1px solid var(--border);border-radius:6px;
   color:var(--muted);font-size:.8rem;cursor:pointer;transition:all .15s}
 .view-tab.active,.view-tab:hover{border-color:var(--accent);color:var(--accent)}
 .view-tab.active{background:rgba(110,231,183,.08)}
+
+/* Low-margin expandable rows */
+.lm-order-row{cursor:pointer}
+.lm-order-row:hover td{background:rgba(99,179,237,.07)!important}
+.lm-order-row td:first-child::before{content:'▶ ';font-size:.65rem;color:var(--muted);transition:transform .15s;display:inline-block}
+.lm-order-row.open td:first-child::before{transform:rotate(90deg);content:'▶ '}
+.lm-detail-row{background:var(--surface2)!important}
+.lm-detail-row td{padding:0!important}
+.detail-subtable{width:100%;border-collapse:collapse;font-size:.78rem}
+.detail-subtable th{background:rgba(30,41,59,.9);color:var(--muted);font-weight:500;
+  padding:5px 10px;text-align:left;position:sticky;top:0}
+.detail-subtable td{padding:5px 10px;border-bottom:1px solid rgba(51,65,85,.4)}
+.lm-threshold{display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.lm-threshold label{font-size:.8rem;color:var(--muted)}
+.lm-threshold input[type=number]{
+  width:64px;background:var(--surface);border:1px solid var(--border);
+  border-radius:6px;color:var(--text);padding:4px 8px;font-size:.8rem;
+}
+.lm-threshold input[type=number]:focus{outline:none;border-color:var(--accent)}
+.lm-summary{font-size:.78rem;color:var(--muted);margin-left:auto}
 
 .pagination{display:flex;align-items:center;justify-content:space-between;margin-top:14px;flex-wrap:wrap;gap:8px}
 .pagination button{
@@ -327,8 +347,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button class="logout-btn" onclick="downloadDetailCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
     </div>
     <div class="view-tabs">
-      <button class="view-tab active" id="tab-sku" onclick="switchView('sku')">SKU View</button>
-      <button class="view-tab" id="tab-order" onclick="switchView('order')">Order View</button>
+      <button class="view-tab active" id="tab-sku"       onclick="switchView('sku')">SKU View</button>
+      <button class="view-tab"        id="tab-order"     onclick="switchView('order')">Order View</button>
+      <button class="view-tab"        id="tab-sub"       onclick="switchView('sub')">🔁 Subscriptions</button>
+      <button class="view-tab"        id="tab-lowmargin" onclick="switchView('lowmargin')">⚠️ Low Margin</button>
     </div>
 
     <!-- SKU view -->
@@ -397,6 +419,77 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button id="btn-next-ord" onclick="changeOrderPage(1)">Next →</button>
     </div>
     </div><!-- /view-order -->
+
+    <!-- Subscription view -->
+    <div id="view-sub" style="display:none">
+    <div class="table-wrap">
+      <table id="sub-table">
+        <thead>
+          <tr>
+            <th onclick="sortSubBy('orderNum')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('source')">Channel <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('sku')">SKU <span class="sort-icon">↕</span></th>
+            <th>Product</th>
+            <th onclick="sortSubBy('subMonths')" class="num">Months <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineRevenue')" class="num">Rev/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineCogs')" class="num">COGS/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineGp')" class="num">GP $/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineGpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
+            <th class="num">Ship Coll/mo</th>
+            <th onclick="sortSubBy('shipDelta')" class="num">Ship Δ/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineNetGp')" class="num">Net GP$/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineNetGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
+            <th>Store</th>
+          </tr>
+        </thead>
+        <tbody id="sub-table-body"></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev-sub" onclick="changeSubPage(-1)">← Prev</button>
+      <span class="page-info" id="page-info-sub"></span>
+      <button id="btn-next-sub" onclick="changeSubPage(1)">Next →</button>
+    </div>
+    </div><!-- /view-sub -->
+
+    <!-- Low Margin view -->
+    <div id="view-lowmargin" style="display:none">
+    <div class="lm-threshold">
+      <label>Show orders with Net GP% below</label>
+      <input type="number" id="lm-pct-threshold" value="10" min="0" max="100" step="1"
+             oninput="renderLowMarginView()">
+      <span style="font-size:.8rem;color:var(--muted)">%</span>
+      <span class="lm-summary" id="lm-summary"></span>
+      <button class="logout-btn" onclick="downloadLowMarginCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table id="lm-table">
+        <thead>
+          <tr>
+            <th onclick="sortLMBy('orderNum')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('source')">Channel <span class="sort-icon">↕</span></th>
+            <th>Type</th>
+            <th onclick="sortLMBy('lineCount')" class="num">Lines <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('revenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('cogs')" class="num">COGS <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('netGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('netGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
+            <th class="num">Ship Coll</th>
+            <th class="num">Ship Paid</th>
+            <th onclick="sortLMBy('shipDelta')" class="num">Ship Δ <span class="sort-icon">↕</span></th>
+          </tr>
+        </thead>
+        <tbody id="lm-table-body"></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev-lm" onclick="changeLMPage(-1)">← Prev</button>
+      <span class="page-info" id="page-info-lm"></span>
+      <button id="btn-next-lm" onclick="changeLMPage(1)">Next →</button>
+    </div>
+    </div><!-- /view-lowmargin -->
 
   </div><!-- /dashboard -->
 </div>
@@ -807,7 +900,9 @@ window.filterTable = () => {
   currentPage = 1;
   document.getElementById('row-count').textContent = `${filteredLines.length.toLocaleString()} rows`;
   renderPage();
-  if (currentView === 'order') renderOrderView();
+  if (currentView === 'order')     renderOrderView();
+  if (currentView === 'sub')       renderSubView();
+  if (currentView === 'lowmargin') renderLowMarginView();
 };
 
 window.sortBy = key => {
@@ -854,6 +949,7 @@ function renderPage() {
       <td class="num ${gpClass(li.lineNetGpPct)}">${li.lineNetGpPct !== null ? li.lineNetGpPct.toFixed(1)+'%' : ''}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)" title="${li.shipNote||''}">
         ${li.isInfluencerSample ? '<span class="badge badge-influencer">🎁 Influencer</span> ' : ''}
+        ${li.subMonths > 1 ? `<span class="badge" style="background:rgba(99,179,237,.15);color:#63b3ed">÷${li.subMonths}mo</span> ` : ''}
         ${li.isFreeShip ? '<span class="badge badge-free">Free</span> ' : ''}
         ${missing ? '<span class="badge badge-missing">No cost</span> ' : ''}
         ${li.shipNote ? `<span style="font-size:.72rem">${li.shipNote}</span>` : ''}
@@ -940,11 +1036,15 @@ const ORDER_PAGE_SIZE = 100;
 
 window.switchView = view => {
   currentView = view;
-  document.getElementById('view-sku').style.display   = view === 'sku'   ? '' : 'none';
-  document.getElementById('view-order').style.display = view === 'order' ? '' : 'none';
-  document.getElementById('tab-sku').classList.toggle('active',   view === 'sku');
-  document.getElementById('tab-order').classList.toggle('active', view === 'order');
-  if (view === 'order') renderOrderView();
+  document.getElementById('view-sku').style.display       = view === 'sku'       ? '' : 'none';
+  document.getElementById('view-order').style.display     = view === 'order'     ? '' : 'none';
+  document.getElementById('view-sub').style.display       = view === 'sub'       ? '' : 'none';
+  document.getElementById('view-lowmargin').style.display = view === 'lowmargin' ? '' : 'none';
+  ['sku','order','sub','lowmargin'].forEach(v =>
+    document.getElementById(`tab-${v}`).classList.toggle('active', v === view));
+  if (view === 'order')     renderOrderView();
+  if (view === 'sub')       renderSubView();
+  if (view === 'lowmargin') renderLowMarginView();
 };
 
 function computeOrderRows(lines) {
@@ -1035,6 +1135,226 @@ window.clearDates = () => {
   document.getElementById('filter-date-from').value = '';
   document.getElementById('filter-date-to').value   = '';
   filterTable();
+};
+
+// ─── Subscription View ────────────────────────────────────────────
+const SUB_PAGE_SIZE = 100;
+let subSortKey = 'date', subSortAsc = false, subPage = 1, subRows = [];
+
+window.sortSubBy = key => {
+  if (subSortKey === key) subSortAsc = !subSortAsc; else { subSortKey = key; subSortAsc = false; }
+  subPage = 1; renderSubView();
+};
+window.changeSubPage = dir => {
+  const max = Math.ceil(subRows.length / SUB_PAGE_SIZE);
+  subPage = Math.max(1, Math.min(max, subPage + dir));
+  renderSubPage();
+};
+
+function renderSubView() {
+  subRows = filteredLines.filter(l => l.subMonths > 1);
+  subRows.sort((a, b) => {
+    let va = a[subSortKey], vb = b[subSortKey];
+    if (va === null || va === undefined) va = subSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = subSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return subSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return subSortAsc ? va - vb : vb - va;
+  });
+  subPage = 1;
+  renderSubPage();
+}
+
+function renderSubPage() {
+  const start = (subPage - 1) * SUB_PAGE_SIZE;
+  const page  = subRows.slice(start, start + SUB_PAGE_SIZE);
+  const max   = Math.ceil(subRows.length / SUB_PAGE_SIZE);
+  document.getElementById('sub-table-body').innerHTML = page.map(li => {
+    const missing = li.costSource === 'COST MISSING';
+    return `<tr>
+      <td>${li.orderNum}</td>
+      <td>${li.date || ''}</td>
+      <td>${li.source || ''}</td>
+      <td style="font-size:.78rem">${li.sku}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.78rem"
+          title="${li.product}">${li.product}</td>
+      <td class="num">${li.subMonths}</td>
+      <td class="num">${fmt(li.lineRevenue)}</td>
+      <td class="num ${missing ? 'missing' : ''}">${missing ? '?' : fmt(li.lineCogs)}</td>
+      <td class="num ${gpClass(li.lineGp)}">${fmt(li.lineGp)}</td>
+      <td class="num ${gpClass(li.lineGpPct)}">${li.lineGpPct !== null ? li.lineGpPct.toFixed(1)+'%' : '—'}</td>
+      <td class="num">${li.shipCollected !== null ? fmt(li.shipCollected) : ''}</td>
+      <td class="num ${deltaClass(li.shipDelta)}">${li.shipDelta !== null ? fmt(li.shipDelta) : ''}</td>
+      <td class="num ${gpClass(li.lineNetGp)}">${li.lineNetGp !== null ? fmt(li.lineNetGp) : '—'}</td>
+      <td class="num ${gpClass(li.lineNetGpPct)}">${li.lineNetGpPct !== null ? li.lineNetGpPct.toFixed(1)+'%' : '—'}</td>
+      <td style="font-size:.72rem;color:var(--muted)">${li.store || ''}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('page-info-sub').textContent =
+    `${subRows.length} subscriptions · page ${subPage}/${Math.max(1,max)}`;
+  document.getElementById('btn-prev-sub').disabled = subPage <= 1;
+  document.getElementById('btn-next-sub').disabled = subPage >= max;
+}
+
+// ─── Low Margin View ──────────────────────────────────────────────
+const LM_PAGE_SIZE = 100;
+let lmSortKey = 'netGpPct', lmSortAsc = true, lmPage = 1, lmRows = [];
+let lmLinesByOrder = new Map();   // orderNum → [lineItems]
+let lmExpanded = new Set();       // open order rows
+
+window.sortLMBy = key => {
+  if (lmSortKey === key) lmSortAsc = !lmSortAsc; else { lmSortKey = key; lmSortAsc = true; }
+  lmPage = 1; renderLMPage();
+};
+window.changeLMPage = dir => {
+  const max = Math.ceil(lmRows.length / LM_PAGE_SIZE);
+  lmPage = Math.max(1, Math.min(max, lmPage + dir));
+  lmExpanded.clear();
+  renderLMPage();
+};
+window.toggleLMExpand = orderNum => {
+  if (lmExpanded.has(orderNum)) lmExpanded.delete(orderNum);
+  else lmExpanded.add(orderNum);
+  renderLMPage();
+};
+
+window.renderLowMarginView = function() {
+  const threshold = parseFloat(document.getElementById('lm-pct-threshold').value) ?? 10;
+
+  // Build order→lines index
+  lmLinesByOrder.clear();
+  for (const li of filteredLines) {
+    if (!lmLinesByOrder.has(li.orderNum)) lmLinesByOrder.set(li.orderNum, []);
+    lmLinesByOrder.get(li.orderNum).push(li);
+  }
+
+  // Compute order-level rows for all filteredLines, then filter to threshold
+  const allOrderRows = computeOrderRows(filteredLines);
+  lmRows = allOrderRows.filter(o => o.netGpPct !== null && o.netGpPct < threshold);
+
+  lmRows.sort((a, b) => {
+    let va = a[lmSortKey], vb = b[lmSortKey];
+    if (va === null || va === undefined) va = lmSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = lmSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return lmSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return lmSortAsc ? va - vb : vb - va;
+  });
+
+  const totalLoss = lmRows.reduce((s, o) => s + (o.netGp || 0), 0);
+  document.getElementById('lm-summary').textContent =
+    `${lmRows.length} orders · total Net GP: ${fmt(totalLoss)}`;
+
+  lmPage = 1;
+  lmExpanded.clear();
+  renderLMPage();
+};
+
+function renderLMPage() {
+  const start = (lmPage - 1) * LM_PAGE_SIZE;
+  const page  = lmRows.slice(start, start + LM_PAGE_SIZE);
+  const max   = Math.ceil(lmRows.length / LM_PAGE_SIZE);
+
+  document.getElementById('lm-table-body').innerHTML = page.map(o => {
+    const isOpen = lmExpanded.has(o.orderNum);
+    const safe   = CSS.escape ? CSS.escape(o.orderNum) : o.orderNum.replace(/[^a-zA-Z0-9]/g, '_');
+    const rowCls = `lm-order-row${isOpen ? ' open' : ''}`;
+    const lines  = lmLinesByOrder.get(o.orderNum) || [];
+
+    const detailHtml = isOpen ? `
+      <tr id="lm-detail-${safe}" class="lm-detail-row">
+        <td colspan="12" style="padding:8px 12px!important">
+          <table class="detail-subtable">
+            <thead><tr>
+              <th>SKU</th><th>Product</th>
+              <th class="num" style="text-align:right">Qty</th>
+              <th class="num" style="text-align:right">Revenue</th>
+              <th class="num" style="text-align:right">COGS</th>
+              <th class="num" style="text-align:right">GP $</th>
+              <th class="num" style="text-align:right">GP%</th>
+              <th class="num" style="text-align:right">Net GP $</th>
+              <th class="num" style="text-align:right">Net GP%</th>
+              <th>Cost source</th>
+            </tr></thead>
+            <tbody>
+              ${lines.map(li => {
+                const miss = li.costSource === 'COST MISSING';
+                return `<tr>
+                  <td style="font-size:.75rem">${li.sku}</td>
+                  <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.75rem"
+                      title="${li.product}">${li.product}</td>
+                  <td class="num" style="text-align:right">${li.qty}</td>
+                  <td class="num" style="text-align:right">${fmt(li.lineRevenue)}</td>
+                  <td class="num ${miss?'missing':''}" style="text-align:right">${miss?'?':fmt(li.lineCogs)}</td>
+                  <td class="num ${gpClass(li.lineGp)}" style="text-align:right">${fmt(li.lineGp)}</td>
+                  <td class="num ${gpClass(li.lineGpPct)}" style="text-align:right">${li.lineGpPct!==null?li.lineGpPct.toFixed(1)+'%':'—'}</td>
+                  <td class="num ${gpClass(li.lineNetGp)}" style="text-align:right">${li.lineNetGp!==null?fmt(li.lineNetGp):'—'}</td>
+                  <td class="num ${gpClass(li.lineNetGpPct)}" style="text-align:right">${li.lineNetGpPct!==null?li.lineNetGpPct.toFixed(1)+'%':'—'}</td>
+                  <td style="font-size:.72rem;color:var(--muted)">${li.costSource||''}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </td>
+      </tr>` : '';
+
+    return `<tr class="${rowCls}" onclick="toggleLMExpand('${o.orderNum.replace(/'/g,"\\'")}')">
+      <td>${o.orderNum}</td>
+      <td>${o.date || ''}</td>
+      <td>${o.source || ''}</td>
+      <td style="color:var(--muted);font-size:.72rem">${o.orderCat || ''}</td>
+      <td class="num">${o.lineCount}</td>
+      <td class="num">${fmt(o.revenue)}</td>
+      <td class="num ${o.missingCost ? 'missing' : ''}">${o.missingCost ? '~' : ''}${fmt(o.cogs)}</td>
+      <td class="num ${gpClass(o.netGp)}">${o.netGp !== null ? fmt(o.netGp) : '—'}</td>
+      <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct !== null ? o.netGpPct.toFixed(1)+'%' : '—'}</td>
+      <td class="num">${o.shipCollected !== null ? fmt(o.shipCollected) : ''}</td>
+      <td class="num">${o.shipPaid !== null ? fmt(o.shipPaid) : ''}</td>
+      <td class="num ${deltaClass(o.shipDelta)}">${o.shipDelta !== null ? fmt(o.shipDelta) : ''}</td>
+    </tr>${detailHtml}`;
+  }).join('');
+
+  document.getElementById('page-info-lm').textContent =
+    `${lmRows.length} orders · page ${lmPage}/${Math.max(1,max)}`;
+  document.getElementById('btn-prev-lm').disabled = lmPage <= 1;
+  document.getElementById('btn-next-lm').disabled = lmPage >= max;
+}
+
+window.downloadLowMarginCSV = () => {
+  if (!lmRows.length) return;
+  const threshold = document.getElementById('lm-pct-threshold').value;
+  const rows = [['Order','Date','Channel','Type','Lines','Revenue','COGS','Net GP $','Net GP %',
+                 'Ship Collected','Ship Paid','Ship Delta',
+                 '--- SKU ---','Product','Qty','Line Revenue','Line COGS','Line GP $','Line GP %',
+                 'Line Net GP $','Line Net GP %','Cost Source']];
+  for (const o of lmRows) {
+    const lines = lmLinesByOrder.get(o.orderNum) || [];
+    // First line: order summary + first SKU
+    lines.forEach((li, i) => {
+      rows.push([
+        i === 0 ? o.orderNum : '',
+        i === 0 ? (o.date || '') : '',
+        i === 0 ? (o.source || '') : '',
+        i === 0 ? (o.orderCat || '') : '',
+        i === 0 ? o.lineCount : '',
+        i === 0 ? (o.revenue ?? '') : '',
+        i === 0 ? (o.cogs ?? '') : '',
+        i === 0 ? (o.netGp ?? '') : '',
+        i === 0 ? (o.netGpPct !== null ? o.netGpPct + '%' : '') : '',
+        i === 0 ? (o.shipCollected ?? '') : '',
+        i === 0 ? (o.shipPaid ?? '') : '',
+        i === 0 ? (o.shipDelta ?? '') : '',
+        li.sku, li.product, li.qty,
+        li.lineRevenue ?? '', li.lineCogs ?? '',
+        li.lineGp ?? '', li.lineGpPct !== null ? li.lineGpPct + '%' : '',
+        li.lineNetGp ?? '', li.lineNetGpPct !== null ? li.lineNetGpPct + '%' : '',
+        li.costSource || ''
+      ]);
+    });
+  }
+  const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = `low_margin_below_${threshold}pct.csv`;
+  a.click();
 };
 
 // ─── Auth ─────────────────────────────────────────────────────────
