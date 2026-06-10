@@ -413,6 +413,30 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     orderSeen.add(orderNum);
   }
 
+  // ── Post-pass: prorate order-level shipping to every line item by revenue weight ──
+  // This makes Net GP meaningful per SKU line, not just the first line of each order.
+  const orderGroups = new Map();
+  for (let i = 0; i < lineItems.length; i++) {
+    const o = lineItems[i].orderNum;
+    if (!orderGroups.has(o)) orderGroups.set(o, []);
+    orderGroups.get(o).push(i);
+  }
+  for (const indices of orderGroups.values()) {
+    const firstLi = lineItems[indices[0]];
+    if (firstLi.shipDelta === null) continue; // no shipping data for this order
+    const totalRev = indices.reduce((sum, i) => sum + (lineItems[i].lineRevenue || 0), 0);
+    const { shipDelta } = firstLi;
+    for (const idx of indices) {
+      const li  = lineItems[idx];
+      const share = totalRev > 0 ? (li.lineRevenue || 0) / totalRev : 1 / indices.length;
+      const alloc = Math.round(shipDelta * share * 100) / 100;
+      li.lineNetGp = li.lineGp !== null
+        ? Math.round((li.lineGp + alloc) * 100) / 100 : null;
+      li.lineNetGpPct = (li.lineNetGp !== null && li.lineRevenue !== 0)
+        ? Math.round(li.lineNetGp / li.lineRevenue * 1000) / 10 : null;
+    }
+  }
+
   return lineItems;
 }
 
