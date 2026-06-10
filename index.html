@@ -235,6 +235,17 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <div class="filename" id="name-ship"></div>
         </div>
 
+        <div class="upload-zone" id="zone-costs" onclick="document.getElementById('input-costs').click()"
+             ondragover="event.preventDefault();this.classList.add('drag')"
+             ondragleave="this.classList.remove('drag')"
+             ondrop="handleDrop(event,'costs')">
+          <input type="file" id="input-costs" accept=".csv" onchange="handleFile(this,'costs')">
+          <div class="icon">💰</div>
+          <div class="label">Additional Costs CSV <span style="color:var(--muted);font-weight:400">(optional)</span></div>
+          <div class="hint">Upload filled "Download SKUs" CSV to add or override costs</div>
+          <div class="filename" id="name-costs"></div>
+        </div>
+
         <div id="upload-error" class="error-msg" style="display:none"></div>
         <button class="calc-btn" id="calc-btn" onclick="runCalc()" disabled>Calculate Gross Profit</button>
 
@@ -245,6 +256,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <div class="saved-row" id="saved-orders"></div>
           <div class="saved-label" style="margin-top:8px">ShipStation</div>
           <div class="saved-row" id="saved-ship"></div>
+          <div class="saved-label" style="margin-top:8px">Additional Costs</div>
+          <div class="saved-row" id="saved-costs"></div>
         </div>
 
       </div>
@@ -337,18 +350,19 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 </div>
 
 <script type="module">
-import { parseCSV, parseShipStation, calculate, summarize } from './js/calculator.js';
+import { parseCSV, parseShipStation, parseAdditionalCosts, calculate, summarize } from './js/calculator.js';
 
 // ─── State ────────────────────────────────────────────────────────
-let ordersFiles = [], shipFile = null;        // File objects from <input>
-let savedOrdersTexts = null, savedShipText = null;  // texts from saved selection
+let ordersFiles = [], shipFile = null, costsFile = null;
+let savedOrdersTexts = null, savedShipText = null, savedCostsText = null;
+let selectedSavedCosts = null;
 let allLines = [], filteredLines = [], sortKey = 'date', sortAsc = false;
 let currentPage = 1;
 const PAGE_SIZE = 100;
 
 // ─── localStorage helpers ─────────────────────────────────────────
 const LS_KEY = 'gp_saved_files';
-const MAX_ORDERS = 8, MAX_SHIP = 4;
+const MAX_ORDERS = 8, MAX_SHIP = 4, MAX_COSTS = 2;
 
 function lsLoad() {
   try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { return []; }
@@ -360,13 +374,12 @@ function lsSave(arr) {
 }
 function saveFilesToLS(name, type, text) {
   let arr = lsLoad();
-  // Deduplicate by name+type
   arr = arr.filter(f => !(f.name === name && f.type === type));
   arr.push({ id: Date.now(), name, type, savedAt: new Date().toLocaleDateString(), text });
-  // Trim to max
   const orders = arr.filter(f => f.type === 'orders').slice(-MAX_ORDERS);
   const ship   = arr.filter(f => f.type === 'ship').slice(-MAX_SHIP);
-  lsSave([...orders, ...ship]);
+  const costs  = arr.filter(f => f.type === 'costs').slice(-MAX_COSTS);
+  lsSave([...orders, ...ship, ...costs]);
 }
 function deleteFromLS(id) {
   lsSave(lsLoad().filter(f => f.id !== id));
@@ -376,7 +389,7 @@ function deleteFromLS(id) {
 // ─── Render saved file chips ──────────────────────────────────────
 function renderSavedFiles() {
   const all = lsLoad();
-  ['orders','ship'].forEach(type => {
+  ['orders','ship','costs'].forEach(type => {
     const el = document.getElementById('saved-' + type);
     const files = all.filter(f => f.type === type);
     if (!files.length) {
@@ -408,7 +421,6 @@ window.selectSaved = (id, type) => {
       selectedSavedOrders.add(id);
       document.getElementById('chip-' + id)?.classList.add('active');
     }
-    // Collect all selected saved orders texts
     savedOrdersTexts = [...selectedSavedOrders].map(sid => all.find(f => f.id === sid)?.text).filter(Boolean);
     const names = [...selectedSavedOrders].map(sid => all.find(f => f.id === sid)?.name).filter(Boolean);
     if (savedOrdersTexts.length) {
@@ -419,7 +431,7 @@ window.selectSaved = (id, type) => {
       document.getElementById('name-orders').textContent = '';
       document.getElementById('zone-orders').classList.remove('has-file');
     }
-  } else {
+  } else if (type === 'ship') {
     if (selectedSavedShip === id) {
       selectedSavedShip = null;
       document.getElementById('chip-' + id)?.classList.remove('active');
@@ -434,6 +446,21 @@ window.selectSaved = (id, type) => {
       document.getElementById('name-ship').textContent = file.name;
       document.getElementById('zone-ship').classList.add('has-file');
     }
+  } else if (type === 'costs') {
+    if (selectedSavedCosts === id) {
+      selectedSavedCosts = null;
+      document.getElementById('chip-' + id)?.classList.remove('active');
+      savedCostsText = null;
+      document.getElementById('name-costs').textContent = '';
+      document.getElementById('zone-costs').classList.remove('has-file');
+    } else {
+      if (selectedSavedCosts) document.getElementById('chip-' + selectedSavedCosts)?.classList.remove('active');
+      selectedSavedCosts = id;
+      document.getElementById('chip-' + id)?.classList.add('active');
+      savedCostsText = file.text;
+      document.getElementById('name-costs').textContent = file.name;
+      document.getElementById('zone-costs').classList.add('has-file');
+    }
   }
   document.getElementById('calc-btn').disabled =
     ordersFiles.length === 0 && (!savedOrdersTexts || savedOrdersTexts.length === 0);
@@ -447,6 +474,8 @@ renderSavedFiles();
   all.filter(f => f.type === 'orders').forEach(f => selectSaved(f.id, 'orders'));
   const ships = all.filter(f => f.type === 'ship');
   if (ships.length) selectSaved(ships[ships.length - 1].id, 'ship');
+  const costsArr = all.filter(f => f.type === 'costs');
+  if (costsArr.length) selectSaved(costsArr[costsArr.length - 1].id, 'costs');
 })();
 
 // ─── File handling ────────────────────────────────────────────────
@@ -456,19 +485,27 @@ window.handleFile = async (input, type) => {
     document.getElementById('name-orders').textContent =
       ordersFiles.map(f => f.name).join(', ');
     document.getElementById('zone-orders').classList.add('has-file');
-    // Save each file to localStorage
     for (const f of ordersFiles) {
       const text = await f.text();
       saveFilesToLS(f.name, 'orders', text);
     }
     renderSavedFiles();
-  } else {
+  } else if (type === 'ship') {
     shipFile = input.files[0] || null;
     document.getElementById('name-ship').textContent = shipFile ? shipFile.name : '';
     if (shipFile) {
       document.getElementById('zone-ship').classList.add('has-file');
       const text = await shipFile.text();
       saveFilesToLS(shipFile.name, 'ship', text);
+      renderSavedFiles();
+    }
+  } else if (type === 'costs') {
+    costsFile = input.files[0] || null;
+    document.getElementById('name-costs').textContent = costsFile ? costsFile.name : '';
+    if (costsFile) {
+      document.getElementById('zone-costs').classList.add('has-file');
+      const text = await costsFile.text();
+      saveFilesToLS(costsFile.name, 'costs', text);
       renderSavedFiles();
     }
   }
@@ -478,10 +515,12 @@ window.handleFile = async (input, type) => {
 
 window.handleDrop = (ev, type) => {
   ev.preventDefault();
-  document.getElementById(type === 'orders' ? 'zone-orders' : 'zone-ship').classList.remove('drag');
+  const zoneId = type === 'orders' ? 'zone-orders' : type === 'ship' ? 'zone-ship' : 'zone-costs';
+  document.getElementById(zoneId).classList.remove('drag');
   const files = Array.from(ev.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
   if (!files.length) return;
-  const input = document.getElementById(type === 'orders' ? 'input-orders' : 'input-ship');
+  const inputId = type === 'orders' ? 'input-orders' : type === 'ship' ? 'input-ship' : 'input-costs';
+  const input = document.getElementById(inputId);
   const dt = new DataTransfer();
   files.forEach(f => dt.items.add(f));
   input.files = dt.files;
@@ -494,14 +533,23 @@ window.runCalc = async () => {
   errEl.style.display = 'none';
   showLoading('Loading cost tables…');
   try {
-    const [mcgCosts, productCosts, skuWeights] = await Promise.all([
+    const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp] = await Promise.all([
       fetch('./data/mcg_total.json').then(r => r.json()),
       fetch('./data/product_costs.json').then(r => r.json()),
       fetch('./data/sku_weights.json').then(r => r.json()),
+      fetch('./data/sb_costs.json').then(r => r.json()).catch(() => ({})),
+      fetch('./data/hp_supplement.json').then(r => r.json()).catch(() => ({})),
     ]);
 
+    // Build additionalCosts: baked-in Shopify export costs + any user-uploaded overrides
+    let additionalCosts = { ...hpSupp, ...sbCosts };
+    const costsText = costsFile ? await costsFile.text() : savedCostsText;
+    if (costsText) {
+      const uploaded = parseAdditionalCosts(parseCSV(costsText));
+      additionalCosts = { ...additionalCosts, ...uploaded };
+    }
+
     setLoadingMsg('Parsing orders…');
-    // Use freshly uploaded files if present, otherwise fall back to saved selection
     const orderTexts = ordersFiles.length
       ? await Promise.all(ordersFiles.map(f => f.text()))
       : (savedOrdersTexts || []);
@@ -517,8 +565,8 @@ window.runCalc = async () => {
     }
 
     setLoadingMsg('Calculating gross profit…');
-    await new Promise(r => setTimeout(r, 20)); // allow UI to update
-    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights);
+    await new Promise(r => setTimeout(r, 20));
+    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts);
     renderDashboard(allLines);
 
     document.getElementById('upload-screen').style.display = 'none';
@@ -767,13 +815,15 @@ window.newFiles = () => {
   document.getElementById('upload-screen').style.display = '';
   document.getElementById('btn-new-files').style.display = 'none';
   // Reset file inputs and saved selections
-  ordersFiles = []; shipFile = null;
-  savedOrdersTexts = null; savedShipText = null;
-  selectedSavedOrders = new Set(); selectedSavedShip = null;
+  ordersFiles = []; shipFile = null; costsFile = null;
+  savedOrdersTexts = null; savedShipText = null; savedCostsText = null;
+  selectedSavedOrders = new Set(); selectedSavedShip = null; selectedSavedCosts = null;
   document.getElementById('name-orders').textContent = '';
   document.getElementById('name-ship').textContent = '';
+  document.getElementById('name-costs').textContent = '';
   document.getElementById('zone-orders').classList.remove('has-file');
   document.getElementById('zone-ship').classList.remove('has-file');
+  document.getElementById('zone-costs').classList.remove('has-file');
   document.getElementById('calc-btn').disabled = true;
   document.getElementById('upload-error').style.display = 'none';
   renderSavedFiles(); // re-render chips without active state

@@ -5,16 +5,22 @@ Runs on every Netlify deploy. Fetches cost data from external sources
 and writes JSON files to data/ so the dashboard always has fresh costs.
 
 Auto-fetched on every deploy:
-  MCG            → Google Sheets (MCG Total tab)
-  Air Plant Shop → Google Sheets
-  Live to Give   → Google Sheets
+  MCG            → Google Sheets (URL in MCG_SHEET_URL env var)
+  Air Plant Shop → Google Sheets (URL in AS_SHEET_URL env var)
+  Live to Give   → Google Sheets (URL in L2G_SHEET_URL env var)
   HP Dropship    → Google Sheet synced daily by Make.com "HP Dropship Cost Sync" scenario
-                   Sheet ID: 14uVabyL8w2QgUPYLKN7XUuF5i4qxWp3IsUJCViK3zv8
+                   URL in HP_SHEET_URL env var
                    Columns: SKU | Cost | WeightLb
                    Fallback: PRODUCT_COSTS_JSON1/2 + SKU_WEIGHTS_JSON env vars
 
-Required Netlify env var : SITE_PASSWORD
-HP fallback env vars     : PRODUCT_COSTS_JSON1, PRODUCT_COSTS_JSON2, SKU_WEIGHTS_JSON
+Required Netlify env vars:
+  SITE_PASSWORD   — dashboard login password
+  MCG_SHEET_URL   — MCG Total sheet export URL
+  AS_SHEET_URL    — Air Plant Shop sheet export URL
+  L2G_SHEET_URL   — Live to Give sheet export URL
+  HP_SHEET_URL    — HP Dropship sheet export URL
+HP fallback env vars (only if HP_SHEET_URL not set):
+  PRODUCT_COSTS_JSON1, PRODUCT_COSTS_JSON2, SKU_WEIGHTS_JSON
 """
 
 import os, json, csv, io, urllib.request
@@ -53,50 +59,53 @@ def write_json(filename, data):
 # ── 1. MCG ────────────────────────────────────────────────────────────────────
 print("\n[MCG]")
 mcg_costs = {}
-rows = fetch_csv(
-    'https://docs.google.com/spreadsheets/d/1PfIpGJyUCL0q7GwRetjT6YjRQQy_VDkUmZZ6o73Pxr0/export?format=csv&gid=1577209201',
-    'MCG Total sheet'
-)
-if rows:
-    for row in rows:
-        sku  = row.get('SKU', '').strip().upper()
-        cost = clean_money(row.get('Cost_Per_Item', ''))
-        if sku and cost and cost > 0:
-            mcg_costs[sku] = cost
-    print(f"  → {len(mcg_costs)} MCG SKUs")
+mcg_url = os.environ.get('MCG_SHEET_URL')
+if mcg_url:
+    rows = fetch_csv(mcg_url, 'MCG Total sheet')
+    if rows:
+        for row in rows:
+            sku  = row.get('SKU', '').strip().upper()
+            cost = clean_money(row.get('Cost Per Item', '') or row.get('Cost_Per_Item', ''))
+            if sku and cost and cost > 0:
+                mcg_costs[sku] = cost
+        print(f"  → {len(mcg_costs)} MCG SKUs")
+else:
+    print("  ✗ MCG_SHEET_URL not set — skipping")
 
 
 # ── 2. Air Plant Shop ─────────────────────────────────────────────────────────
 print("\n[Air Plant Shop]")
 as_costs = {}
-rows = fetch_csv(
-    'https://docs.google.com/spreadsheets/d/1jpwqcSxBVrv2gZQBelMy6E7SxXkQtp1ekWSuaiRtECY/export?format=csv&gid=994235120',
-    'Air Plant Shop sheet'
-)
-if rows:
-    for row in rows:
-        # The sheet header is "SKU " (trailing space) — handle both
-        sku  = (row.get('SKU ', '') or row.get('SKU', '')).strip().upper()
-        cost = clean_money(row.get('Fullfilled Price', ''))
-        if sku and cost and cost > 0:
-            as_costs[sku] = cost
-    print(f"  → {len(as_costs)} Air Plant Shop SKUs")
+as_url = os.environ.get('AS_SHEET_URL')
+if as_url:
+    rows = fetch_csv(as_url, 'Air Plant Shop sheet')
+    if rows:
+        for row in rows:
+            # The sheet header is "SKU " (trailing space) — handle both
+            sku  = (row.get('SKU ', '') or row.get('SKU', '')).strip().upper()
+            cost = clean_money(row.get('Fullfilled Price', ''))
+            if sku and cost and cost > 0:
+                as_costs[sku] = cost
+        print(f"  → {len(as_costs)} Air Plant Shop SKUs")
+else:
+    print("  ✗ AS_SHEET_URL not set — skipping")
 
 
 # ── 3. Live to Give ───────────────────────────────────────────────────────────
 print("\n[Live to Give]")
 l2g_costs = {}
-rows = fetch_csv(
-    'https://docs.google.com/spreadsheets/d/1jpwqcSxBVrv2gZQBelMy6E7SxXkQtp1ekWSuaiRtECY/export?format=csv&gid=1872945984',
-    'Live to Give sheet'
-)
-if rows:
-    for row in rows:
-        sku  = row.get('SKUs', '').strip().upper()
-        cost = clean_money(row.get('Dropship Price (60% of retail price)', ''))
-        if sku and cost and cost > 0:
-            l2g_costs[sku] = cost
-    print(f"  → {len(l2g_costs)} Live to Give SKUs")
+l2g_url = os.environ.get('L2G_SHEET_URL')
+if l2g_url:
+    rows = fetch_csv(l2g_url, 'Live to Give sheet')
+    if rows:
+        for row in rows:
+            sku  = row.get('SKUs', '').strip().upper()
+            cost = clean_money(row.get('Dropship Price (60% of retail price)', ''))
+            if sku and cost and cost > 0:
+                l2g_costs[sku] = cost
+        print(f"  → {len(l2g_costs)} Live to Give SKUs")
+else:
+    print("  ✗ L2G_SHEET_URL not set — skipping")
 
 
 # ── 4. HP Dropship (Google Sheet synced daily by Make.com) ────────────────────
@@ -104,23 +113,24 @@ print("\n[HP Dropship]")
 hp_costs    = {}
 sku_weights = {}
 
-# Make.com scenario "HP Dropship Cost Sync" writes SKU/Cost/WeightLb here daily.
-# The sheet appends rows each run; later rows overwrite earlier ones in the dict,
-# so the most recent cost always wins.
-rows = fetch_csv(
-    'https://docs.google.com/spreadsheets/d/14uVabyL8w2QgUPYLKN7XUuF5i4qxWp3IsUJCViK3zv8/export?format=csv&gid=0',
-    'HP Dropship sheet'
-)
-if rows:
-    for row in rows:
-        sku    = row.get('SKU', '').strip().upper()
-        cost   = clean_money(row.get('Cost', ''))
-        weight = clean_money(row.get('WeightLb', ''))
-        if sku and cost and cost > 0:
-            hp_costs[sku] = cost
-        if sku and weight and weight > 0:
-            sku_weights[sku] = weight
-    print(f"  → {len(hp_costs)} HP cost SKUs, {len(sku_weights)} weight SKUs")
+hp_url = os.environ.get('HP_SHEET_URL')
+if hp_url:
+    # Make.com scenario "HP Dropship Cost Sync" writes SKU/Cost/WeightLb here daily.
+    # The sheet appends rows each run; later rows overwrite earlier ones in the dict,
+    # so the most recent cost always wins.
+    rows = fetch_csv(hp_url, 'HP Dropship sheet')
+    if rows:
+        for row in rows:
+            sku    = row.get('SKU', '').strip().upper()
+            cost   = clean_money(row.get('Cost', ''))
+            weight = clean_money(row.get('WeightLb', ''))
+            if sku and cost and cost > 0:
+                hp_costs[sku] = cost
+            if sku and weight and weight > 0:
+                sku_weights[sku] = weight
+        print(f"  → {len(hp_costs)} HP cost SKUs, {len(sku_weights)} weight SKUs")
+else:
+    print("  ✗ HP_SHEET_URL not set — trying env var fallback")
 
 if not hp_costs:
     # Fallback: env vars (paste JSON from old update_costs.py output)
@@ -131,7 +141,50 @@ if not hp_costs:
     print(f"  → {len(hp_costs)} HP SKUs, {len(sku_weights)} weight SKUs (env var fallback)")
 
 
-# ── 5. Merge and write ────────────────────────────────────────────────────────
+# ── 5. Shopify product exports (optional — only regenerates JSONs if CSVs present) ─
+# sb_costs.json and hp_supplement.json are pre-generated from Shopify product exports.
+# If the CSV files are present (e.g. local run), regenerate them. Otherwise keep
+# the committed JSON files intact so Netlify always has them.
+print("\n[Shopify Product Exports]")
+import glob
+
+export_files = sorted(glob.glob(os.path.join(DATA_DIR, 'products_export*.csv')))
+
+if export_files:
+    sb_costs = {}
+    hp_suppl = {}
+    print(f"  Found {len(export_files)} export file(s) — regenerating…")
+    for export_path in export_files:
+        current_vendor = ''
+        try:
+            with open(export_path, encoding='utf-8-sig') as f:
+                for row in csv.DictReader(f):
+                    v = (row.get('Vendor') or '').strip()
+                    if v:
+                        current_vendor = v
+                    sku  = (row.get('Variant SKU') or '').strip().upper()
+                    cost = clean_money(row.get('Cost per item', ''))
+                    if sku and cost and cost > 0:
+                        if current_vendor == 'Succulents Box':
+                            sb_costs[sku] = cost
+                        elif current_vendor in ('House Plant Dropship', 'House Plant Shop', 'House Plant Wholesale'):
+                            hp_suppl[sku] = cost
+            print(f"  ✓ {os.path.basename(export_path)}")
+        except Exception as e:
+            print(f"  ✗ {os.path.basename(export_path)}: {e}")
+    write_json('sb_costs.json',      sb_costs)
+    write_json('hp_supplement.json', hp_suppl)
+else:
+    # No CSVs — load from pre-committed JSONs (do not overwrite)
+    sb_path  = os.path.join(DATA_DIR, 'sb_costs.json')
+    hp_path  = os.path.join(DATA_DIR, 'hp_supplement.json')
+    sb_costs = json.load(open(sb_path)) if os.path.exists(sb_path) else {}
+    hp_suppl = json.load(open(hp_path)) if os.path.exists(hp_path) else {}
+    print(f"  No CSVs found — using committed sb_costs.json ({len(sb_costs)} SKUs) "
+          f"and hp_supplement.json ({len(hp_suppl)} SKUs)")
+
+
+# ── 6. Merge and write ────────────────────────────────────────────────────────
 # AS and L2G override HP if there's any SKU overlap; MCG is always separate
 product_costs = {**hp_costs, **as_costs, **l2g_costs}
 
@@ -139,5 +192,7 @@ print("\nWriting data files...")
 write_json('mcg_total.json',     mcg_costs)
 write_json('product_costs.json', product_costs)
 write_json('sku_weights.json',   sku_weights)
+# sb_costs.json and hp_supplement.json written above (or kept from repo)
 
-print(f"\nBuild complete — {len(mcg_costs) + len(product_costs)} total SKUs.")
+total = len(mcg_costs) + len(product_costs) + len(sb_costs) + len(hp_suppl)
+print(f"\nBuild complete — {total} total SKUs across all sources.")
