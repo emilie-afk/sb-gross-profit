@@ -137,6 +137,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 }
 .badge-free{background:rgba(251,191,36,.15);color:var(--yellow)}
 .badge-missing{background:rgba(248,113,113,.15);color:var(--red)}
+.badge-influencer{background:rgba(167,139,250,.2);color:#a78bfa}
 
 .view-tabs{display:flex;gap:6px;margin-bottom:12px}
 .view-tab{padding:6px 16px;background:var(--surface);border:1px solid var(--border);border-radius:6px;
@@ -313,6 +314,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <option value="missing">Plants – no cost</option>
         <option value="free">Free shipping</option>
         <option value="noship">No ship cost</option>
+        <option value="influencer">Influencer samples</option>
       </select>
     </div>
     <div class="table-controls" style="margin-top:8px">
@@ -782,10 +784,11 @@ window.filterTable = () => {
   filteredLines = allLines.filter(li => {
     if (store && li.store !== store) return false;
     if (chan  && li.source !== chan)  return false;
-    if (cost === 'missing' && li.costSource !== 'COST MISSING')      return false;
-    if (cost === 'free'    && li.isFreeShip !== 'YES')               return false;
-    if (cost === 'noship'  && li.shipCollected === null)             return false;
-    if (cost === 'noship'  && li.shipPaid !== null)                  return false;
+    if (cost === 'missing'    && li.costSource !== 'COST MISSING')    return false;
+    if (cost === 'free'       && li.isFreeShip !== 'YES')            return false;
+    if (cost === 'noship'     && li.shipCollected === null)          return false;
+    if (cost === 'noship'     && li.shipPaid !== null)               return false;
+    if (cost === 'influencer' && !li.isInfluencerSample)            return false;
     if (dateFrom && li.date && li.date < dateFrom) return false;
     if (dateTo   && li.date && li.date > dateTo)   return false;
     if (q && !`${li.orderNum} ${li.sku} ${li.product} ${li.store}`.toLowerCase().includes(q)) return false;
@@ -850,6 +853,7 @@ function renderPage() {
       <td class="num ${gpClass(li.lineNetGp)}">${li.lineNetGp !== null ? fmt(li.lineNetGp) : ''}</td>
       <td class="num ${gpClass(li.lineNetGpPct)}">${li.lineNetGpPct !== null ? li.lineNetGpPct.toFixed(1)+'%' : ''}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)" title="${li.shipNote||''}">
+        ${li.isInfluencerSample ? '<span class="badge badge-influencer">🎁 Influencer</span> ' : ''}
         ${li.isFreeShip ? '<span class="badge badge-free">Free</span> ' : ''}
         ${missing ? '<span class="badge badge-missing">No cost</span> ' : ''}
         ${li.shipNote ? `<span style="font-size:.72rem">${li.shipNote}</span>` : ''}
