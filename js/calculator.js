@@ -51,6 +51,20 @@ const LIVE_TO_GIVE_PATTERNS = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+// For SUB/GSUB subscription SKUs, return the number of months so revenue,
+// COGS, and shipping can be normalized to per-delivery figures.
+// e.g. SUB5-1-12 → 12,  GSUB4-4-3 → 3,  SUB2-3-6 → 6
+// Non-subscription SKUs return 1 (no division needed).
+function getSubMonths(sku) {
+  const s = (sku || '').toUpperCase();
+  if (!s.startsWith('SUB') && !s.startsWith('GSUB')) return 1;
+  const parts = s.split('-');
+  const nums = parts.map(p => parseInt(p, 10)).filter(n => !isNaN(n) && n >= 1 && n <= 24);
+  if (!nums.length) return 1;
+  // The last numeric segment is the months count
+  return nums[nums.length - 1];
+}
+
 // Normalize Shopify "Source name" values to human-readable channel labels.
 // Sellbrite imports Amazon/eBay/Etsy/Walmart orders via the Shopify sales channel.
 function normalizeChannel(rawSource) {
@@ -328,11 +342,13 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const discCode    = (row['Discount Code'] || '').toLowerCase();
     const tags        = (row['Tags'] || '').toLowerCase();
     const sourceName  = normalizeChannel(row['Source name'] || row['Source'] || '').toLowerCase();
+    const noteAttrPre = (row['Note Attributes'] || row['Note attributes'] || '').toLowerCase();
     if (
       discCode.includes('sample') || discCode.includes('influencer') ||
       tags.includes('sample')     || tags.includes('influencer') ||
+      noteAttrPre.includes('free sample') ||               // Sellbrite: "Free sample: $28.86"
       (sourceName.includes('tiktok') && rawTotal === 0) ||
-      (rawTotal === 0 && rawSubtotal > 0)   // fully-discounted order (influencer gift / free sample)
+      (rawTotal === 0 && rawSubtotal > 0)
     ) {
       influencerOrders.add(name);
     }
@@ -363,13 +379,22 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
 
     const vendor   = (row['Vendor'] || '').trim();
     const product  = (row['Lineitem name'] || '').trim().slice(0, 100);
-    const source   = normalizeChannel(row['Source name'] || row['Source'] || '');
+    // Note Attributes column contains "Channel: amazon", "Channel: Facebook" etc.
+    // for orders imported via Sellbrite. Use that as the source of truth for channel.
+    const rawSrc   = row['Source name'] || row['Source'] || '';
+    const noteAttr = row['Note Attributes'] || row['Note attributes'] || '';
+    const chanMatch   = noteAttr.match(/Channel:\s*([^\n,;|]+)/i);
+    const noteChannel = chanMatch ? chanMatch[1].trim() : '';
+    const source      = normalizeChannel(noteChannel || rawSrc);
     const date     = (row['Created at'] || '').trim().slice(0, 10);
     const qty      = parseInt(row['Lineitem quantity'] || '1') || 1;
     const unitPrice     = cleanMoney(row['Lineitem price']) || 0;
     const lineDiscount  = cleanMoney(row['Lineitem discount']) || 0;
     const subtotal      = cleanMoney(row['Subtotal']) || 0;
-    const custShipping  = cleanMoney(row['Shipping']) || 0;
+    // Subscription SKUs charge shipping for ALL months upfront (e.g. SUB5-1-12 → 12×$6.99=$83.88).
+    // Divide by months so we compare per-delivery shipping against ShipStation's per-shipment rate.
+    const subMonths     = getSubMonths(sku);
+    const custShipping  = Math.round((cleanMoney(row['Shipping']) || 0) / subMonths * 100) / 100;
     const store         = identifyStore(sku, vendor);
     const orderCat      = getOrderCategory(orderNum);
     const isFirstRow    = !orderSeen.has(orderNum);
@@ -383,11 +408,14 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     // Influencer/sample gifts: order Total=$0 even though unit price > 0.
     // The discount is applied at the order level (not Lineitem discount), so we
     // must force lineRevenue to $0 here rather than trusting unitPrice×qty.
+    // Subscription SKUs: divide by subMonths so all figures are per-delivery.
     const lineRevenue = isInfluencerSample
       ? 0
-      : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
+      : Math.round((unitPrice * qty - lineDiscount) / subMonths * 100) / 100;
     const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product);
-    const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
+    // getCost() for SUB/GSUB returns total cost for all months (plants×months×$3).
+    // Divide by subMonths to get per-delivery COGS, matching the per-delivery revenue.
+    const lineCogs = unitCost !== null ? Math.round(unitCost * qty / subMonths * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
     const lineGpPct = (lineGp !== null && lineRevenue !== 0)
       ? Math.round(lineGp / lineRevenue * 1000) / 10 : null;
@@ -459,7 +487,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
       lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
-      isInfluencerSample,
+      isInfluencerSample, subMonths,
     });
 
     orderSeen.add(orderNum);
