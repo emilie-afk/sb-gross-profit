@@ -15,6 +15,7 @@ const MCG_TIER = {
   'faire_pack': 1.15,  // Faire Pack 2" (64-pack)
   'faire_2':    3.00,  // Faire Ala Carte 2"
   'faire_4':    5.00,  // Faire Ala Carte 4"
+  'pack':       2.00,  // Rack/Pack (RAKN/RAKZ/RAJZ) — $2/plant × count from SKU
 };
 
 const MCG_PREFIXES = [
@@ -105,6 +106,18 @@ function mcgTierCost(sku, mcgCosts) {
                                                             return [MCG_TIER['2inch'],   'MCG tier (2")'];
   // 4" base
   if (['S3','C3','SX','CX','S1'].some(p=>s.startsWith(p))) return [MCG_TIER['4inch'],   'MCG tier (4")'];
+  // Rack/Pack: RAKN/RAKZ/RAJZ — $2/plant × count (last numeric segment of SKU)
+  // e.g. RAKN2918-6 → 6 plants → $12
+  if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ')) {
+    const parts = s.split('-');
+    const count = parseInt(parts[parts.length - 1], 10);
+    if (count >= 6 && count <= 500) {
+      const total = Math.round(MCG_TIER.pack * count * 100) / 100;
+      return [total, `MCG tier (Pack ${count}×$${MCG_TIER.pack})`];
+    }
+    // count < 6: suffix is a legacy/invalid variant ID — SKU doesn't exist, skip it
+    return [null, null];
+  }
   return [null, null];
 }
 
