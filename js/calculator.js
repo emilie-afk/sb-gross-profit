@@ -26,6 +26,7 @@ const MCG_PREFIXES = [
   '1114','1237','1253','1264','1311','1313','1340','BD-','4X-','E1031',
   'SUB','GSUB',
   'TAKM','XAZZ',
+  'JN',
 ];
 
 const HP_SHIP_RATES = [
@@ -144,6 +145,11 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     }
     return [Math.round(total * 100) / 100, 'Bundle (' + labels.join(' + ') + ')'];
   }
+
+  // 0. Hard overrides — these take priority over the MCG Total sheet
+  // Random/assorted 2" MCG succulents (JN prefix, no size prefix like S2/C2)
+  // These are bulk-assorted plants at $2/plant, not the specific-species $4 tier
+  if (/^JN\d/i.test(key)) return [2.00, 'MCG tier (Random 2" $2)'];
 
   // 1. MCG Total sheet has the exact cost — always wins
   if (mcgCosts[key] !== undefined)     return [mcgCosts[key],     'MCG Total sheet'];
@@ -293,6 +299,23 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     if (ship !== null) orderShipping.set(name, ship);
   }
 
+  // ── Detect influencer/sample orders (TikTok free samples gifted to creators) ──
+  const influencerOrders = new Set();
+  for (const row of orderRows) {
+    const name        = (row['Name'] || '').trim();
+    const rawTotal    = cleanMoney(row['Total']) || 0;
+    const discCode    = (row['Discount Code'] || '').toLowerCase();
+    const tags        = (row['Tags'] || '').toLowerCase();
+    const sourceName  = (row['Source name'] || row['Source'] || '').toLowerCase();
+    if (
+      discCode.includes('sample') || discCode.includes('influencer') ||
+      tags.includes('sample')     || tags.includes('influencer') ||
+      (sourceName.includes('tiktok') && rawTotal === 0)
+    ) {
+      influencerOrders.add(name);
+    }
+  }
+
   function getOrderCategory(orderNum) {
     const stores = orderStores.get(orderNum) || new Set();
     const hasHp    = [...stores].some(s => HP_VENDORS.has(s) || s === 'House Plant Dropship');
@@ -402,12 +425,15 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const lineNetGpPct = (lineNetGp !== null && lineRevenue !== 0)
       ? Math.round(lineNetGp / lineRevenue * 1000) / 10 : null;
 
+    const isInfluencerSample = influencerOrders.has(orderNum);
+
     lineItems.push({
       orderNum, date, source, orderCat: isFirstRow ? orderCat : null,
       store, vendor, sku, product, qty,
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
       lineNetGp, lineNetGpPct,
-      shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote
+      shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
+      isInfluencerSample,
     });
 
     orderSeen.add(orderNum);
