@@ -407,16 +407,14 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const orderTax    = isFirstRow ? (cleanMoney(row['Taxes']) || 0) : 0;
     const orderTotal  = isFirstRow ? Math.round(((cleanMoney(row['Total']) || 0) - orderTax) * 100) / 100 : 0;
     const isInfluencerSample = influencerOrders.has(orderNum);
-    // Influencer/sample gifts: order Total=$0 even though unit price > 0.
-    // The discount is applied at the order level (not Lineitem discount), so we
-    // must force lineRevenue to $0 here rather than trusting unitPrice×qty.
-    // Subscription SKUs: divide by subMonths so all figures are per-delivery.
+    // Influencer/sample gifts: force revenue to $0 (order-level discount not in Lineitem discount).
+    // Subscription SKUs: keep FULL pre-collected revenue (what the customer actually paid).
     const lineRevenue = isInfluencerSample
       ? 0
-      : Math.round((unitPrice * qty - lineDiscount) / subMonths * 100) / 100;
+      : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
     const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product);
-    // getCost() returns per-delivery cost for SUB/GSUB (either from MCG sheet = $3/plant/mo,
-    // or from mcgTierCost which now also returns per-delivery). No further division needed.
+    // getCost() returns per-delivery cost for SUB/GSUB ($3/plant/mo).
+    // Use first delivery only — future months have no matching revenue in this view.
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
     const lineGpPct = (lineGp !== null && lineRevenue !== 0)
