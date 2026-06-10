@@ -304,7 +304,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <select class="filter-select" id="filter-channel" onchange="filterTable()"><option value="">All channels</option></select>
       <select class="filter-select" id="filter-cost" onchange="filterTable()">
         <option value="">All cost status</option>
-        <option value="missing">Missing cost only</option>
+        <option value="missing">Plants – no cost</option>
         <option value="free">Free shipping</option>
         <option value="noship">No ship cost</option>
       </select>
@@ -336,6 +336,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <th class="num">Ship Collected</th>
             <th class="num">Ship Paid</th>
             <th onclick="sortBy('shipDelta')" class="num">Ship Δ <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('lineNetGp')" class="num" title="GP after shipping profit/loss">Net GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortBy('lineNetGpPct')" class="num" title="Net GP as % of revenue">Net GP% <span class="sort-icon">↕</span></th>
             <th>Notes</th>
           </tr>
         </thead>
@@ -535,12 +537,13 @@ window.runCalc = async () => {
   errEl.style.display = 'none';
   showLoading('Loading cost tables…');
   try {
-    const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp] = await Promise.all([
+    const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp, hpByName] = await Promise.all([
       fetch('./data/mcg_total.json').then(r => r.json()),
       fetch('./data/product_costs.json').then(r => r.json()),
       fetch('./data/sku_weights.json').then(r => r.json()),
       fetch('./data/sb_costs.json').then(r => r.json()).catch(() => ({})),
       fetch('./data/hp_supplement.json').then(r => r.json()).catch(() => ({})),
+      fetch('./data/hp_by_name.json').then(r => r.json()).catch(() => ({})),
     ]);
 
     // Build additionalCosts: baked-in Shopify export costs + any user-uploaded overrides
@@ -568,7 +571,7 @@ window.runCalc = async () => {
 
     setLoadingMsg('Calculating gross profit…');
     await new Promise(r => setTimeout(r, 20));
-    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts);
+    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName);
     renderDashboard(allLines);
 
     document.getElementById('upload-screen').style.display = 'none';
@@ -797,6 +800,8 @@ function renderPage() {
       <td class="num">${li.shipCollected !== null ? fmt(li.shipCollected) : ''}</td>
       <td class="num">${li.shipPaid !== null ? fmt(li.shipPaid) : ''}</td>
       <td class="num ${deltaClass(li.shipDelta)}">${li.shipDelta !== null ? fmt(li.shipDelta) : ''}</td>
+      <td class="num ${gpClass(li.lineNetGp)}">${li.lineNetGp !== null ? fmt(li.lineNetGp) : ''}</td>
+      <td class="num ${gpClass(li.lineNetGpPct)}">${li.lineNetGpPct !== null ? li.lineNetGpPct.toFixed(1)+'%' : ''}</td>
       <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)" title="${li.shipNote||''}">
         ${li.isFreeShip ? '<span class="badge badge-free">Free</span> ' : ''}
         ${missing ? '<span class="badge badge-missing">No cost</span> ' : ''}
@@ -853,7 +858,8 @@ window.downloadMissingCosts = () => {
 window.downloadDetailCSV = () => {
   const headers = ['Order','Date','Channel','Store','SKU','Product','Qty',
                    'Revenue','COGS','GP $','GP %','Cost Source',
-                   'Ship Collected','Ship Paid SS','Ship Paid HP','Ship Delta','Ship Note'];
+                   'Ship Collected','Ship Paid SS','Ship Paid HP','Ship Delta',
+                   'Net GP $','Net GP %','Ship Note'];
   const rows = [headers];
   for (const l of filteredLines) {
     rows.push([
@@ -862,7 +868,9 @@ window.downloadDetailCSV = () => {
       l.lineGpPct !== null && l.lineGpPct !== undefined ? l.lineGpPct + '%' : '',
       l.costSource || '',
       l.shipCollected ?? '', l.shipPaidSS ?? '', l.shipPaidHP ?? '',
-      l.shipDelta ?? '', l.shipNote || ''
+      l.shipDelta ?? '',
+      l.lineNetGp ?? '', l.lineNetGpPct !== null && l.lineNetGpPct !== undefined ? l.lineNetGpPct + '%' : '',
+      l.shipNote || ''
     ]);
   }
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');

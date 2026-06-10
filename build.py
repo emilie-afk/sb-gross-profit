@@ -169,26 +169,45 @@ if not hp_costs:
 print("\n[Shopify Product Exports]")
 import glob, urllib.parse
 
+HP_VENDORS_SET = {'House Plant Dropship', 'House Plant Shop', 'House Plant Wholesale'}
+
+def normalize_title(s):
+    """Lowercase, strip non-alphanumeric, collapse spaces — for name-based cost lookup."""
+    import re
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9\s]', '', s.lower())).strip()
+
 def parse_shopify_export_rows(rows, label):
-    """Parse Shopify product export rows → (sb_costs, hp_suppl) dicts."""
-    sb, hp = {}, {}
+    """Parse Shopify product export rows → (sb_costs, hp_suppl, hp_by_name) dicts.
+    hp_by_name keys by normalized product title so no-SKU variants can be matched."""
+    sb, hp, hp_by_name = {}, {}, {}
     current_vendor = ''
+    current_title  = ''
     for row in rows:
         v = (row.get('Vendor') or '').strip()
         if v:
             current_vendor = v
+        t = (row.get('Title') or '').strip()
+        if t:
+            current_title = t
         sku  = (row.get('Variant SKU') or '').strip().upper()
         cost = clean_money(row.get('Cost per item', ''))
-        if sku and cost and cost > 0:
-            if current_vendor == 'Succulents Box':
-                sb[sku] = cost
-            elif current_vendor in ('House Plant Dropship', 'House Plant Shop', 'House Plant Wholesale'):
-                hp[sku] = cost
-    print(f"  ✓ {label}: {len(sb)} SB SKUs, {len(hp)} HP SKUs")
-    return sb, hp
+        if cost and cost > 0:
+            if sku:
+                if current_vendor == 'Succulents Box':
+                    sb[sku] = cost
+                elif current_vendor in HP_VENDORS_SET:
+                    hp[sku] = cost
+            # Build name→cost for HP even when SKU is missing (Shopify variant-ID orders)
+            if current_vendor in HP_VENDORS_SET and current_title:
+                key = normalize_title(current_title)
+                if key and key not in hp_by_name:  # first variant's cost wins
+                    hp_by_name[key] = cost
+    print(f"  ✓ {label}: {len(sb)} SB SKUs, {len(hp)} HP SKUs, {len(hp_by_name)} HP titles")
+    return sb, hp, hp_by_name
 
-sb_costs = {}
-hp_suppl = {}
+sb_costs   = {}
+hp_suppl   = {}
+hp_by_name = {}
 export_source = None
 
 # ── A. Google Drive folder ──────────────────────────────────────────────────
@@ -227,7 +246,7 @@ if folder_id and gdrive_key:
                           f"?alt=media&key={gdrive_key}")
             rows = fetch_csv(dl_url, best['name'])
             if rows:
-                sb_costs, hp_suppl = parse_shopify_export_rows(rows, best['name'])
+                sb_costs, hp_suppl, hp_by_name = parse_shopify_export_rows(rows, best['name'])
                 export_source = f"Drive ({best['name']})"
         else:
             print("  ✗ No files found in Drive folder")
@@ -245,9 +264,10 @@ if not export_source:
             try:
                 with open(export_path, encoding='utf-8-sig') as f:
                     rows = list(csv.DictReader(f))
-                sb_new, hp_new = parse_shopify_export_rows(rows, os.path.basename(export_path))
+                sb_new, hp_new, name_new = parse_shopify_export_rows(rows, os.path.basename(export_path))
                 sb_costs.update(sb_new)
                 hp_suppl.update(hp_new)
+                hp_by_name.update(name_new)
                 export_source = 'local files'
             except Exception as e:
                 print(f"  ✗ {os.path.basename(export_path)}: {e}")
@@ -256,13 +276,16 @@ if not export_source:
 if export_source:
     write_json('sb_costs.json',      sb_costs)
     write_json('hp_supplement.json', hp_suppl)
+    write_json('hp_by_name.json',    hp_by_name)
 else:
-    sb_path = os.path.join(DATA_DIR, 'sb_costs.json')
-    hp_path = os.path.join(DATA_DIR, 'hp_supplement.json')
-    sb_costs = json.load(open(sb_path)) if os.path.exists(sb_path) else {}
-    hp_suppl = json.load(open(hp_path)) if os.path.exists(hp_path) else {}
+    sb_path   = os.path.join(DATA_DIR, 'sb_costs.json')
+    hp_path   = os.path.join(DATA_DIR, 'hp_supplement.json')
+    name_path = os.path.join(DATA_DIR, 'hp_by_name.json')
+    sb_costs   = json.load(open(sb_path))   if os.path.exists(sb_path)   else {}
+    hp_suppl   = json.load(open(hp_path))   if os.path.exists(hp_path)   else {}
+    hp_by_name = json.load(open(name_path)) if os.path.exists(name_path) else {}
     print(f"  No export source found — using existing JSONs "
-          f"({len(sb_costs)} SB, {len(hp_suppl)} HP SKUs)")
+          f"({len(sb_costs)} SB, {len(hp_suppl)} HP SKUs, {len(hp_by_name)} HP titles)")
 
 
 # ── 6. Merge and write ────────────────────────────────────────────────────────
