@@ -130,11 +130,13 @@ function mcgTierCost(sku, mcgCosts) {
   if (s.startsWith('SUB') || s.startsWith('GSUB')) {
     // Split on dashes, parse each segment's leading integer (parseInt stops at non-digit)
     const nums = s.split('-').map(p => parseInt(p, 10)).filter(n => n > 0 && n <= 50);
-    // Last two numbers → [plants/mo, months]; if only one → plants only
+    // Second-to-last number = plants/mo; last = months
     const plants = nums.length >= 2 ? nums[nums.length - 2] : (nums[0] || 1);
-    const months = nums.length >= 2 ? nums[nums.length - 1] : 1;
-    const total  = Math.round(MCG_TIER.sub * plants * months * 100) / 100;
-    return [total, `MCG tier (Sub ${plants}×${months}mo)`];
+    // Return PER-DELIVERY cost only (plants × $3).
+    // The MCG sheet also stores per-delivery cost, so both paths are consistent.
+    // months are handled separately by getSubMonths() on the revenue side.
+    const perDelivery = Math.round(MCG_TIER.sub * plants * 100) / 100;
+    return [perDelivery, `MCG tier (Sub ${plants}×$${MCG_TIER.sub}/mo)`];
   }
   // 2" pot upgrade: S2/C2 + POT or UPGRADE in SKU
   if ((s.startsWith('S2')||s.startsWith('C2')) && (s.includes('POT')||s.includes('UPGRADE')))
@@ -413,9 +415,9 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       ? 0
       : Math.round((unitPrice * qty - lineDiscount) / subMonths * 100) / 100;
     const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product);
-    // getCost() for SUB/GSUB returns total cost for all months (plants×months×$3).
-    // Divide by subMonths to get per-delivery COGS, matching the per-delivery revenue.
-    const lineCogs = unitCost !== null ? Math.round(unitCost * qty / subMonths * 100) / 100 : null;
+    // getCost() returns per-delivery cost for SUB/GSUB (either from MCG sheet = $3/plant/mo,
+    // or from mcgTierCost which now also returns per-delivery). No further division needed.
+    const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
     const lineGpPct = (lineGp !== null && lineRevenue !== 0)
       ? Math.round(lineGp / lineRevenue * 1000) / 10 : null;
