@@ -15,13 +15,13 @@ const MCG_TIER = {
   'faire_pack': 1.15,  // Faire Pack 2" (64-pack)
   'faire_2':    3.00,  // Faire Ala Carte 2"
   'faire_4':    5.00,  // Faire Ala Carte 4"
-  'pack':       2.00,  // Rack/Pack (RAKN/RAKZ/RAJZ) — $2/plant × count from SKU
+  'pack':       2.00,  // Rack/Pack (RAKN/RAKZ/RAJZ/RAJN) — $2/plant × count from SKU
 };
 
 const MCG_PREFIXES = [
   'S1','S2','S3','SX','C2','C3','CX',
   'EEZZ','EBZZ','EEVZ','PPKZ','PPJZ',
-  'RAKN','RAKZ','RAJZ','MODERNPOT','1001','1002','1005','1014',
+  'RAKN','RAKZ','RAJZ','RAJN','MODERNPOT','1001','1002','1005','1014',
   '1050','1055','1064','1075','1079','1083','1090','1110',
   '1114','1237','1253','1264','1311','1313','1340','BD-','4X-','E1031',
   'SUB'
@@ -57,10 +57,15 @@ function identifyStore(sku, vendor) {
   if (s.startsWith('MG-'))           return 'Succulents Box (17381)';
   if (s.startsWith('FH-'))           return 'House Plant Dropship';
   if (s.startsWith('4INSUCCULENTS')) return 'Succulents Box (17381)';
-  if (/^\d+$/.test(s))               return 'Unknown (no SKU set)';
+  // Check vendor BEFORE numeric fallback — HP products with no SKU code should still be identified
   if (HP_VENDORS.has(v))             return v;
   if (v === 'Succulents Box')        return 'Succulents Box (17381)';
+  if (/^\d+$/.test(s))               return 'Unknown (no SKU set)';
   return v || 'Unknown';
+}
+
+function normalizeProductName(s) {
+  return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function isMcgSku(sku) {
@@ -108,7 +113,7 @@ function mcgTierCost(sku, mcgCosts) {
   if (['S3','C3','SX','CX','S1'].some(p=>s.startsWith(p))) return [MCG_TIER['4inch'],   'MCG tier (4")'];
   // Rack/Pack: RAKN/RAKZ/RAJZ — $2/plant × count (last numeric segment of SKU)
   // e.g. RAKN2918-6 → 6 plants → $12
-  if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ')) {
+  if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ') || s.startsWith('RAJN')) {
     const parts = s.split('-');
     const count = parseInt(parts[parts.length - 1], 10);
     if (count >= 6 && count <= 500) {
@@ -121,7 +126,7 @@ function mcgTierCost(sku, mcgCosts) {
   return [null, null];
 }
 
-function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts) {
+function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName) {
   const key = (sku || '').toUpperCase().trim();
 
   // Composite SKU: "S3KY2997+EEZZ7650" = two products bundled — sum both costs
@@ -130,7 +135,7 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts) {
     let total = 0;
     const labels = [];
     for (const part of parts) {
-      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts);
+      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts, hpByName, null);
       if (c === null) return [null, 'COST MISSING'];
       total += c;
       labels.push(`${part}:${l}`);
@@ -140,6 +145,12 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts) {
 
   // 1. MCG Total sheet has the exact cost — always wins
   if (mcgCosts[key] !== undefined)     return [mcgCosts[key],     'MCG Total sheet'];
+  // 1b. Pot SKU variant suffix (e.g. EEZZ7620.BR-1 → try EEZZ7620)
+  //     Pot sheet stores base SKU; variant suffix after '.' is color/size, not a separate SKU
+  if (key.includes('.')) {
+    const base = key.split('.')[0];
+    if (mcgCosts[base] !== undefined) return [mcgCosts[base], 'MCG Pot Costs'];
+  }
   // 2. HP/product costs baked in at deploy time
   if (productCosts[key] !== undefined) return [productCosts[key], 'Products export'];
   // 3. Manually uploaded costs CSV
@@ -148,6 +159,17 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts) {
   if (isMcgSku(sku)) {
     const [cost, label] = mcgTierCost(sku, mcgCosts);
     if (cost !== null) return [cost, label];
+  }
+  // 5. HP name-based fallback — for orders where SKU is a Shopify variant ID (all digits)
+  //    Match normalized product title against hp_by_name built from product export
+  if (hpByName && productName && /^\d+$/.test(key)) {
+    const norm = normalizeProductName(productName);
+    if (hpByName[norm] !== undefined) return [hpByName[norm], 'HP by name'];
+    // Prefix match: order title may include vendor suffix e.g. "Fern Heart 4 inch  lucky hearts"
+    // while export title is "Fern Heart 4 inch"
+    for (const [k, v] of Object.entries(hpByName)) {
+      if (norm.startsWith(k)) return [v, 'HP by name'];
+    }
   }
   return [null, 'COST MISSING'];
 }
@@ -240,7 +262,7 @@ export function parseShipStation(rows) {
 
 // ─── Main calculation ─────────────────────────────────────────────────────────
 
-export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}) {
+export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}) {
   // ── Pre-pass: order store composition + HP weight ──
   const orderStores  = new Map(); // orderNum → Set of stores
   const orderShipping = new Map(); // orderNum → customer paid shipping
@@ -311,7 +333,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const orderTax    = isFirstRow ? (cleanMoney(row['Taxes']) || 0) : 0;
     const orderTotal  = isFirstRow ? Math.round(((cleanMoney(row['Total']) || 0) - orderTax) * 100) / 100 : 0;
     const lineRevenue = Math.round((unitPrice * qty - lineDiscount) * 100) / 100;  // per-line revenue after discount
-    const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts);
+    const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product);
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
     const lineGpPct = (lineGp !== null && lineRevenue !== 0)
@@ -373,9 +395,16 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     }
 
     lineItems.push({
+      // Net GP = GP after absorbing shipping profit/loss (order-level, first row only)
+      const lineNetGp = (lineGp !== null && shipDelta !== null)
+        ? Math.round((lineGp + shipDelta) * 100) / 100 : null;
+      const lineNetGpPct = (lineNetGp !== null && lineRevenue !== 0)
+        ? Math.round(lineNetGp / lineRevenue * 1000) / 10 : null;
+
       orderNum, date, source, orderCat: isFirstRow ? orderCat : null,
       store, vendor, sku, product, qty,
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
+      lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote
     });
 
