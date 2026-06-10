@@ -306,6 +306,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <option value="">All cost status</option>
         <option value="missing">Missing cost only</option>
         <option value="free">Free shipping</option>
+        <option value="noship">No ship cost</option>
       </select>
     </div>
     <div class="table-controls" style="margin-top:8px">
@@ -732,8 +733,10 @@ window.filterTable = () => {
   filteredLines = allLines.filter(li => {
     if (store && li.store !== store) return false;
     if (chan  && li.source !== chan)  return false;
-    if (cost === 'missing' && li.costSource !== 'COST MISSING') return false;
-    if (cost === 'free'    && li.isFreeShip !== 'YES')           return false;
+    if (cost === 'missing' && li.costSource !== 'COST MISSING')      return false;
+    if (cost === 'free'    && li.isFreeShip !== 'YES')               return false;
+    if (cost === 'noship'  && li.shipCollected === null)             return false;
+    if (cost === 'noship'  && li.shipPaid !== null)                  return false;
     if (dateFrom && li.date && li.date < dateFrom) return false;
     if (dateTo   && li.date && li.date > dateTo)   return false;
     if (q && !`${li.orderNum} ${li.sku} ${li.product} ${li.store}`.toLowerCase().includes(q)) return false;
