@@ -408,6 +408,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <th onclick="sortOrderBy('shipDelta')" class="num">Ship Δ <span class="sort-icon">↕</span></th>
             <th onclick="sortOrderBy('netGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
             <th onclick="sortOrderBy('netGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
+            <th>Notes</th>
           </tr>
         </thead>
         <tbody id="order-table-body"></tbody>
@@ -474,11 +475,14 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <th onclick="sortLMBy('lineCount')" class="num">Lines <span class="sort-icon">↕</span></th>
             <th onclick="sortLMBy('revenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
             <th onclick="sortLMBy('cogs')" class="num">COGS <span class="sort-icon">↕</span></th>
-            <th onclick="sortLMBy('netGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
-            <th onclick="sortLMBy('netGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
-            <th class="num">Ship Coll</th>
+            <th onclick="sortLMBy('gp')" class="num">GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('gpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
+            <th class="num">Ship Collected</th>
             <th class="num">Ship Paid</th>
             <th onclick="sortLMBy('shipDelta')" class="num">Ship Δ <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('netGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortLMBy('netGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
+            <th>Notes</th>
           </tr>
         </thead>
         <tbody id="lm-table-body"></tbody>
@@ -1056,7 +1060,9 @@ function computeOrderRows(lines) {
         orderCat: li.orderCat || '', lineCount: 0,
         revenue: 0, cogs: 0, netGp: 0, netGpHasNull: false,
         shipCollected: li.shipCollected, shipPaid: li.shipPaid, shipDelta: li.shipDelta,
+        shipNote: li.shipNote || '',
         missingCost: false, hasShip: li.shipDelta !== null,
+        hasInfluencer: false, maxSubMonths: 1,
       });
     }
     const o = map.get(li.orderNum);
@@ -1066,7 +1072,9 @@ function computeOrderRows(lines) {
     else o.missingCost = true;
     if (li.lineNetGp !== null) o.netGp = Math.round((o.netGp + li.lineNetGp) * 100) / 100;
     else o.netGpHasNull = true;
-    if (li.orderCat) o.orderCat = li.orderCat; // update with non-null orderCat
+    if (li.orderCat) o.orderCat = li.orderCat;
+    if (li.isInfluencerSample) o.hasInfluencer = true;
+    if ((li.subMonths || 1) > o.maxSubMonths) o.maxSubMonths = li.subMonths;
   }
   for (const o of map.values()) {
     o.gp      = Math.round((o.revenue - o.cogs) * 100) / 100;
@@ -1123,6 +1131,12 @@ function renderOrderPage() {
       <td class="num ${deltaClass(o.shipDelta)}">${o.shipDelta !== null ? fmt(o.shipDelta) : ''}</td>
       <td class="num ${gpClass(o.netGp)}">${o.netGp !== null ? fmt(o.netGp) : '—'}</td>
       <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct !== null ? o.netGpPct.toFixed(1)+'%' : '—'}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)" title="${o.shipNote||''}">
+        ${o.hasInfluencer ? '<span class="badge badge-influencer">🎁 Influencer</span> ' : ''}
+        ${o.maxSubMonths > 1 ? `<span class="badge" style="background:rgba(99,179,237,.15);color:#63b3ed">÷${o.maxSubMonths}mo</span> ` : ''}
+        ${o.missingCost ? '<span class="badge badge-missing">No cost</span> ' : ''}
+        ${o.shipNote ? `<span style="font-size:.72rem">${o.shipNote}</span>` : ''}
+      </td>
     </tr>`;
   }).join('');
   const max = Math.ceil(orderRows.length / ORDER_PAGE_SIZE);
@@ -1261,7 +1275,7 @@ function renderLMPage() {
 
     const detailHtml = isOpen ? `
       <tr id="lm-detail-${safe}" class="lm-detail-row">
-        <td colspan="12" style="padding:8px 12px!important">
+        <td colspan="15" style="padding:8px 12px!important">
           <table class="detail-subtable">
             <thead><tr>
               <th>SKU</th><th>Product</th>
@@ -1304,11 +1318,19 @@ function renderLMPage() {
       <td class="num">${o.lineCount}</td>
       <td class="num">${fmt(o.revenue)}</td>
       <td class="num ${o.missingCost ? 'missing' : ''}">${o.missingCost ? '~' : ''}${fmt(o.cogs)}</td>
-      <td class="num ${gpClass(o.netGp)}">${o.netGp !== null ? fmt(o.netGp) : '—'}</td>
-      <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct !== null ? o.netGpPct.toFixed(1)+'%' : '—'}</td>
+      <td class="num ${gpClass(o.gp)}">${fmt(o.gp)}</td>
+      <td class="num ${gpClass(o.gpPct)}">${o.gpPct !== null ? o.gpPct.toFixed(1)+'%' : '—'}</td>
       <td class="num">${o.shipCollected !== null ? fmt(o.shipCollected) : ''}</td>
       <td class="num">${o.shipPaid !== null ? fmt(o.shipPaid) : ''}</td>
       <td class="num ${deltaClass(o.shipDelta)}">${o.shipDelta !== null ? fmt(o.shipDelta) : ''}</td>
+      <td class="num ${gpClass(o.netGp)}">${o.netGp !== null ? fmt(o.netGp) : '—'}</td>
+      <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct !== null ? o.netGpPct.toFixed(1)+'%' : '—'}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)" title="${o.shipNote||''}">
+        ${o.hasInfluencer ? '<span class="badge badge-influencer">🎁 Influencer</span> ' : ''}
+        ${o.maxSubMonths > 1 ? `<span class="badge" style="background:rgba(99,179,237,.15);color:#63b3ed">÷${o.maxSubMonths}mo</span> ` : ''}
+        ${o.missingCost ? '<span class="badge badge-missing">No cost</span> ' : ''}
+        ${o.shipNote ? `<span style="font-size:.72rem">${o.shipNote}</span>` : ''}
+      </td>
     </tr>${detailHtml}`;
   }).join('');
 
