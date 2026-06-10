@@ -24,7 +24,8 @@ const MCG_PREFIXES = [
   'RAKN','RAKZ','RAJZ','RAJN','MODERNPOT','1001','1002','1005','1014',
   '1050','1055','1064','1075','1079','1083','1090','1110',
   '1114','1237','1253','1264','1311','1313','1340','BD-','4X-','E1031',
-  'SUB'
+  'SUB','GSUB',
+  'TAKM','XAZZ',
 ];
 
 const HP_SHIP_RATES = [
@@ -113,7 +114,8 @@ function mcgTierCost(sku, mcgCosts) {
   if (['S3','C3','SX','CX','S1'].some(p=>s.startsWith(p))) return [MCG_TIER['4inch'],   'MCG tier (4")'];
   // Rack/Pack: RAKN/RAKZ/RAJZ — $2/plant × count (last numeric segment of SKU)
   // e.g. RAKN2918-6 → 6 plants → $12
-  if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ') || s.startsWith('RAJN')) {
+  if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ') || s.startsWith('RAJN') ||
+      s.startsWith('TAKM') || s.startsWith('XAZZ')) {
     const parts = s.split('-');
     const count = parseInt(parts[parts.length - 1], 10);
     if (count >= 6 && count <= 500) {
