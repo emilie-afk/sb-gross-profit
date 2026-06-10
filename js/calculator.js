@@ -51,6 +51,26 @@ const LIVE_TO_GIVE_PATTERNS = [
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+// Normalize Shopify "Source name" values to human-readable channel labels.
+// Sellbrite imports Amazon/eBay/Etsy/Walmart orders via the Shopify sales channel.
+function normalizeChannel(rawSource) {
+  const s = (rawSource || '').toLowerCase().trim();
+  if (!s || s === 'web')                          return 'Web';
+  if (s === 'pos')                                return 'POS';
+  if (s.includes('tiktok'))                       return 'TikTok';
+  if (s === 'instagram' || s === 'ig')            return 'Instagram';
+  if (s === 'facebook' || s === 'fb')             return 'Facebook';
+  if (s === 'google' || s === 'google shopping')  return 'Google';
+  if (s === 'amazon' || s.includes('amazon'))     return 'Amazon';
+  if (s === 'ebay'   || s.includes('ebay'))       return 'eBay';
+  if (s === 'etsy'   || s.includes('etsy'))       return 'Etsy';
+  if (s === 'walmart')                            return 'Walmart';
+  // Sellbrite imports from marketplace channels — tag as Amazon if SKU prefix
+  // matches, otherwise just label by the raw source
+  if (s === 'sellbrite')                          return 'Amazon';
+  return rawSource.trim() || 'Other';
+}
+
 function identifyStore(sku, vendor) {
   const s = (sku || '').toUpperCase().trim();
   const v = (vendor || '').trim();
@@ -304,13 +324,15 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
   for (const row of orderRows) {
     const name        = (row['Name'] || '').trim();
     const rawTotal    = cleanMoney(row['Total']) || 0;
+    const rawSubtotal = cleanMoney(row['Subtotal']) || 0;
     const discCode    = (row['Discount Code'] || '').toLowerCase();
     const tags        = (row['Tags'] || '').toLowerCase();
-    const sourceName  = (row['Source name'] || row['Source'] || '').toLowerCase();
+    const sourceName  = normalizeChannel(row['Source name'] || row['Source'] || '').toLowerCase();
     if (
       discCode.includes('sample') || discCode.includes('influencer') ||
       tags.includes('sample')     || tags.includes('influencer') ||
-      (sourceName.includes('tiktok') && rawTotal === 0)
+      (sourceName.includes('tiktok') && rawTotal === 0) ||
+      (rawTotal === 0 && rawSubtotal > 0)   // fully-discounted order (influencer gift / free sample)
     ) {
       influencerOrders.add(name);
     }
@@ -341,7 +363,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
 
     const vendor   = (row['Vendor'] || '').trim();
     const product  = (row['Lineitem name'] || '').trim().slice(0, 100);
-    const source   = (row['Source'] || '').trim();
+    const source   = normalizeChannel(row['Source name'] || row['Source'] || '');
     const date     = (row['Created at'] || '').trim().slice(0, 10);
     const qty      = parseInt(row['Lineitem quantity'] || '1') || 1;
     const unitPrice     = cleanMoney(row['Lineitem price']) || 0;
@@ -357,7 +379,13 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     // Order total = Shopify Total minus taxes (taxes are pass-through, not revenue)
     const orderTax    = isFirstRow ? (cleanMoney(row['Taxes']) || 0) : 0;
     const orderTotal  = isFirstRow ? Math.round(((cleanMoney(row['Total']) || 0) - orderTax) * 100) / 100 : 0;
-    const lineRevenue = Math.round((unitPrice * qty - lineDiscount) * 100) / 100;  // per-line revenue after discount
+    const isInfluencerSample = influencerOrders.has(orderNum);
+    // Influencer/sample gifts: order Total=$0 even though unit price > 0.
+    // The discount is applied at the order level (not Lineitem discount), so we
+    // must force lineRevenue to $0 here rather than trusting unitPrice×qty.
+    const lineRevenue = isInfluencerSample
+      ? 0
+      : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
     const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product);
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
@@ -424,8 +452,6 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       ? Math.round((lineGp + shipDelta) * 100) / 100 : null;
     const lineNetGpPct = (lineNetGp !== null && lineRevenue !== 0)
       ? Math.round(lineNetGp / lineRevenue * 1000) / 10 : null;
-
-    const isInfluencerSample = influencerOrders.has(orderNum);
 
     lineItems.push({
       orderNum, date, source, orderCat: isFirstRow ? orderCat : null,
