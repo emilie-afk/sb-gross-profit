@@ -394,13 +394,13 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       }
     }
 
-    lineItems.push({
-      // Net GP = GP after absorbing shipping profit/loss (order-level, first row only)
-      const lineNetGp = (lineGp !== null && shipDelta !== null)
-        ? Math.round((lineGp + shipDelta) * 100) / 100 : null;
-      const lineNetGpPct = (lineNetGp !== null && lineRevenue !== 0)
-        ? Math.round(lineNetGp / lineRevenue * 1000) / 10 : null;
+    // Net GP = GP after absorbing shipping profit/loss (order-level, first row only)
+    const lineNetGp = (lineGp !== null && shipDelta !== null)
+      ? Math.round((lineGp + shipDelta) * 100) / 100 : null;
+    const lineNetGpPct = (lineNetGp !== null && lineRevenue !== 0)
+      ? Math.round(lineNetGp / lineRevenue * 1000) / 10 : null;
 
+    lineItems.push({
       orderNum, date, source, orderCat: isFirstRow ? orderCat : null,
       store, vendor, sku, product, qty,
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
