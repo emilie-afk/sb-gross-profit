@@ -78,10 +78,22 @@ function mcgTierCost(sku, mcgCosts) {
     return [MCG_TIER.faire_2,                                                            'MCG tier (Faire 2")'];
   }
   // Subscription pot upgrade
-  if (s.startsWith('SUB') && (s.includes('POT') || s.includes('UPGRADE')))
+  if ((s.startsWith('SUB')||s.startsWith('GSUB')) && (s.includes('POT') || s.includes('UPGRADE')))
                                                             return [MCG_TIER.sub_pot,   'MCG tier (Sub Pot Upgrade)'];
-  // Subscription base
-  if (s.startsWith('SUB'))                                  return [MCG_TIER.sub,       'MCG tier (subscription)'];
+  // Subscription base — $3/plant × plants/mo × months
+  // SKU patterns:
+  //   GSUB7-1-6  = 1 plant/mo × 6 months  → cost $3 × 1 × 6 = $18
+  //   GSUBPOT-2-6 = 2 plants/mo × 6 months → cost $3 × 2 × 6 = $36
+  //   GSUBPOT-3-3 = 3 plants/mo × 3 months → cost $3 × 3 × 3 = $27
+  if (s.startsWith('SUB') || s.startsWith('GSUB')) {
+    // Split on dashes, parse each segment's leading integer (parseInt stops at non-digit)
+    const nums = s.split('-').map(p => parseInt(p, 10)).filter(n => n > 0 && n <= 50);
+    // Last two numbers → [plants/mo, months]; if only one → plants only
+    const plants = nums.length >= 2 ? nums[nums.length - 2] : (nums[0] || 1);
+    const months = nums.length >= 2 ? nums[nums.length - 1] : 1;
+    const total  = Math.round(MCG_TIER.sub * plants * months * 100) / 100;
+    return [total, `MCG tier (Sub ${plants}×${months}mo)`];
+  }
   // 2" pot upgrade: S2/C2 + POT or UPGRADE in SKU
   if ((s.startsWith('S2')||s.startsWith('C2')) && (s.includes('POT')||s.includes('UPGRADE')))
                                                             return [MCG_TIER['2inch_pot'],'MCG tier (2" Pot Upgrade)'];
@@ -96,7 +108,7 @@ function mcgTierCost(sku, mcgCosts) {
   return [null, null];
 }
 
-function getCost(sku, vendor, mcgCosts, productCosts) {
+function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts) {
   const key = (sku || '').toUpperCase().trim();
 
   // Composite SKU: "S3KY2997+EEZZ7650" = two products bundled — sum both costs
@@ -105,7 +117,7 @@ function getCost(sku, vendor, mcgCosts, productCosts) {
     let total = 0;
     const labels = [];
     for (const part of parts) {
-      const [c, l] = getCost(part, vendor, mcgCosts, productCosts);
+      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts);
       if (c === null) return [null, 'COST MISSING'];
       total += c;
       labels.push(`${part}:${l}`);
@@ -115,9 +127,11 @@ function getCost(sku, vendor, mcgCosts, productCosts) {
 
   // 1. MCG Total sheet has the exact cost — always wins
   if (mcgCosts[key] !== undefined)     return [mcgCosts[key],     'MCG Total sheet'];
-  // 2. Other product costs sheet (HP, Air Plant Shop, Live to Give)
+  // 2. HP/product costs baked in at deploy time
   if (productCosts[key] !== undefined) return [productCosts[key], 'Products export'];
-  // 3. MCG tier fallback — only for SKUs that look like MCG but aren't in Total sheet yet
+  // 3. Manually uploaded costs CSV
+  if (additionalCosts && additionalCosts[key] !== undefined) return [additionalCosts[key], 'Manual costs'];
+  // 4. MCG tier fallback — only for SKUs that look like MCG but aren't in Total sheet yet
   if (isMcgSku(sku)) {
     const [cost, label] = mcgTierCost(sku, mcgCosts);
     if (cost !== null) return [cost, label];
@@ -181,6 +195,18 @@ function parseCSVRow(line) {
   return result;
 }
 
+// ─── Additional costs CSV parser ──────────────────────────────────────────────
+// Parses the "Download SKUs" CSV once costs are filled in: SKU,Vendor,Product,Cost
+export function parseAdditionalCosts(rows) {
+  const costs = {};
+  for (const row of rows) {
+    const sku  = (row['SKU'] || '').trim().toUpperCase();
+    const cost = cleanMoney(row['Cost']);
+    if (sku && cost !== null && cost > 0) costs[sku] = cost;
+  }
+  return costs;
+}
+
 // ─── ShipStation parser ───────────────────────────────────────────────────────
 
 export function parseShipStation(rows) {
@@ -201,7 +227,7 @@ export function parseShipStation(rows) {
 
 // ─── Main calculation ─────────────────────────────────────────────────────────
 
-export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights) {
+export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}) {
   // ── Pre-pass: order store composition + HP weight ──
   const orderStores  = new Map(); // orderNum → Set of stores
   const orderShipping = new Map(); // orderNum → customer paid shipping
@@ -270,7 +296,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
 
     const orderTotal  = isFirstRow ? (cleanMoney(row['Total']) || 0) : 0;  // order-level total (first row only)
     const lineRevenue = Math.round(unitPrice * qty * 100) / 100;           // per-line revenue for GP breakdown
-    const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts);
+    const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts);
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
     const lineGpPct = (lineGp !== null && lineRevenue !== 0)
