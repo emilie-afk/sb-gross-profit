@@ -14,12 +14,14 @@ Auto-fetched on every deploy:
                    Fallback: PRODUCT_COSTS_JSON1/2 + SKU_WEIGHTS_JSON env vars
 
 Required Netlify env vars:
-  SITE_PASSWORD      — dashboard login password
-  MCG_SHEET_URL      — MCG Total sheet export URL (plant costs with extra cost)
-  MCG_POTS_SHEET_URL — MCG Pot costs sheet export URL (pot SKU → pot cost)
-  AS_SHEET_URL       — Air Plant Shop sheet export URL
-  L2G_SHEET_URL      — Live to Give sheet export URL
-  HP_SHEET_URL       — HP Dropship sheet export URL
+  SITE_PASSWORD         — dashboard login password
+  MCG_SHEET_URL         — MCG Total sheet export URL (plant costs with extra cost)
+  MCG_POTS_SHEET_URL    — MCG Pot costs sheet export URL (pot SKU → pot cost)
+  AS_SHEET_URL          — Air Plant Shop sheet export URL
+  L2G_SHEET_URL         — Live to Give sheet export URL
+  HP_SHEET_URL          — HP Dropship sheet export URL (Make.com synced sheet)
+  HP_COSTS_FOLDER_ID    — Google Drive folder ID containing Shopify product exports by date
+  GDRIVE_API_KEY        — Google API key with Drive API access (folder must be shared publicly)
 HP fallback env vars (only if HP_SHEET_URL not set):
   PRODUCT_COSTS_JSON1, PRODUCT_COSTS_JSON2, SKU_WEIGHTS_JSON
 """
@@ -159,47 +161,108 @@ if not hp_costs:
     print(f"  → {len(hp_costs)} HP SKUs, {len(sku_weights)} weight SKUs (env var fallback)")
 
 
-# ── 5. Shopify product exports (optional — only regenerates JSONs if CSVs present) ─
-# sb_costs.json and hp_supplement.json are pre-generated from Shopify product exports.
-# If the CSV files are present (e.g. local run), regenerate them. Otherwise keep
-# the committed JSON files intact so Netlify always has them.
+# ── 5. Shopify product exports ─────────────────────────────────────────────────
+# Source priority:
+#   A. Google Drive folder (HP_COSTS_FOLDER_ID + GDRIVE_API_KEY) — picks the latest file by date
+#   B. Local data/products_export*.csv files (manual drop-in)
+#   C. Pre-existing sb_costs.json / hp_supplement.json (committed or from a previous run)
 print("\n[Shopify Product Exports]")
-import glob
+import glob, urllib.parse
 
-export_files = sorted(glob.glob(os.path.join(DATA_DIR, 'products_export*.csv')))
+def parse_shopify_export_rows(rows, label):
+    """Parse Shopify product export rows → (sb_costs, hp_suppl) dicts."""
+    sb, hp = {}, {}
+    current_vendor = ''
+    for row in rows:
+        v = (row.get('Vendor') or '').strip()
+        if v:
+            current_vendor = v
+        sku  = (row.get('Variant SKU') or '').strip().upper()
+        cost = clean_money(row.get('Cost per item', ''))
+        if sku and cost and cost > 0:
+            if current_vendor == 'Succulents Box':
+                sb[sku] = cost
+            elif current_vendor in ('House Plant Dropship', 'House Plant Shop', 'House Plant Wholesale'):
+                hp[sku] = cost
+    print(f"  ✓ {label}: {len(sb)} SB SKUs, {len(hp)} HP SKUs")
+    return sb, hp
 
-if export_files:
-    sb_costs = {}
-    hp_suppl = {}
-    print(f"  Found {len(export_files)} export file(s) — regenerating…")
-    for export_path in export_files:
-        current_vendor = ''
-        try:
-            with open(export_path, encoding='utf-8-sig') as f:
-                for row in csv.DictReader(f):
-                    v = (row.get('Vendor') or '').strip()
-                    if v:
-                        current_vendor = v
-                    sku  = (row.get('Variant SKU') or '').strip().upper()
-                    cost = clean_money(row.get('Cost per item', ''))
-                    if sku and cost and cost > 0:
-                        if current_vendor == 'Succulents Box':
-                            sb_costs[sku] = cost
-                        elif current_vendor in ('House Plant Dropship', 'House Plant Shop', 'House Plant Wholesale'):
-                            hp_suppl[sku] = cost
-            print(f"  ✓ {os.path.basename(export_path)}")
-        except Exception as e:
-            print(f"  ✗ {os.path.basename(export_path)}: {e}")
+sb_costs = {}
+hp_suppl = {}
+export_source = None
+
+# ── A. Google Drive folder ──────────────────────────────────────────────────
+folder_id  = os.environ.get('HP_COSTS_FOLDER_ID', '').strip()
+gdrive_key = os.environ.get('GDRIVE_API_KEY', '').strip()
+
+if folder_id and gdrive_key:
+    print("  Checking Google Drive folder for latest export…")
+    try:
+        q = urllib.parse.quote(f"'{folder_id}' in parents and trashed=false")
+        list_url = (
+            f'https://www.googleapis.com/drive/v3/files'
+            f'?q={q}'
+            f'&orderBy=name+desc'
+            f'&pageSize=10'
+            f'&fields=files(id,name,mimeType)'
+            f'&key={gdrive_key}'
+        )
+        with urllib.request.urlopen(list_url, timeout=15) as r:
+            file_list = json.loads(r.read().decode())
+
+        drive_files = file_list.get('files', [])
+        # Prefer CSV files over Google Sheets (but accept both)
+        csv_files   = [f for f in drive_files if 'spreadsheet' not in f.get('mimeType','')]
+        sheet_files = [f for f in drive_files if 'spreadsheet'     in f.get('mimeType','')]
+        ordered     = csv_files + sheet_files  # CSVs first; newest name first within each
+
+        if ordered:
+            best = ordered[0]
+            print(f"  Latest file: {best['name']}")
+            mime = best.get('mimeType', '')
+            if 'spreadsheet' in mime:
+                dl_url = f"https://docs.google.com/spreadsheets/d/{best['id']}/export?format=csv"
+            else:
+                dl_url = (f"https://www.googleapis.com/drive/v3/files/{best['id']}"
+                          f"?alt=media&key={gdrive_key}")
+            rows = fetch_csv(dl_url, best['name'])
+            if rows:
+                sb_costs, hp_suppl = parse_shopify_export_rows(rows, best['name'])
+                export_source = f"Drive ({best['name']})"
+        else:
+            print("  ✗ No files found in Drive folder")
+    except Exception as e:
+        print(f"  ✗ Drive API error: {e}")
+else:
+    print("  HP_COSTS_FOLDER_ID / GDRIVE_API_KEY not set — skipping Drive")
+
+# ── B. Local CSV files ──────────────────────────────────────────────────────
+if not export_source:
+    local_files = sorted(glob.glob(os.path.join(DATA_DIR, 'products_export*.csv')), reverse=True)
+    if local_files:
+        print(f"  Found {len(local_files)} local export file(s) — using all")
+        for export_path in local_files:
+            try:
+                with open(export_path, encoding='utf-8-sig') as f:
+                    rows = list(csv.DictReader(f))
+                sb_new, hp_new = parse_shopify_export_rows(rows, os.path.basename(export_path))
+                sb_costs.update(sb_new)
+                hp_suppl.update(hp_new)
+                export_source = 'local files'
+            except Exception as e:
+                print(f"  ✗ {os.path.basename(export_path)}: {e}")
+
+# ── C. Fall back to existing committed JSONs ────────────────────────────────
+if export_source:
     write_json('sb_costs.json',      sb_costs)
     write_json('hp_supplement.json', hp_suppl)
 else:
-    # No CSVs — load from pre-committed JSONs (do not overwrite)
-    sb_path  = os.path.join(DATA_DIR, 'sb_costs.json')
-    hp_path  = os.path.join(DATA_DIR, 'hp_supplement.json')
+    sb_path = os.path.join(DATA_DIR, 'sb_costs.json')
+    hp_path = os.path.join(DATA_DIR, 'hp_supplement.json')
     sb_costs = json.load(open(sb_path)) if os.path.exists(sb_path) else {}
     hp_suppl = json.load(open(hp_path)) if os.path.exists(hp_path) else {}
-    print(f"  No CSVs found — using committed sb_costs.json ({len(sb_costs)} SKUs) "
-          f"and hp_supplement.json ({len(hp_suppl)} SKUs)")
+    print(f"  No export source found — using existing JSONs "
+          f"({len(sb_costs)} SB, {len(hp_suppl)} HP SKUs)")
 
 
 # ── 6. Merge and write ────────────────────────────────────────────────────────
