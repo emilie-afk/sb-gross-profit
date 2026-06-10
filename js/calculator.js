@@ -294,8 +294,10 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const orderNumClean = orderNum.replace(/^#/, '');
     const ssRate        = shipStationCosts.get(orderNumClean) || null;
 
-    const orderTotal  = isFirstRow ? (cleanMoney(row['Total']) || 0) : 0;  // order-level total (first row only)
-    const lineRevenue = Math.round(unitPrice * qty * 100) / 100;           // per-line revenue for GP breakdown
+    // Order total = Shopify Total minus taxes (taxes are pass-through, not revenue)
+    const orderTax    = isFirstRow ? (cleanMoney(row['Taxes']) || 0) : 0;
+    const orderTotal  = isFirstRow ? Math.round(((cleanMoney(row['Total']) || 0) - orderTax) * 100) / 100 : 0;
+    const lineRevenue = Math.round((unitPrice * qty - lineDiscount) * 100) / 100;  // per-line revenue after discount
     const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts);
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
