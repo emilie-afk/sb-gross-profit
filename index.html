@@ -315,6 +315,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <input type="date" class="filter-select" id="filter-date-to" onchange="filterTable()" style="min-width:140px">
       <button class="logout-btn" onclick="clearDates()" style="font-size:.75rem;white-space:nowrap">Clear dates</button>
       <span class="count-badge" id="row-count"></span>
+      <button class="logout-btn" onclick="downloadDetailCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
     </div>
     <div class="table-wrap">
       <table id="data-table">
@@ -843,6 +844,30 @@ window.downloadMissingCosts = () => {
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = 'missing_costs.csv';
+  a.click();
+};
+
+window.downloadDetailCSV = () => {
+  const headers = ['Order','Date','Channel','Store','SKU','Product','Qty',
+                   'Revenue','COGS','GP $','GP %','Cost Source',
+                   'Ship Collected','Ship Paid SS','Ship Paid HP','Ship Delta','Ship Note'];
+  const rows = [headers];
+  for (const l of filteredLines) {
+    rows.push([
+      l.orderNum, l.date, l.source || '', l.store || '', l.sku, l.product, l.qty,
+      l.lineRevenue ?? '', l.lineCogs ?? '', l.lineGp ?? '',
+      l.lineGpPct !== null && l.lineGpPct !== undefined ? l.lineGpPct + '%' : '',
+      l.costSource || '',
+      l.shipCollected ?? '', l.shipPaidSS ?? '', l.shipPaidHP ?? '',
+      l.shipDelta ?? '', l.shipNote || ''
+    ]);
+  }
+  const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const from = document.getElementById('filter-date-from').value || 'all';
+  const to   = document.getElementById('filter-date-to').value   || 'all';
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = `order_detail_${from}_to_${to}.csv`;
   a.click();
 };
 
