@@ -138,6 +138,12 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 .badge-free{background:rgba(251,191,36,.15);color:var(--yellow)}
 .badge-missing{background:rgba(248,113,113,.15);color:var(--red)}
 
+.view-tabs{display:flex;gap:6px;margin-bottom:12px}
+.view-tab{padding:6px 16px;background:var(--surface);border:1px solid var(--border);border-radius:6px;
+  color:var(--muted);font-size:.8rem;cursor:pointer;transition:all .15s}
+.view-tab.active,.view-tab:hover{border-color:var(--accent);color:var(--accent)}
+.view-tab.active{background:rgba(110,231,183,.08)}
+
 .pagination{display:flex;align-items:center;justify-content:space-between;margin-top:14px;flex-wrap:wrap;gap:8px}
 .pagination button{
   padding:6px 12px;background:var(--surface);border:1px solid var(--border);
@@ -318,6 +324,13 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <span class="count-badge" id="row-count"></span>
       <button class="logout-btn" onclick="downloadDetailCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
     </div>
+    <div class="view-tabs">
+      <button class="view-tab active" id="tab-sku" onclick="switchView('sku')">SKU View</button>
+      <button class="view-tab" id="tab-order" onclick="switchView('order')">Order View</button>
+    </div>
+
+    <!-- SKU view -->
+    <div id="view-sku">
     <div class="table-wrap">
       <table id="data-table">
         <thead>
@@ -349,6 +362,39 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <span class="page-info" id="page-info"></span>
       <button id="btn-next" onclick="changePage(1)">Next →</button>
     </div>
+    </div><!-- /view-sku -->
+
+    <!-- Order view -->
+    <div id="view-order" style="display:none">
+    <div class="table-wrap">
+      <table id="order-table">
+        <thead>
+          <tr>
+            <th onclick="sortOrderBy('orderNum')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortOrderBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortOrderBy('source')">Channel <span class="sort-icon">↕</span></th>
+            <th>Type</th>
+            <th onclick="sortOrderBy('lineCount')" class="num">Lines <span class="sort-icon">↕</span></th>
+            <th onclick="sortOrderBy('revenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
+            <th onclick="sortOrderBy('cogs')" class="num">COGS <span class="sort-icon">↕</span></th>
+            <th onclick="sortOrderBy('gp')" class="num">GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortOrderBy('gpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
+            <th class="num">Ship Collected</th>
+            <th class="num">Ship Paid</th>
+            <th onclick="sortOrderBy('shipDelta')" class="num">Ship Δ <span class="sort-icon">↕</span></th>
+            <th onclick="sortOrderBy('netGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortOrderBy('netGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
+          </tr>
+        </thead>
+        <tbody id="order-table-body"></tbody>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev-ord" onclick="changeOrderPage(-1)">← Prev</button>
+      <span class="page-info" id="page-info-ord"></span>
+      <button id="btn-next-ord" onclick="changeOrderPage(1)">Next →</button>
+    </div>
+    </div><!-- /view-order -->
 
   </div><!-- /dashboard -->
 </div>
@@ -758,6 +804,7 @@ window.filterTable = () => {
   currentPage = 1;
   document.getElementById('row-count').textContent = `${filteredLines.length.toLocaleString()} rows`;
   renderPage();
+  if (currentView === 'order') renderOrderView();
 };
 
 window.sortBy = key => {
@@ -881,6 +928,104 @@ window.downloadDetailCSV = () => {
   a.download = `order_detail_${from}_to_${to}.csv`;
   a.click();
 };
+
+// ─── Order View ───────────────────────────────────────────────────────────────
+let currentView = 'sku';
+let orderRows = [], orderSortKey = 'date', orderSortAsc = false, orderPage = 1;
+const ORDER_PAGE_SIZE = 100;
+
+window.switchView = view => {
+  currentView = view;
+  document.getElementById('view-sku').style.display   = view === 'sku'   ? '' : 'none';
+  document.getElementById('view-order').style.display = view === 'order' ? '' : 'none';
+  document.getElementById('tab-sku').classList.toggle('active',   view === 'sku');
+  document.getElementById('tab-order').classList.toggle('active', view === 'order');
+  if (view === 'order') renderOrderView();
+};
+
+function computeOrderRows(lines) {
+  const map = new Map();
+  for (const li of lines) {
+    if (!map.has(li.orderNum)) {
+      map.set(li.orderNum, {
+        orderNum: li.orderNum, date: li.date, source: li.source || '',
+        orderCat: li.orderCat || '', lineCount: 0,
+        revenue: 0, cogs: 0, netGp: 0, netGpHasNull: false,
+        shipCollected: li.shipCollected, shipPaid: li.shipPaid, shipDelta: li.shipDelta,
+        missingCost: false, hasShip: li.shipDelta !== null,
+      });
+    }
+    const o = map.get(li.orderNum);
+    o.lineCount++;
+    o.revenue = Math.round((o.revenue + (li.lineRevenue || 0)) * 100) / 100;
+    if (li.lineCogs !== null) o.cogs = Math.round((o.cogs + li.lineCogs) * 100) / 100;
+    else o.missingCost = true;
+    if (li.lineNetGp !== null) o.netGp = Math.round((o.netGp + li.lineNetGp) * 100) / 100;
+    else o.netGpHasNull = true;
+    if (li.orderCat) o.orderCat = li.orderCat; // update with non-null orderCat
+  }
+  for (const o of map.values()) {
+    o.gp      = Math.round((o.revenue - o.cogs) * 100) / 100;
+    o.gpPct   = o.revenue ? Math.round(o.gp / o.revenue * 1000) / 10 : null;
+    o.netGpPct = (!o.netGpHasNull && o.revenue) ? Math.round(o.netGp / o.revenue * 1000) / 10 : null;
+    if (o.netGpHasNull) o.netGp = null;
+  }
+  return [...map.values()];
+}
+
+window.sortOrderBy = key => {
+  if (orderSortKey === key) orderSortAsc = !orderSortAsc;
+  else { orderSortKey = key; orderSortAsc = false; }
+  orderPage = 1;
+  renderOrderView();
+};
+
+window.changeOrderPage = dir => {
+  const max = Math.ceil(orderRows.length / ORDER_PAGE_SIZE);
+  orderPage = Math.max(1, Math.min(max, orderPage + dir));
+  renderOrderPage();
+};
+
+function renderOrderView() {
+  orderRows = computeOrderRows(filteredLines);
+  orderRows.sort((a, b) => {
+    let va = a[orderSortKey], vb = b[orderSortKey];
+    if (va === null || va === undefined) va = orderSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = orderSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return orderSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return orderSortAsc ? va - vb : vb - va;
+  });
+  orderPage = 1;
+  renderOrderPage();
+}
+
+function renderOrderPage() {
+  const start = (orderPage - 1) * ORDER_PAGE_SIZE;
+  const page  = orderRows.slice(start, start + ORDER_PAGE_SIZE);
+  document.getElementById('order-table-body').innerHTML = page.map(o => {
+    const rowCls = o.missingCost ? 'style="background:rgba(248,113,113,.06)"' : '';
+    return `<tr ${rowCls}>
+      <td>${o.orderNum}</td>
+      <td>${o.date || ''}</td>
+      <td>${o.source}</td>
+      <td style="color:var(--muted);font-size:.72rem">${o.orderCat || ''}</td>
+      <td class="num">${o.lineCount}</td>
+      <td class="num">${fmt(o.revenue)}</td>
+      <td class="num ${o.missingCost ? 'missing' : ''}">${o.missingCost ? '~' : ''}${fmt(o.cogs)}</td>
+      <td class="num ${gpClass(o.gp)}">${fmt(o.gp)}</td>
+      <td class="num ${gpClass(o.gpPct)}">${o.gpPct !== null ? o.gpPct.toFixed(1)+'%' : '—'}</td>
+      <td class="num">${o.shipCollected !== null ? fmt(o.shipCollected) : ''}</td>
+      <td class="num">${o.shipPaid !== null ? fmt(o.shipPaid) : ''}</td>
+      <td class="num ${deltaClass(o.shipDelta)}">${o.shipDelta !== null ? fmt(o.shipDelta) : ''}</td>
+      <td class="num ${gpClass(o.netGp)}">${o.netGp !== null ? fmt(o.netGp) : '—'}</td>
+      <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct !== null ? o.netGpPct.toFixed(1)+'%' : '—'}</td>
+    </tr>`;
+  }).join('');
+  const max = Math.ceil(orderRows.length / ORDER_PAGE_SIZE);
+  document.getElementById('page-info-ord').textContent = `${orderRows.length} orders · page ${orderPage}/${Math.max(1,max)}`;
+  document.getElementById('btn-prev-ord').disabled = orderPage <= 1;
+  document.getElementById('btn-next-ord').disabled = orderPage >= max;
+}
 
 window.clearDates = () => {
   document.getElementById('filter-date-from').value = '';
