@@ -14,11 +14,12 @@ Auto-fetched on every deploy:
                    Fallback: PRODUCT_COSTS_JSON1/2 + SKU_WEIGHTS_JSON env vars
 
 Required Netlify env vars:
-  SITE_PASSWORD   — dashboard login password
-  MCG_SHEET_URL   — MCG Total sheet export URL
-  AS_SHEET_URL    — Air Plant Shop sheet export URL
-  L2G_SHEET_URL   — Live to Give sheet export URL
-  HP_SHEET_URL    — HP Dropship sheet export URL
+  SITE_PASSWORD      — dashboard login password
+  MCG_SHEET_URL      — MCG Total sheet export URL (plant costs with extra cost)
+  MCG_POTS_SHEET_URL — MCG Pot costs sheet export URL (pot SKU → pot cost)
+  AS_SHEET_URL       — Air Plant Shop sheet export URL
+  L2G_SHEET_URL      — Live to Give sheet export URL
+  HP_SHEET_URL       — HP Dropship sheet export URL
 HP fallback env vars (only if HP_SHEET_URL not set):
   PRODUCT_COSTS_JSON1, PRODUCT_COSTS_JSON2, SKU_WEIGHTS_JSON
 """
@@ -71,6 +72,23 @@ if mcg_url:
         print(f"  → {len(mcg_costs)} MCG SKUs")
 else:
     print("  ✗ MCG_SHEET_URL not set — skipping")
+
+# MCG pot costs (EEZZ* SKUs used in plant+pot bundles like S2KY1153+EEZZ7620.BR-1)
+# Merging into mcg_costs so getCost() finds them at priority 1 when splitting '+' bundles
+pots_url = os.environ.get('MCG_POTS_SHEET_URL')
+if pots_url:
+    pot_rows = fetch_csv(pots_url, 'MCG Pot Costs sheet')
+    if pot_rows:
+        pot_count = 0
+        for row in pot_rows:
+            sku  = row.get('Pot SKU', '').strip().upper()
+            cost = clean_money(row.get('Pot Cost', ''))
+            if sku and cost and cost > 0:
+                mcg_costs[sku] = cost
+                pot_count += 1
+        print(f"  → {pot_count} pot SKUs merged into MCG costs")
+else:
+    print("  ✗ MCG_POTS_SHEET_URL not set — pot bundle costs may be missing")
 
 
 # ── 2. Air Plant Shop ─────────────────────────────────────────────────────────
