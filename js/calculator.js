@@ -168,7 +168,7 @@ function mcgTierCost(sku, mcgCosts) {
   return [null, null];
 }
 
-function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName) {
+function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, skuAlias = {}) {
   const key = (sku || '').toUpperCase().trim();
 
   // Composite SKU: "S3KY2997+EEZZ7650" = two products bundled — sum both costs
@@ -177,7 +177,7 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     let total = 0;
     const labels = [];
     for (const part of parts) {
-      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts, hpByName, null);
+      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts, hpByName, null, skuAlias);
       if (c === null) return [null, 'COST MISSING'];
       total += c;
       labels.push(`${part}:${l}`);
@@ -217,6 +217,13 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     for (const [k, v] of Object.entries(hpByName)) {
       if (norm.startsWith(k)) return [v, 'HP by name'];
     }
+  }
+  // 6. SKU alias fallback — Amazon/channel alias → canonical SB/MCG/HP SKU
+  //    If the order came in with an Amazon seller SKU, map it to the real SKU and re-lookup
+  if (skuAlias && skuAlias[key] && skuAlias[key] !== key) {
+    const canonical = skuAlias[key];
+    return getCost(canonical, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, {});
+    // pass empty alias to avoid infinite loops if canonical itself is aliased
   }
   return [null, 'COST MISSING'];
 }
@@ -309,7 +316,7 @@ export function parseShipStation(rows) {
 
 // ─── Main calculation ─────────────────────────────────────────────────────────
 
-export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}) {
+export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}) {
   // ── Pre-pass: order store composition + HP weight ──
   const orderStores  = new Map(); // orderNum → Set of stores
   const orderShipping = new Map(); // orderNum → customer paid shipping
@@ -415,7 +422,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const lineRevenue = isInfluencerSample
       ? 0
       : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
-    const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product);
+    const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias);
     // getCost() returns per-delivery cost for SUB/GSUB ($3/plant/mo).
     // Use first delivery only — future months have no matching revenue in this view.
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
