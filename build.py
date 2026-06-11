@@ -79,18 +79,112 @@ else:
 # Merging into mcg_costs so getCost() finds them at priority 1 when splitting '+' bundles
 pots_url = os.environ.get('MCG_POTS_SHEET_URL')
 if pots_url:
-    pot_rows = fetch_csv(pots_url, 'MCG Pot Costs sheet')
-    if pot_rows:
+    try:
+        with urllib.request.urlopen(pots_url, timeout=15) as r:
+            raw_text = r.read().decode('utf-8-sig')
+        raw_rows = list(csv.reader(io.StringIO(raw_text)))
+        print(f"  Pot sheet raw rows: {len(raw_rows)}, first row: {raw_rows[0] if raw_rows else []}")
+
+        # The sheet may have a title row ("MCG Product Calulator") before the real headers.
+        # Scan for the row that contains 'Pot SKU' and use it as the header row.
+        HEADER_SIGNALS = {'pot sku', 'sku', 'variant sku'}
+        header_idx = None
+        for i, row in enumerate(raw_rows):
+            row_lower = [c.strip().lower() for c in row]
+            if any(s in row_lower for s in HEADER_SIGNALS):
+                header_idx = i
+                break
+
+        if header_idx is None:
+            print("  ✗ Could not find header row in pot sheet — skipping")
+            pot_rows = []
+        else:
+            print(f"  Header row found at index {header_idx}: {raw_rows[header_idx]}")
+            header = raw_rows[header_idx]
+            pot_rows = [dict(zip(header, row)) for row in raw_rows[header_idx + 1:]]
+
         pot_count = 0
         for row in pot_rows:
-            sku  = row.get('Pot SKU', '').strip().upper()
-            cost = clean_money(row.get('Pot Cost', ''))
+            sku = (row.get('Pot SKU') or row.get('SKU') or
+                   row.get('Variant SKU') or row.get('pot sku') or '').strip().upper()
+            cost = clean_money(
+                row.get('Pot Cost') or row.get('Cost') or
+                row.get('Cost per item') or row.get('Cost Per Item') or
+                row.get('Cost_Per_Item') or row.get('pot cost') or ''
+            )
             if sku and cost and cost > 0:
                 mcg_costs[sku] = cost
+                # Also store base SKU (EEZZ7620.BR-1 → EEZZ7620) for dot-strip fallback
+                base = sku.split('.')[0]
+                if base and base != sku:
+                    mcg_costs.setdefault(base, cost)
                 pot_count += 1
         print(f"  → {pot_count} pot SKUs merged into MCG costs")
+        if pot_count == 0:
+            print("  ✗ No pot costs parsed — verify 'Pot SKU' / 'Pot Cost' column names")
+    except Exception as e:
+        print(f"  ✗ MCG Pot Costs sheet error: {e}")
 else:
     print("  ✗ MCG_POTS_SHEET_URL not set — pot bundle costs may be missing")
+
+
+# ── 1c. SKU Alias map (Succulent Box SKU ↔ Amazon alias) ─────────────────────
+# Sheet has two columns: canonical SB/MCG SKU  |  Amazon seller alias SKU
+# We build a bidirectional map so either form can be looked up.
+# Env var: SB_SKU_ALIAS_URL  (can be a single CSV export URL covering all tabs,
+#          or set SB_SKU_ALIAS_URL_2 for a second tab)
+print("\n[SKU Alias]")
+sku_alias = {}   # alias_sku → canonical_sku
+
+def parse_alias_rows(raw_rows, label):
+    """Find header row, return list of dicts."""
+    ALIAS_SIGNALS = {'sku', 'succulent sku', 'sb sku', 'mcg sku', 'amazon sku',
+                     'amazon alias', 'seller sku', 'alias', 'internal sku', 'variant sku'}
+    header_idx = None
+    for i, row in enumerate(raw_rows):
+        row_lower = [c.strip().lower() for c in row]
+        if sum(1 for c in row_lower if c in ALIAS_SIGNALS) >= 2:
+            header_idx = i
+            break
+    if header_idx is None:
+        print(f"  ✗ {label}: could not find header row (need ≥2 SKU-like columns)")
+        return []
+    header = raw_rows[header_idx]
+    print(f"  {label} header: {header}")
+    return [dict(zip(header, row)) for row in raw_rows[header_idx + 1:]]
+
+def extract_aliases(rows, label):
+    count = 0
+    for row in rows:
+        # Normalise keys to lowercase for flexible matching
+        rlow = {k.strip().lower(): v.strip().upper() for k, v in row.items() if v.strip()}
+        # Find the canonical SB/MCG SKU column
+        sb_sku = (rlow.get('succulent sku') or rlow.get('sb sku') or rlow.get('mcg sku') or
+                  rlow.get('internal sku') or rlow.get('sku') or rlow.get('variant sku') or '')
+        # Find the Amazon alias column
+        amz_sku = (rlow.get('amazon sku') or rlow.get('amazon alias') or rlow.get('amazon') or
+                   rlow.get('seller sku') or rlow.get('alias') or rlow.get('msku') or '')
+        if sb_sku and amz_sku and sb_sku != amz_sku:
+            sku_alias[amz_sku] = sb_sku   # amazon alias → canonical
+            sku_alias[sb_sku]  = sb_sku   # canonical → itself (no-op but safe)
+            count += 1
+    print(f"  → {count} alias mappings from {label}")
+
+for env_key in ('SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL'):
+    alias_url = os.environ.get(env_key)
+    if not alias_url:
+        continue
+    try:
+        with urllib.request.urlopen(alias_url, timeout=15) as r:
+            raw_text = r.read().decode('utf-8-sig')
+        raw_rows = list(csv.reader(io.StringIO(raw_text)))
+        alias_rows = parse_alias_rows(raw_rows, env_key)
+        extract_aliases(alias_rows, env_key)
+    except Exception as e:
+        print(f"  ✗ {env_key}: {e}")
+
+if not sku_alias:
+    print("  SB_SKU_ALIAS_URL not set or no mappings found — skipping")
 
 
 # ── 2. Air Plant Shop ─────────────────────────────────────────────────────────
@@ -296,6 +390,7 @@ print("\nWriting data files...")
 write_json('mcg_total.json',     mcg_costs)
 write_json('product_costs.json', product_costs)
 write_json('sku_weights.json',   sku_weights)
+write_json('sku_alias.json',     sku_alias)
 # sb_costs.json and hp_supplement.json written above (or kept from repo)
 
 total = len(mcg_costs) + len(product_costs) + len(sb_costs) + len(hp_suppl)

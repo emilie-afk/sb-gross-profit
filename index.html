@@ -113,7 +113,7 @@ button{cursor:pointer;font-family:inherit}
 .filter-select:focus{border-color:var(--accent)}
 .count-badge{font-size:.75rem;color:var(--muted);white-space:nowrap;padding:8px 0}
 
-.table-wrap{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--border)}
+.table-wrap{overflow:auto;max-height:calc(100vh - 260px);border-radius:var(--radius);border:1px solid var(--border)}
 table{width:100%;border-collapse:collapse;font-size:.78rem}
 thead{position:sticky;top:0;z-index:10}
 th{
@@ -727,13 +727,14 @@ window.runCalc = async () => {
   errEl.style.display = 'none';
   showLoading('Loading cost tables…');
   try {
-    const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp, hpByName] = await Promise.all([
+    const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp, hpByName, skuAlias] = await Promise.all([
       fetch('./data/mcg_total.json').then(r => r.json()),
       fetch('./data/product_costs.json').then(r => r.json()),
       fetch('./data/sku_weights.json').then(r => r.json()),
       fetch('./data/sb_costs.json').then(r => r.json()).catch(() => ({})),
       fetch('./data/hp_supplement.json').then(r => r.json()).catch(() => ({})),
       fetch('./data/hp_by_name.json').then(r => r.json()).catch(() => ({})),
+      fetch('./data/sku_alias.json').then(r => r.json()).catch(() => ({})),
     ]);
 
     // Build additionalCosts: baked-in Shopify export costs + any user-uploaded overrides
@@ -761,7 +762,7 @@ window.runCalc = async () => {
 
     setLoadingMsg('Calculating gross profit…');
     await new Promise(r => setTimeout(r, 20));
-    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName);
+    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias);
     renderDashboard(allLines);
 
     document.getElementById('upload-screen').style.display = 'none';
