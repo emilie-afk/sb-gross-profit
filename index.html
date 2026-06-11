@@ -138,6 +138,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 .badge-free{background:rgba(251,191,36,.15);color:var(--yellow)}
 .badge-missing{background:rgba(248,113,113,.15);color:var(--red)}
 .badge-influencer{background:rgba(167,139,250,.2);color:#a78bfa}
+.totals-row td{background:var(--surface2)!important;border-top:2px solid var(--border);font-weight:700;position:sticky;bottom:0}
 
 .view-tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
 .view-tab{padding:6px 16px;background:var(--surface);border:1px solid var(--border);border-radius:6px;
@@ -350,7 +351,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button class="view-tab active" id="tab-sku"       onclick="switchView('sku')">SKU View</button>
       <button class="view-tab"        id="tab-order"     onclick="switchView('order')">Order View</button>
       <button class="view-tab"        id="tab-sub"       onclick="switchView('sub')">🔁 Subscriptions</button>
-      <button class="view-tab"        id="tab-lowmargin" onclick="switchView('lowmargin')">⚠️ Low Margin</button>
+      <button class="view-tab"        id="tab-lowmargin"  onclick="switchView('lowmargin')">⚠️ Low Margin</button>
+      <button class="view-tab"        id="tab-influencer" onclick="switchView('influencer')">🎁 Influencer</button>
     </div>
 
     <!-- SKU view -->
@@ -379,6 +381,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           </tr>
         </thead>
         <tbody id="table-body"></tbody>
+        <tfoot id="sku-tfoot"></tfoot>
       </table>
     </div>
     <div class="pagination">
@@ -412,6 +415,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           </tr>
         </thead>
         <tbody id="order-table-body"></tbody>
+        <tfoot id="order-tfoot"></tfoot>
       </table>
     </div>
     <div class="pagination">
@@ -433,18 +437,19 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <th onclick="sortSubBy('sku')">SKU <span class="sort-icon">↕</span></th>
             <th>Product</th>
             <th onclick="sortSubBy('subMonths')" class="num">Months <span class="sort-icon">↕</span></th>
-            <th onclick="sortSubBy('lineRevenue')" class="num">Rev/mo <span class="sort-icon">↕</span></th>
-            <th onclick="sortSubBy('lineCogs')" class="num">COGS/mo <span class="sort-icon">↕</span></th>
-            <th onclick="sortSubBy('lineGp')" class="num">GP $/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineRevenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineCogs')" class="num">COGS <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineGp')" class="num">GP $ <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineGpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
             <th class="num">Ship Coll/mo</th>
             <th onclick="sortSubBy('shipDelta')" class="num">Ship Δ/mo <span class="sort-icon">↕</span></th>
-            <th onclick="sortSubBy('lineNetGp')" class="num">Net GP$/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('lineNetGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineNetGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
             <th>Store</th>
           </tr>
         </thead>
         <tbody id="sub-table-body"></tbody>
+        <tfoot id="sub-tfoot"></tfoot>
       </table>
     </div>
     <div class="pagination">
@@ -486,6 +491,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           </tr>
         </thead>
         <tbody id="lm-table-body"></tbody>
+        <tfoot id="lm-tfoot"></tfoot>
       </table>
     </div>
     <div class="pagination">
@@ -494,6 +500,45 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button id="btn-next-lm" onclick="changeLMPage(1)">Next →</button>
     </div>
     </div><!-- /view-lowmargin -->
+
+    <!-- Influencer view -->
+    <div id="view-influencer" style="display:none">
+    <div class="lm-threshold">
+      <span style="font-size:.85rem;font-weight:600">🎁 Influencer / Sample Orders</span>
+      <span class="lm-summary" id="inf-summary"></span>
+      <button class="logout-btn" onclick="downloadInfluencerCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table id="inf-table">
+        <thead>
+          <tr>
+            <th onclick="sortInfBy('orderNum')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortInfBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortInfBy('source')">Channel <span class="sort-icon">↕</span></th>
+            <th>Type</th>
+            <th onclick="sortInfBy('lineCount')" class="num">Lines <span class="sort-icon">↕</span></th>
+            <th onclick="sortInfBy('revenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
+            <th onclick="sortInfBy('cogs')" class="num">COGS <span class="sort-icon">↕</span></th>
+            <th onclick="sortInfBy('gp')" class="num">GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortInfBy('gpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
+            <th class="num">Ship Collected</th>
+            <th class="num">Ship Paid</th>
+            <th onclick="sortInfBy('shipDelta')" class="num">Ship Δ <span class="sort-icon">↕</span></th>
+            <th onclick="sortInfBy('netGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortInfBy('netGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody id="inf-table-body"></tbody>
+        <tfoot id="inf-tfoot"></tfoot>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev-inf" onclick="changeInfPage(-1)">← Prev</button>
+      <span class="page-info" id="page-info-inf"></span>
+      <button id="btn-next-inf" onclick="changeInfPage(1)">Next →</button>
+    </div>
+    </div><!-- /view-influencer -->
 
   </div><!-- /dashboard -->
 </div>
@@ -904,9 +949,10 @@ window.filterTable = () => {
   currentPage = 1;
   document.getElementById('row-count').textContent = `${filteredLines.length.toLocaleString()} rows`;
   renderPage();
-  if (currentView === 'order')     renderOrderView();
-  if (currentView === 'sub')       renderSubView();
-  if (currentView === 'lowmargin') renderLowMarginView();
+  if (currentView === 'order')      renderOrderView();
+  if (currentView === 'sub')        renderSubView();
+  if (currentView === 'lowmargin')  renderLowMarginView();
+  if (currentView === 'influencer') renderInfluencerView();
 };
 
 window.sortBy = key => {
@@ -930,6 +976,7 @@ function renderPage() {
   document.getElementById('btn-prev').disabled = currentPage <= 1;
   document.getElementById('btn-next').disabled = currentPage >= total;
 
+  updateSkuTotals();
   const tbody = document.getElementById('table-body');
   tbody.innerHTML = page.map(li => {
     const missing = li.costSource === 'COST MISSING';
@@ -960,6 +1007,91 @@ function renderPage() {
       </td>
     </tr>`;
   }).join('');
+}
+
+// ─── Totals helpers ───────────────────────────────────────────────
+function sumFields(rows, keys) {
+  const t = {};
+  for (const k of keys) t[k] = 0;
+  let hasMissCogs = false, hasMissNetGp = false;
+  for (const r of rows) {
+    for (const k of keys) {
+      const v = r[k];
+      if (v !== null && v !== undefined) t[k] = Math.round((t[k] + v) * 100) / 100;
+      else {
+        if (k === 'lineCogs' || k === 'cogs') hasMissCogs = true;
+        if (k === 'lineNetGp' || k === 'netGp') hasMissNetGp = true;
+      }
+    }
+  }
+  return { t, hasMissCogs, hasMissNetGp };
+}
+
+function updateSkuTotals() {
+  const rows = filteredLines;
+  if (!rows.length) { document.getElementById('sku-tfoot').innerHTML = ''; return; }
+  const { t, hasMissCogs, hasMissNetGp } = sumFields(rows,
+    ['qty','lineRevenue','lineCogs','lineGp','shipCollected','shipPaid','shipDelta','lineNetGp']);
+  const gpPct    = t.lineRevenue ? Math.round(t.lineGp    / t.lineRevenue * 1000) / 10 : null;
+  const netGpPct = (!hasMissNetGp && t.lineRevenue) ? Math.round(t.lineNetGp / t.lineRevenue * 1000) / 10 : null;
+  document.getElementById('sku-tfoot').innerHTML = `<tr class="totals-row">
+    <td colspan="6">Total (${rows.length.toLocaleString()} rows)</td>
+    <td class="num">${t.qty}</td>
+    <td class="num">${fmt(t.lineRevenue)}</td>
+    <td class="num ${hasMissCogs?'missing':''}">${hasMissCogs?'~':''}${fmt(t.lineCogs)}</td>
+    <td class="num ${gpClass(t.lineGp)}">${fmt(t.lineGp)}</td>
+    <td class="num ${gpClass(gpPct)}">${gpPct!==null?gpPct.toFixed(1)+'%':'—'}</td>
+    <td class="num">${fmt(t.shipCollected)}</td>
+    <td class="num">${fmt(t.shipPaid)}</td>
+    <td class="num ${deltaClass(t.shipDelta)}">${fmt(t.shipDelta)}</td>
+    <td class="num ${gpClass(t.lineNetGp)}">${hasMissNetGp?'~':''}${fmt(t.lineNetGp)}</td>
+    <td class="num ${gpClass(netGpPct)}">${netGpPct!==null?netGpPct.toFixed(1)+'%':'—'}</td>
+    <td></td>
+  </tr>`;
+}
+
+function updateOrderTotals(rows, tfootId) {
+  if (!rows.length) { document.getElementById(tfootId).innerHTML = ''; return; }
+  const { t, hasMissCogs, hasMissNetGp } = sumFields(rows,
+    ['lineCount','revenue','cogs','gp','shipCollected','shipPaid','shipDelta','netGp']);
+  const gpPct    = t.revenue ? Math.round(t.gp    / t.revenue * 1000) / 10 : null;
+  const netGpPct = (!hasMissNetGp && t.revenue) ? Math.round(t.netGp / t.revenue * 1000) / 10 : null;
+  document.getElementById(tfootId).innerHTML = `<tr class="totals-row">
+    <td colspan="4">Total (${rows.length.toLocaleString()} orders)</td>
+    <td class="num">${t.lineCount}</td>
+    <td class="num">${fmt(t.revenue)}</td>
+    <td class="num ${hasMissCogs?'missing':''}">${hasMissCogs?'~':''}${fmt(t.cogs)}</td>
+    <td class="num ${gpClass(t.gp)}">${fmt(t.gp)}</td>
+    <td class="num ${gpClass(gpPct)}">${gpPct!==null?gpPct.toFixed(1)+'%':'—'}</td>
+    <td class="num">${fmt(t.shipCollected)}</td>
+    <td class="num">${fmt(t.shipPaid)}</td>
+    <td class="num ${deltaClass(t.shipDelta)}">${fmt(t.shipDelta)}</td>
+    <td class="num ${gpClass(t.netGp)}">${hasMissNetGp?'~':''}${fmt(t.netGp)}</td>
+    <td class="num ${gpClass(netGpPct)}">${netGpPct!==null?netGpPct.toFixed(1)+'%':'—'}</td>
+    <td></td>
+  </tr>`;
+}
+
+function updateSubTotals() {
+  const rows = subRows;
+  if (!rows.length) { document.getElementById('sub-tfoot').innerHTML = ''; return; }
+  const { t, hasMissCogs, hasMissNetGp } = sumFields(rows,
+    ['lineRevenue','lineCogs','lineGp','shipCollected','shipDelta','lineNetGp']);
+  const gpPct    = t.lineRevenue ? Math.round(t.lineGp    / t.lineRevenue * 1000) / 10 : null;
+  const netGpPct = (!hasMissNetGp && t.lineRevenue) ? Math.round(t.lineNetGp / t.lineRevenue * 1000) / 10 : null;
+  document.getElementById('sub-tfoot').innerHTML = `<tr class="totals-row">
+    <td colspan="5">Total (${rows.length.toLocaleString()} lines)</td>
+    <td></td>
+    <td class="num">${fmt(t.lineRevenue)}</td>
+    <td class="num ${hasMissCogs?'missing':''}">${hasMissCogs?'~':''}${fmt(t.lineCogs)}</td>
+    <td class="num ${gpClass(t.lineGp)}">${fmt(t.lineGp)}</td>
+    <td class="num ${gpClass(gpPct)}">${gpPct!==null?gpPct.toFixed(1)+'%':'—'}</td>
+    <td class="num">${fmt(t.shipCollected)}</td>
+    <td class="num ${deltaClass(t.shipDelta)}">${fmt(t.shipDelta)}</td>
+    <td class="num ${gpClass(t.lineNetGp)}">${hasMissNetGp?'~':''}${fmt(t.lineNetGp)}</td>
+    <td class="num ${gpClass(netGpPct)}">${netGpPct!==null?netGpPct.toFixed(1)+'%':'—'}</td>
+    <td></td>
+  </tr>`;
 }
 
 function fmt(n) {
@@ -1040,15 +1172,17 @@ const ORDER_PAGE_SIZE = 100;
 
 window.switchView = view => {
   currentView = view;
-  document.getElementById('view-sku').style.display       = view === 'sku'       ? '' : 'none';
-  document.getElementById('view-order').style.display     = view === 'order'     ? '' : 'none';
-  document.getElementById('view-sub').style.display       = view === 'sub'       ? '' : 'none';
-  document.getElementById('view-lowmargin').style.display = view === 'lowmargin' ? '' : 'none';
-  ['sku','order','sub','lowmargin'].forEach(v =>
+  document.getElementById('view-sku').style.display        = view === 'sku'        ? '' : 'none';
+  document.getElementById('view-order').style.display      = view === 'order'      ? '' : 'none';
+  document.getElementById('view-sub').style.display        = view === 'sub'        ? '' : 'none';
+  document.getElementById('view-lowmargin').style.display  = view === 'lowmargin'  ? '' : 'none';
+  document.getElementById('view-influencer').style.display = view === 'influencer' ? '' : 'none';
+  ['sku','order','sub','lowmargin','influencer'].forEach(v =>
     document.getElementById(`tab-${v}`).classList.toggle('active', v === view));
-  if (view === 'order')     renderOrderView();
-  if (view === 'sub')       renderSubView();
-  if (view === 'lowmargin') renderLowMarginView();
+  if (view === 'order')      renderOrderView();
+  if (view === 'sub')        renderSubView();
+  if (view === 'lowmargin')  renderLowMarginView();
+  if (view === 'influencer') renderInfluencerView();
 };
 
 function computeOrderRows(lines) {
@@ -1114,6 +1248,7 @@ function renderOrderView() {
 function renderOrderPage() {
   const start = (orderPage - 1) * ORDER_PAGE_SIZE;
   const page  = orderRows.slice(start, start + ORDER_PAGE_SIZE);
+  updateOrderTotals(orderRows, 'order-tfoot');
   document.getElementById('order-table-body').innerHTML = page.map(o => {
     const rowCls = o.missingCost ? 'style="background:rgba(248,113,113,.06)"' : '';
     return `<tr ${rowCls}>
@@ -1182,6 +1317,7 @@ function renderSubPage() {
   const start = (subPage - 1) * SUB_PAGE_SIZE;
   const page  = subRows.slice(start, start + SUB_PAGE_SIZE);
   const max   = Math.ceil(subRows.length / SUB_PAGE_SIZE);
+  updateSubTotals();
   document.getElementById('sub-table-body').innerHTML = page.map(li => {
     const missing = li.costSource === 'COST MISSING';
     return `<tr>
@@ -1267,6 +1403,7 @@ function renderLMPage() {
   const page  = lmRows.slice(start, start + LM_PAGE_SIZE);
   const max   = Math.ceil(lmRows.length / LM_PAGE_SIZE);
 
+  updateOrderTotals(lmRows, 'lm-tfoot');
   document.getElementById('lm-table-body').innerHTML = page.map(o => {
     const isOpen = lmExpanded.has(o.orderNum);
     const safe   = CSS.escape ? CSS.escape(o.orderNum) : o.orderNum.replace(/[^a-zA-Z0-9]/g, '_');
@@ -1376,6 +1513,166 @@ window.downloadLowMarginCSV = () => {
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = `low_margin_below_${threshold}pct.csv`;
+  a.click();
+};
+
+// ─── Influencer View ──────────────────────────────────────────────
+const INF_PAGE_SIZE = 100;
+let infSortKey = 'date', infSortAsc = false, infPage = 1, infRows = [];
+let infLinesByOrder = new Map();
+let infExpanded = new Set();
+
+window.sortInfBy = key => {
+  if (infSortKey === key) infSortAsc = !infSortAsc; else { infSortKey = key; infSortAsc = false; }
+  infPage = 1; renderInfPage();
+};
+window.changeInfPage = dir => {
+  const max = Math.ceil(infRows.length / INF_PAGE_SIZE);
+  infPage = Math.max(1, Math.min(max, infPage + dir));
+  infExpanded.clear();
+  renderInfPage();
+};
+window.toggleInfExpand = orderNum => {
+  if (infExpanded.has(orderNum)) infExpanded.delete(orderNum);
+  else infExpanded.add(orderNum);
+  renderInfPage();
+};
+
+window.renderInfluencerView = function() {
+  // Build order→lines index (influencer orders only)
+  infLinesByOrder.clear();
+  for (const li of filteredLines) {
+    if (!li.isInfluencerSample) continue;
+    if (!infLinesByOrder.has(li.orderNum)) infLinesByOrder.set(li.orderNum, []);
+    infLinesByOrder.get(li.orderNum).push(li);
+  }
+
+  // Compute order rows for influencer orders only
+  const infLines = filteredLines.filter(li => li.isInfluencerSample);
+  infRows = computeOrderRows(infLines);
+
+  infRows.sort((a, b) => {
+    let va = a[infSortKey], vb = b[infSortKey];
+    if (va === null || va === undefined) va = infSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = infSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return infSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return infSortAsc ? va - vb : vb - va;
+  });
+
+  const totalCogs = infRows.reduce((s, o) => s + (o.cogs || 0), 0);
+  document.getElementById('inf-summary').textContent =
+    `${infRows.length} orders · total COGS: ${fmt(totalCogs)}`;
+
+  infPage = 1;
+  infExpanded.clear();
+  renderInfPage();
+};
+
+function renderInfPage() {
+  const start = (infPage - 1) * INF_PAGE_SIZE;
+  const page  = infRows.slice(start, start + INF_PAGE_SIZE);
+  const max   = Math.ceil(infRows.length / INF_PAGE_SIZE);
+
+  updateOrderTotals(infRows, 'inf-tfoot');
+
+  document.getElementById('inf-table-body').innerHTML = page.map(o => {
+    const isOpen = infExpanded.has(o.orderNum);
+    const safe   = CSS.escape ? CSS.escape(o.orderNum) : o.orderNum.replace(/[^a-zA-Z0-9]/g, '_');
+    const lines  = infLinesByOrder.get(o.orderNum) || [];
+
+    const detailHtml = isOpen ? `
+      <tr id="inf-detail-${safe}" class="lm-detail-row">
+        <td colspan="15" style="padding:8px 12px!important">
+          <table class="detail-subtable">
+            <thead><tr>
+              <th>SKU</th><th>Product</th>
+              <th class="num" style="text-align:right">Qty</th>
+              <th class="num" style="text-align:right">Revenue</th>
+              <th class="num" style="text-align:right">COGS</th>
+              <th class="num" style="text-align:right">GP $</th>
+              <th class="num" style="text-align:right">GP%</th>
+              <th class="num" style="text-align:right">Net GP $</th>
+              <th class="num" style="text-align:right">Net GP%</th>
+              <th>Cost source</th>
+            </tr></thead>
+            <tbody>
+              ${lines.map(li => {
+                const miss = li.costSource === 'COST MISSING';
+                return `<tr>
+                  <td style="font-size:.75rem">${li.sku}</td>
+                  <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.75rem"
+                      title="${li.product}">${li.product}</td>
+                  <td class="num" style="text-align:right">${li.qty}</td>
+                  <td class="num" style="text-align:right">${fmt(li.lineRevenue)}</td>
+                  <td class="num ${miss?'missing':''}" style="text-align:right">${miss?'?':fmt(li.lineCogs)}</td>
+                  <td class="num ${gpClass(li.lineGp)}" style="text-align:right">${fmt(li.lineGp)}</td>
+                  <td class="num ${gpClass(li.lineGpPct)}" style="text-align:right">${li.lineGpPct!==null?li.lineGpPct.toFixed(1)+'%':'—'}</td>
+                  <td class="num ${gpClass(li.lineNetGp)}" style="text-align:right">${li.lineNetGp!==null?fmt(li.lineNetGp):'—'}</td>
+                  <td class="num ${gpClass(li.lineNetGpPct)}" style="text-align:right">${li.lineNetGpPct!==null?li.lineNetGpPct.toFixed(1)+'%':'—'}</td>
+                  <td style="font-size:.72rem;color:var(--muted)">${li.costSource||''}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </td>
+      </tr>` : '';
+
+    return `<tr class="lm-order-row${isOpen?' open':''}" onclick="toggleInfExpand('${o.orderNum.replace(/'/g,"\\'")}')">
+      <td>${o.orderNum}</td>
+      <td>${o.date || ''}</td>
+      <td>${o.source || ''}</td>
+      <td style="color:var(--muted);font-size:.72rem">${o.orderCat || ''}</td>
+      <td class="num">${o.lineCount}</td>
+      <td class="num">${fmt(o.revenue)}</td>
+      <td class="num ${o.missingCost?'missing':''}">${o.missingCost?'~':''}${fmt(o.cogs)}</td>
+      <td class="num ${gpClass(o.gp)}">${fmt(o.gp)}</td>
+      <td class="num ${gpClass(o.gpPct)}">${o.gpPct!==null?o.gpPct.toFixed(1)+'%':'—'}</td>
+      <td class="num">${o.shipCollected!==null?fmt(o.shipCollected):''}</td>
+      <td class="num">${o.shipPaid!==null?fmt(o.shipPaid):''}</td>
+      <td class="num ${deltaClass(o.shipDelta)}">${o.shipDelta!==null?fmt(o.shipDelta):''}</td>
+      <td class="num ${gpClass(o.netGp)}">${o.netGp!==null?fmt(o.netGp):'—'}</td>
+      <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct!==null?o.netGpPct.toFixed(1)+'%':'—'}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;color:var(--muted)" title="${o.shipNote||''}">
+        <span class="badge badge-influencer">🎁 Influencer</span>
+        ${o.shipNote?`<span style="font-size:.72rem"> ${o.shipNote}</span>`:''}
+      </td>
+    </tr>${detailHtml}`;
+  }).join('');
+
+  document.getElementById('page-info-inf').textContent =
+    `${infRows.length} orders · page ${infPage}/${Math.max(1,max)}`;
+  document.getElementById('btn-prev-inf').disabled = infPage <= 1;
+  document.getElementById('btn-next-inf').disabled = infPage >= max;
+}
+
+window.downloadInfluencerCSV = () => {
+  if (!infRows.length) return;
+  const rows = [['Order','Date','Channel','Type','Lines','Revenue','COGS','GP $','GP %',
+                 'Ship Collected','Ship Paid','Ship Delta','Net GP $','Net GP %',
+                 '--- SKU ---','Product','Qty','Line Revenue','Line COGS','Line GP $','Line GP %',
+                 'Line Net GP $','Line Net GP %','Cost Source']];
+  for (const o of infRows) {
+    const lines = infLinesByOrder.get(o.orderNum) || [];
+    lines.forEach((li, i) => {
+      rows.push([
+        i===0?o.orderNum:'', i===0?(o.date||''):'', i===0?(o.source||''):'',
+        i===0?(o.orderCat||''):'', i===0?o.lineCount:'',
+        i===0?(o.revenue??''):'', i===0?(o.cogs??''):'',
+        i===0?(o.gp??''):'', i===0?(o.gpPct!==null?o.gpPct+'%':''):'',
+        i===0?(o.shipCollected??''):'', i===0?(o.shipPaid??''):'', i===0?(o.shipDelta??''):'',
+        i===0?(o.netGp??''):'', i===0?(o.netGpPct!==null?o.netGpPct+'%':''):'',
+        li.sku, li.product, li.qty,
+        li.lineRevenue??'', li.lineCogs??'',
+        li.lineGp??'', li.lineGpPct!==null?li.lineGpPct+'%':'',
+        li.lineNetGp??'', li.lineNetGpPct!==null?li.lineNetGpPct+'%':'',
+        li.costSource||''
+      ]);
+    });
+  }
+  const csv = rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'influencer_orders.csv';
   a.click();
 };
 
