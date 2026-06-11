@@ -555,14 +555,18 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <table>
         <thead>
           <tr>
+            <th onclick="sortLowSkuBy('orderNum')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortLowSkuBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortLowSkuBy('source')">Channel <span class="sort-icon">↕</span></th>
+            <th onclick="sortLowSkuBy('store')">Store <span class="sort-icon">↕</span></th>
+            <th onclick="sortLowSkuBy('qty')" class="num">Qty <span class="sort-icon">↕</span></th>
             <th onclick="sortLowSkuBy('sku')">SKU <span class="sort-icon">↕</span></th>
             <th>Product</th>
-            <th onclick="sortLowSkuBy('qty')" class="num">Qty <span class="sort-icon">↕</span></th>
-            <th onclick="sortLowSkuBy('revenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
-            <th onclick="sortLowSkuBy('cogs')" class="num">COGS <span class="sort-icon">↕</span></th>
-            <th onclick="sortLowSkuBy('gp')" class="num">GP $ <span class="sort-icon">↕</span></th>
-            <th onclick="sortLowSkuBy('gpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
-            <th onclick="sortLowSkuBy('costSource')" style="font-size:.75rem">Cost Source</th>
+            <th onclick="sortLowSkuBy('lineRevenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
+            <th onclick="sortLowSkuBy('lineCogs')" class="num">COGS <span class="sort-icon">↕</span></th>
+            <th onclick="sortLowSkuBy('lineGp')" class="num">GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortLowSkuBy('lineGpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
+            <th style="font-size:.75rem">Cost Source</th>
           </tr>
         </thead>
         <tbody id="lowsku-table-body"></tbody>
@@ -1552,41 +1556,18 @@ window.downloadLowMarginCSV = () => {
 };
 
 // ─── Low Margin SKU View ─────────────────────────────────────────
-let lowSkuRows = [], lowSkuSortKey = 'gpPct', lowSkuSortAsc = true;
+let lowSkuRows = [], lowSkuSortKey = 'lineGpPct', lowSkuSortAsc = true;
 
 window.renderLowSkuView = function() {
   const threshold = parseFloat(document.getElementById('lowsku-pct-threshold').value) || 40;
 
-  // Aggregate filteredLines by SKU
-  const skuMap = new Map();
-  for (const li of filteredLines) {
-    if (li.costSource === 'COST MISSING') continue; // skip rows with no cost — GP% meaningless
-    const key = li.sku || '(no SKU)';
-    if (!skuMap.has(key)) {
-      skuMap.set(key, { sku: key, product: li.product, vendor: li.vendor,
-                        qty: 0, revenue: 0, cogs: 0, gp: 0, costSource: li.costSource });
-    }
-    const r = skuMap.get(key);
-    r.qty     += li.qty || 0;
-    r.revenue += li.lineRevenue || 0;
-    r.cogs    += li.lineCogs    || 0;
-    r.gp      += li.lineGp      || 0;
-    // Keep most recent cost source
-    if (li.costSource && li.costSource !== 'COST MISSING') r.costSource = li.costSource;
-  }
-
-  // Compute GP% and filter
-  lowSkuRows = [];
-  for (const r of skuMap.values()) {
-    r.gpPct = r.revenue !== 0 ? Math.round(r.gp / r.revenue * 1000) / 10 : null;
-    r.revenue = Math.round(r.revenue * 100) / 100;
-    r.cogs    = Math.round(r.cogs    * 100) / 100;
-    r.gp      = Math.round(r.gp      * 100) / 100;
-    if (r.gpPct !== null && r.gpPct < threshold) lowSkuRows.push(r);
-  }
+  // Individual line items with a known GP% below threshold
+  lowSkuRows = filteredLines.filter(li =>
+    li.lineGpPct !== null && li.lineGpPct < threshold && li.costSource !== 'COST MISSING'
+  );
 
   // Sort
-  lowSkuRows.sort((a, b) => {
+  lowSkuRows = [...lowSkuRows].sort((a, b) => {
     let va = a[lowSkuSortKey], vb = b[lowSkuSortKey];
     if (va === null || va === undefined) va = lowSkuSortAsc ? Infinity : -Infinity;
     if (vb === null || vb === undefined) vb = lowSkuSortAsc ? Infinity : -Infinity;
@@ -1594,54 +1575,58 @@ window.renderLowSkuView = function() {
     return lowSkuSortAsc ? va - vb : vb - va;
   });
 
-  const totalGp  = lowSkuRows.reduce((s, r) => s + r.gp, 0);
-  const totalRev = lowSkuRows.reduce((s, r) => s + r.revenue, 0);
-  const avgPct   = totalRev > 0 ? (totalGp / totalRev * 100).toFixed(1) : '—';
-  document.getElementById('lowsku-summary').textContent =
-    `${lowSkuRows.length} SKUs · total GP: ${fmt(totalGp)} · avg ${avgPct}%`;
+  const totalRev  = lowSkuRows.reduce((s, r) => s + (r.lineRevenue || 0), 0);
+  const totalGp   = lowSkuRows.reduce((s, r) => s + (r.lineGp      || 0), 0);
+  const totalCogs = lowSkuRows.reduce((s, r) => s + (r.lineCogs     || 0), 0);
+  const totalQty  = lowSkuRows.reduce((s, r) => s + (r.qty          || 0), 0);
+  const avgPct    = totalRev > 0 ? (totalGp / totalRev * 100).toFixed(1) : '—';
+  const totalGpPctStr = totalRev > 0 ? (totalGp / totalRev * 100).toFixed(1) + '%' : '—';
 
-  // Totals row
-  const totalCogs = lowSkuRows.reduce((s, r) => s + r.cogs, 0);
-  const totalQty  = lowSkuRows.reduce((s, r) => s + r.qty, 0);
-  const totalGpPct = totalRev > 0 ? (totalGp / totalRev * 100).toFixed(1) + '%' : '—';
+  document.getElementById('lowsku-summary').textContent =
+    `${lowSkuRows.length} lines · total GP: ${fmt(totalGp)} · avg ${avgPct}%`;
+
   document.getElementById('lowsku-tfoot').innerHTML = `<tr class="totals-row">
-    <td colspan="2">Total (${lowSkuRows.length} SKUs)</td>
+    <td colspan="4">Total (${lowSkuRows.length} lines)</td>
     <td class="num">${totalQty.toLocaleString()}</td>
     <td class="num">${fmt(totalRev)}</td>
     <td class="num">${fmt(totalCogs)}</td>
     <td class="num ${gpClass(totalGp)}">${fmt(totalGp)}</td>
-    <td class="num ${gpClass(parseFloat(totalGpPct))}">${totalGpPct}</td>
+    <td class="num ${gpClass(parseFloat(avgPct))}">${totalGpPctStr}</td>
     <td></td>
   </tr>`;
 
-  document.getElementById('lowsku-table-body').innerHTML = lowSkuRows.map(r => `
+  document.getElementById('lowsku-table-body').innerHTML = lowSkuRows.map(li => `
     <tr>
-      <td style="font-family:monospace;font-size:.8rem">${r.sku}</td>
-      <td style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8rem"
-          title="${r.product}">${r.product}</td>
-      <td class="num">${r.qty.toLocaleString()}</td>
-      <td class="num">${fmt(r.revenue)}</td>
-      <td class="num">${fmt(r.cogs)}</td>
-      <td class="num ${gpClass(r.gp)}">${fmt(r.gp)}</td>
-      <td class="num ${gpClass(r.gpPct)}">${r.gpPct !== null ? r.gpPct.toFixed(1) + '%' : '—'}</td>
-      <td style="font-size:.72rem;color:var(--muted)">${r.costSource || ''}</td>
+      <td style="font-size:.78rem;color:var(--muted)">${li.orderNum}</td>
+      <td style="font-size:.78rem">${li.date || ''}</td>
+      <td style="font-size:.78rem">${li.source || ''}</td>
+      <td style="font-size:.78rem;color:var(--muted)">${li.store || ''}</td>
+      <td class="num">${li.qty}</td>
+      <td style="font-family:monospace;font-size:.78rem">${li.sku}</td>
+      <td style="font-size:.8rem;white-space:normal">${li.product}</td>
+      <td class="num">${fmt(li.lineRevenue)}</td>
+      <td class="num">${fmt(li.lineCogs)}</td>
+      <td class="num ${gpClass(li.lineGp)}">${fmt(li.lineGp)}</td>
+      <td class="num ${gpClass(li.lineGpPct)}">${li.lineGpPct !== null ? li.lineGpPct.toFixed(1) + '%' : '—'}</td>
+      <td style="font-size:.72rem;color:var(--muted)">${li.costSource || ''}</td>
     </tr>`).join('');
 };
 
 window.sortLowSkuBy = function(key) {
   if (lowSkuSortKey === key) lowSkuSortAsc = !lowSkuSortAsc;
-  else { lowSkuSortKey = key; lowSkuSortAsc = key === 'gpPct'; }
+  else { lowSkuSortKey = key; lowSkuSortAsc = key === 'lineGpPct'; }
   renderLowSkuView();
 };
 
 window.downloadLowSkuCSV = function() {
   const threshold = parseFloat(document.getElementById('lowsku-pct-threshold').value) || 40;
-  const header = ['SKU','Product','Vendor','Qty','Revenue','COGS','GP $','GP%','Cost Source'];
-  const rows = [header, ...lowSkuRows.map(r => [
-    r.sku, r.product, r.vendor || '', r.qty,
-    r.revenue, r.cogs, r.gp,
-    r.gpPct !== null ? r.gpPct + '%' : '',
-    r.costSource || ''
+  const header = ['Order','Date','Channel','Store','Qty','SKU','Product','Revenue','COGS','GP $','GP%','Cost Source'];
+  const rows = [header, ...lowSkuRows.map(li => [
+    li.orderNum, li.date, li.source || '', li.store || '', li.qty,
+    li.sku, li.product,
+    li.lineRevenue ?? '', li.lineCogs ?? '', li.lineGp ?? '',
+    li.lineGpPct !== null ? li.lineGpPct + '%' : '',
+    li.costSource || ''
   ])];
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
