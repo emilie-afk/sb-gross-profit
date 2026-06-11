@@ -16,6 +16,7 @@ const MCG_TIER = {
   'faire_2':    3.00,  // Faire Ala Carte 2"
   'faire_4':    5.00,  // Faire Ala Carte 4"
   'pack':       2.00,  // Rack/Pack (RAKN/RAKZ/RAJZ/RAJN) — $2/plant × count from SKU
+  'airplant':   3.00,  // Tillandsia airplants (PPJZ/PPKZ) — $3/fulfillment
 };
 
 const MCG_PREFIXES = [
@@ -144,6 +145,8 @@ function mcgTierCost(sku, mcgCosts) {
   // 4" pot upgrade: S3/C3/SX/CX/S1 + POT or UPGRADE in SKU
   if (['S3','C3','SX','CX','S1'].some(p=>s.startsWith(p)) && (s.includes('POT')||s.includes('UPGRADE')))
                                                             return [MCG_TIER['4inch_pot'],'MCG tier (4" Pot Upgrade)'];
+  // Tillandsia airplants (PPJZ/PPKZ) — 2" plant tier (not in pot sheet)
+  if (s.startsWith('PPJZ') || s.startsWith('PPKZ'))        return [MCG_TIER.airplant,   'MCG tier (airplant 2")'];
   // 2" base
   if (s.startsWith('S2')||s.startsWith('C2')||s.startsWith('E1031'))
                                                             return [MCG_TIER['2inch'],   'MCG tier (2")'];
@@ -189,8 +192,8 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
 
   // 1. MCG Total sheet has the exact cost — always wins
   if (mcgCosts[key] !== undefined)     return [mcgCosts[key],     'MCG Total sheet'];
-  // 1b. Pot SKU variant suffix (e.g. EEZZ7620.BR-1 → try EEZZ7620)
-  //     Pot sheet stores base SKU; variant suffix after '.' is color/size, not a separate SKU
+  // 1b. Pot SKU variant suffix (e.g. EEZZ7650.WH → try base EEZZ7650)
+  //     Single-unit costs like EEZZ7620.BR-1 are stored directly in mcgCosts (step 1 above)
   if (key.includes('.')) {
     const base = key.split('.')[0];
     if (mcgCosts[base] !== undefined) return [mcgCosts[base], 'MCG Pot Costs'];
