@@ -479,8 +479,11 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     }
 
     // Net GP = GP after absorbing shipping profit/loss (order-level, first row only)
-    const lineNetGp = (lineGp !== null && shipDelta !== null)
-      ? Math.round((lineGp + shipDelta) * 100) / 100 : null;
+    // If shipDelta is null but customer paid $0 shipping, treat delta as 0 (Net GP = GP$)
+    const effectiveDelta = shipDelta !== null ? shipDelta
+                         : (shipCollected === 0 ? 0 : null);
+    const lineNetGp = (lineGp !== null && effectiveDelta !== null)
+      ? Math.round((lineGp + effectiveDelta) * 100) / 100 : null;
     const lineNetGpPct = (lineNetGp !== null && lineRevenue !== 0)
       ? Math.round(lineNetGp / lineRevenue * 1000) / 10 : null;
 
