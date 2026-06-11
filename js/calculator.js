@@ -485,12 +485,8 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       }
     }
 
-    // Net GP = GP after absorbing shipping profit/loss (order-level, first row only)
-    // If shipDelta is null but customer paid $0 shipping, treat delta as 0 (Net GP = GP$)
-    const effectiveDelta = shipDelta !== null ? shipDelta
-                         : (shipCollected === 0 ? 0 : null);
-    const lineNetGp = (lineGp !== null && effectiveDelta !== null)
-      ? Math.round((lineGp + effectiveDelta) * 100) / 100 : null;
+    // Net GP — set to GP$ initially; post-pass below prorates actual shipDelta across lines
+    const lineNetGp = lineGp;
     const lineNetGpPct = (lineNetGp !== null && lineRevenue !== 0)
       ? Math.round(lineNetGp / lineRevenue * 1000) / 10 : null;
 
@@ -516,9 +512,9 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
   }
   for (const indices of orderGroups.values()) {
     const firstLi = lineItems[indices[0]];
-    if (firstLi.shipDelta === null) continue; // no shipping data for this order
+    // If no ShipStation data, shipDelta=0 so Net GP = GP$ (don't leave blank)
+    const shipDelta = firstLi.shipDelta ?? 0;
     const totalRev = indices.reduce((sum, i) => sum + (lineItems[i].lineRevenue || 0), 0);
-    const { shipDelta } = firstLi;
     for (const idx of indices) {
       const li  = lineItems[idx];
       const share = totalRev > 0 ? (li.lineRevenue || 0) / totalRev : 1 / indices.length;
