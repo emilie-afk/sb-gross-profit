@@ -353,6 +353,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button class="view-tab"        id="tab-sub"       onclick="switchView('sub')">🔁 Subscriptions</button>
       <button class="view-tab"        id="tab-lowmargin"  onclick="switchView('lowmargin')">⚠️ Low Margin</button>
       <button class="view-tab"        id="tab-lowsku"     onclick="switchView('lowsku')">📉 Low Margin SKU</button>
+      <button class="view-tab"        id="tab-giftcard"   onclick="switchView('giftcard')">🎟️ Gift Cards</button>
       <button class="view-tab"        id="tab-influencer" onclick="switchView('influencer')">🎁 Influencer</button>
     </div>
 
@@ -501,6 +502,33 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button id="btn-next-lm" onclick="changeLMPage(1)">Next →</button>
     </div>
     </div><!-- /view-lowmargin -->
+
+    <!-- Gift Card view -->
+    <div id="view-giftcard" style="display:none">
+    <div class="lm-threshold">
+      <span style="font-size:.85rem;font-weight:600">🎟️ Gift Cards</span>
+      <span class="lm-summary" id="gc-summary"></span>
+      <button class="logout-btn" onclick="downloadGiftCardCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th onclick="sortGcBy('orderNum')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortGcBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortGcBy('source')">Channel <span class="sort-icon">↕</span></th>
+            <th onclick="sortGcBy('store')">Store <span class="sort-icon">↕</span></th>
+            <th onclick="sortGcBy('sku')">SKU <span class="sort-icon">↕</span></th>
+            <th>Product</th>
+            <th onclick="sortGcBy('qty')" class="num">Qty <span class="sort-icon">↕</span></th>
+            <th onclick="sortGcBy('lineRevenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
+          </tr>
+        </thead>
+        <tbody id="gc-table-body"></tbody>
+        <tfoot id="gc-tfoot"></tfoot>
+      </table>
+    </div>
+    </div><!-- /view-giftcard -->
 
     <!-- Influencer view -->
     <div id="view-influencer" style="display:none">
@@ -989,6 +1017,7 @@ window.filterTable = () => {
   if (currentView === 'sub')        renderSubView();
   if (currentView === 'lowmargin')  renderLowMarginView();
   if (currentView === 'lowsku')     renderLowSkuView();
+  if (currentView === 'giftcard')   renderGiftCardView();
   if (currentView === 'influencer') renderInfluencerView();
 };
 
@@ -1214,13 +1243,15 @@ window.switchView = view => {
   document.getElementById('view-sub').style.display        = view === 'sub'        ? '' : 'none';
   document.getElementById('view-lowmargin').style.display  = view === 'lowmargin'  ? '' : 'none';
   document.getElementById('view-lowsku').style.display     = view === 'lowsku'     ? '' : 'none';
+  document.getElementById('view-giftcard').style.display   = view === 'giftcard'   ? '' : 'none';
   document.getElementById('view-influencer').style.display = view === 'influencer' ? '' : 'none';
-  ['sku','order','sub','lowmargin','lowsku','influencer'].forEach(v =>
+  ['sku','order','sub','lowmargin','lowsku','giftcard','influencer'].forEach(v =>
     document.getElementById(`tab-${v}`).classList.toggle('active', v === view));
   if (view === 'order')      renderOrderView();
   if (view === 'sub')        renderSubView();
   if (view === 'lowmargin')  renderLowMarginView();
   if (view === 'lowsku')     renderLowSkuView();
+  if (view === 'giftcard')   renderGiftCardView();
   if (view === 'influencer') renderInfluencerView();
 };
 
@@ -1561,9 +1592,10 @@ let lowSkuRows = [], lowSkuSortKey = 'lineGpPct', lowSkuSortAsc = true;
 window.renderLowSkuView = function() {
   const threshold = parseFloat(document.getElementById('lowsku-pct-threshold').value) || 40;
 
-  // Individual line items with a known GP% below threshold
+  // Individual line items with a known GP% below threshold (exclude gift cards — cost is $0 by design)
   lowSkuRows = filteredLines.filter(li =>
-    li.lineGpPct !== null && li.lineGpPct < threshold && li.costSource !== 'COST MISSING'
+    li.lineGpPct !== null && li.lineGpPct < threshold &&
+    li.costSource !== 'COST MISSING' && li.costSource !== 'Gift Card (no COGS)'
   );
 
   // Sort
@@ -1632,6 +1664,64 @@ window.downloadLowSkuCSV = function() {
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = `low_margin_sku_below_${threshold}pct.csv`;
+  a.click();
+};
+
+// ─── Gift Card View ───────────────────────────────────────────────
+let gcRows = [], gcSortKey = 'date', gcSortAsc = false;
+
+window.renderGiftCardView = function() {
+  gcRows = [...filteredLines.filter(li => li.costSource === 'Gift Card (no COGS)')];
+
+  gcRows.sort((a, b) => {
+    let va = a[gcSortKey], vb = b[gcSortKey];
+    if (va === null || va === undefined) va = gcSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = gcSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return gcSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return gcSortAsc ? va - vb : vb - va;
+  });
+
+  const totalRev = gcRows.reduce((s, li) => s + (li.lineRevenue || 0), 0);
+  const totalQty = gcRows.reduce((s, li) => s + (li.qty || 0), 0);
+  const orders   = new Set(gcRows.map(li => li.orderNum)).size;
+  document.getElementById('gc-summary').textContent =
+    `${gcRows.length} lines · ${orders} orders · total revenue: ${fmt(totalRev)}`;
+
+  document.getElementById('gc-tfoot').innerHTML = `<tr class="totals-row">
+    <td colspan="6">Total (${gcRows.length} lines)</td>
+    <td class="num">${totalQty.toLocaleString()}</td>
+    <td class="num">${fmt(totalRev)}</td>
+  </tr>`;
+
+  document.getElementById('gc-table-body').innerHTML = gcRows.map(li => `
+    <tr>
+      <td style="font-size:.78rem;color:var(--muted)">${li.orderNum}</td>
+      <td style="font-size:.78rem">${li.date || ''}</td>
+      <td style="font-size:.78rem">${li.source || ''}</td>
+      <td style="font-size:.78rem;color:var(--muted)">${li.store || ''}</td>
+      <td style="font-family:monospace;font-size:.78rem">${li.sku}</td>
+      <td style="font-size:.8rem;white-space:normal">${li.product}</td>
+      <td class="num">${li.qty}</td>
+      <td class="num">${fmt(li.lineRevenue)}</td>
+    </tr>`).join('');
+};
+
+window.sortGcBy = function(key) {
+  if (gcSortKey === key) gcSortAsc = !gcSortAsc;
+  else { gcSortKey = key; gcSortAsc = false; }
+  renderGiftCardView();
+};
+
+window.downloadGiftCardCSV = function() {
+  const header = ['Order','Date','Channel','Store','SKU','Product','Qty','Revenue'];
+  const rows = [header, ...gcRows.map(li => [
+    li.orderNum, li.date, li.source || '', li.store || '',
+    li.sku, li.product, li.qty, li.lineRevenue ?? ''
+  ])];
+  const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'gift_cards.csv';
   a.click();
 };
 
