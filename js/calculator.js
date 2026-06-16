@@ -186,6 +186,8 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   }
 
   // 0. Hard overrides — these take priority over the MCG Total sheet
+  // Gift cards — no physical cost
+  if (/^GC\d/i.test(key)) return [0.00, 'Gift Card (no COGS)'];
   // Random/assorted 2" MCG succulents (JN prefix, no size prefix like S2/C2)
   // These are bulk-assorted plants at $2/plant, not the specific-species $4 tier
   if (/^JN\d/i.test(key)) return [2.00, 'MCG tier (Random 2" $2)'];
