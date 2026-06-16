@@ -386,6 +386,54 @@ else:
 # AS and L2G override HP if there's any SKU overlap; MCG is always separate
 product_costs = {**hp_costs, **as_costs, **l2g_costs}
 
+# ── Manual MCG cost overrides ─────────────────────────────────────────────────
+# SKUs confirmed from MCG invoices that are not in the Google Sheet.
+# Formula: MCG flat rate + actual product cost charged on invoice.
+# Flat rates: accessories_fragile=$2, Ret 2"=$4, Ret 4"=$6, Air=$3
+# These override the Google Sheet if there's a conflict (invoice = source of truth).
+MANUAL_MCG_COSTS = {
+    # Pots / accessories (accessories_fragile flat $2 + $0 product cost)
+    'EEZZ7680':      2.00,  # accessories_fragile only
+    'EEZZ7631':      2.00,  # accessories_fragile only
+    'BRUSHSTROKEPOT3IN': 2.00,  # accessories_fragile only
+    'EEZZ7624.GO-1': 2.00,
+    'EEZZ7630':      2.00,
+    'EEZZ5998':      2.00,
+    'WX-IDMD-GLKP':  2.00,
+    '3V-UDMV-YTLG':  2.00,
+    # Gift boxes / packs
+    'HHZZ7710':      6.00,  # Mother's Day gift box w/ coaster
+    'HHZZ7709':      4.00,  # Mother's Day gift box w/ succulent
+    'XAZZ3141-10':   1.00,  # retail_cuttings_10
+    # Air plant supplies (Air flat $3 + product cost)
+    'EBZZ4168':      7.57,  # Air Plant Food ($3 + $4.57)
+    'EBZZ6055':      4.93,  # Succulent Fertilizer ($2 + $2.93)
+    # Accessories with product cost (accessories_fragile $2 + product)
+    'EEVZ3464':      6.09,  # Rustic Corrugated Pot ($2 + $4.09)
+    # Mangave plugs — Ret 2" $4 + product cost from invoice
+    'S1KY4428':      5.80,
+    'S1KY7655':      5.80,
+    'S1KY7656':      5.80,
+    # Rare / high-cost plant SKUs — Ret 4" $6 + product cost
+    'C2JY4489':      8.15,
+    'C3JY7370':      8.15,
+    'S2KN1178':      5.78,
+    'S3KN4090':      8.15,
+    'S3KN4540':      8.43,
+    'S3KN7102':      6.60,
+    'S3KN7664':     10.40,
+    'S3KY2945':      7.66,
+    'S3KY6304':      7.20,
+    'S3KY7342':      7.90,
+    'S3KY7642':      7.40,
+    'S3VY6169':      8.15,
+}
+# Apply: sheet values take precedence; manual fills in what's missing
+for sku, cost in MANUAL_MCG_COSTS.items():
+    mcg_costs.setdefault(sku, cost)
+    mcg_costs.setdefault(sku.upper(), cost)
+print(f"  Manual overrides applied: {len(MANUAL_MCG_COSTS)} SKUs")
+
 print("\nWriting data files...")
 write_json('mcg_total.json',     mcg_costs)
 write_json('product_costs.json', product_costs)
