@@ -953,7 +953,7 @@ function renderShipping(shipByType) {
   const grid = document.getElementById('ship-grid');
   grid.innerHTML = '';
   for (const [type, v] of Object.entries(shipByType)) {
-    const delta = v.delta;
+    const delta = v.collected - v.paid;
     const html = `
       <div class="ship-card">
         <div class="type">${type}</div>
@@ -1371,7 +1371,8 @@ window.changeSubPage = dir => {
 };
 
 function renderSubView() {
-  subRows = filteredLines.filter(l => l.subMonths > 1);
+  const _s = l => (l.sku || '').toUpperCase();
+  subRows = filteredLines.filter(l => _s(l).startsWith('SUB') || _s(l).startsWith('GSUB'));
   subRows.sort((a, b) => {
     let va = a[subSortKey], vb = b[subSortKey];
     if (va === null || va === undefined) va = subSortAsc ? Infinity : -Infinity;
