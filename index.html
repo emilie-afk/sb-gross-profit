@@ -279,7 +279,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
         <!-- Saved files -->
         <div class="saved-section">
-          <h3>Saved files</h3>
+          <h3 style="display:flex;justify-content:space-between;align-items:center">
+            Saved files
+            <button onclick="clearAllSavedFiles()" title="Clear all saved files" style="font-size:.68rem;padding:2px 8px;background:transparent;border:1px solid var(--muted);color:var(--muted);border-radius:4px;cursor:pointer;line-height:1.4">Clear all</button>
+          </h3>
           <div class="saved-label">Shopify Orders</div>
           <div class="saved-row" id="saved-orders"></div>
           <div class="saved-label" style="margin-top:8px">ShipStation</div>
@@ -639,9 +642,18 @@ function saveFilesToLS(name, type, text) {
   lsSave([...orders, ...ship, ...costs]);
 }
 function deleteFromLS(id) {
-  lsSave(lsLoad().filter(f => f.id !== id));
+  // Remove key first to free space, then re-save the filtered list
+  const arr = lsLoad().filter(f => f.id !== id);
+  localStorage.removeItem(LS_KEY);
+  lsSave(arr);
   renderSavedFiles();
 }
+window.clearAllSavedFiles = () => {
+  localStorage.removeItem(LS_KEY);
+  savedOrdersTexts = null; savedShipText = null; savedCostsText = null;
+  selectedSavedOrders = new Set(); selectedSavedShip = null; selectedSavedCosts = null;
+  renderSavedFiles();
+};
 
 // ─── Render saved file chips ──────────────────────────────────────
 function renderSavedFiles() {
