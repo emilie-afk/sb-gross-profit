@@ -191,6 +191,16 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   // Random/assorted 2" MCG succulents (JN prefix, no size prefix like S2/C2)
   // These are bulk-assorted plants at $2/plant, not the specific-species $4 tier
   if (/^JN\d/i.test(key)) return [2.00, 'MCG tier (Random 2" $2)'];
+  // Random succulents / succulent packs — $2/plant regardless of species
+  // Matches: SKU contains RANDOM, or product name contains "random" or "succulent pack"
+  {
+    const nameU = (productName || '').toUpperCase();
+    if (key.includes('RANDOM') ||
+        nameU.includes('RANDOM') ||
+        nameU.includes('SUCCULENT PACK')) {
+      return [2.00, 'Random/Pack succulent ($2)'];
+    }
+  }
 
   // 1. MCG Total sheet has the exact cost — always wins
   if (mcgCosts[key] !== undefined)     return [mcgCosts[key],     'MCG Total sheet'];

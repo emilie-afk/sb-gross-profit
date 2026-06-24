@@ -404,7 +404,8 @@ MANUAL_MCG_COSTS = {
     # Gift boxes / packs
     'HHZZ7710':      6.00,  # Mother's Day gift box w/ coaster
     'HHZZ7709':      4.00,  # Mother's Day gift box w/ succulent
-    'XAZZ3141-10':   1.00,  # retail_cuttings_10
+    'XAZZ3141-10':  10.00,  # retail_cuttings_10 (10 cuttings × $1.00)
+    'XAZZ3141-50':  37.50,  # retail_cuttings_50 (50 cuttings × $0.75)
     # Air plant supplies (Air flat $3 + product cost)
     'EBZZ4168':      7.57,  # Air Plant Food ($3 + $4.57)
     'EBZZ6055':      4.93,  # Succulent Fertilizer ($2 + $2.93)
@@ -433,6 +434,121 @@ for sku, cost in MANUAL_MCG_COSTS.items():
     mcg_costs.setdefault(sku, cost)
     mcg_costs.setdefault(sku.upper(), cost)
 print(f"  Manual overrides applied: {len(MANUAL_MCG_COSTS)} SKUs")
+
+# ── Lively Root costs ─────────────────────────────────────────────────────────
+# Source: Products Master sheet > "Lively Root" tab.
+# Only rows where col Q (Listing Shopify) is CHECKED → col E (LR SKU), col G (LR cost).
+# Unchecked rows are sold via other vendors whose costs are covered in other sheets.
+MANUAL_LR_COSTS = {
+    # ── Fiddle Leaf Fig (FLF) ────────────────────────────────────────────────────
+    'PL_FLF_4IN1':        33.54,  'PL_FLF_6IN1':        45.24,
+    'PL_FLF_8IN1':        77.22,  'PL_FLF_10IN1':      106.08,
+    'PB_FLF_ECO_CO_4IN1': 43.68,  'PB_FLF_ECO_EG_4IN1': 43.68,
+    'PB_FLF_ECO_CH_4IN1': 43.68,  'PB_FLF_ECO_MA_4IN1': 43.68,
+    'PB_FLF_ECO_CO_6IN1': 56.94,  'PB_FLF_ECO_EG_6IN1': 56.94,
+    'PB_FLF_ECO_CH_6IN1': 56.94,  'PB_FLF_ECO_MA_6IN1': 56.94,
+    'PB_FLF_ECO_CO_8IN1': 94.38,  'PB_FLF_ECO_EG_8IN1': 94.38,
+    'PB_FLF_ECO_CO_10IN1':130.26, 'PB_FLF_ECO_EG_10IN1':130.26,
+    'PB_FLF_ECO_CH_10IN1':130.26, 'PB_FLF_ECO_MA_10IN1':130.26,
+    'PB_FLF_BAS_LI_4IN1': 43.68,  'PB_FLF_BAS_LI_6IN1': 56.94,
+    'PB_FLF_BAS_LI_8IN1': 94.38,  'PB_FLF_BAS_LI_10IN1':130.26,
+    # ── Golden Bird of Paradise (GBP) ────────────────────────────────────────────
+    'PL_GBP_4IN1':        33.54,  'PL_GBP_6IN1':        45.24,
+    'PL_GBP_10IN1':      106.08,
+    'PB_GBP_ECO_CO_4IN1': 43.68,  'PB_GBP_ECO_EG_4IN1': 43.68,
+    'PB_GBP_ECO_CH_4IN1': 43.68,  'PB_GBP_ECO_MA_4IN1': 43.68,
+    'PB_GBP_BAS_LI_4IN1': 43.68,
+    'PB_GBP_ECO_CO_6IN1': 56.94,  'PB_GBP_ECO_EG_6IN1': 56.94,
+    'PB_GBP_ECO_CH_6IN1': 56.94,  'PB_GBP_ECO_MA_6IN1': 56.94,
+    'PB_GBP_BAS_LI_6IN1': 56.94,
+    'PB_GBP_SWP_CO_6IN1': 64.74,  'PB_GBP_SWP_EG_6IN1': 64.74,
+    'PB_GBP_ECO_CO_10IN1':130.26, 'PB_GBP_ECO_EG_10IN1':130.26,
+    'PB_GBP_ECO_CH_10IN1':130.26, 'PB_GBP_ECO_MA_10IN1':130.26,
+    'PB_GBP_BAS_LI_10IN1':130.26,
+    # ── Orange Bird of Paradise (OBP) ────────────────────────────────────────────
+    'PL_OBP_6IN1':        45.24,  'PL_OBP_10IN1':       106.08,
+    'PB_OBP_ECO_CO_6IN1': 56.94,  'PB_OBP_ECO_EG_6IN1': 56.94,
+    'PB_OBP_ECO_CH_6IN1': 56.94,  'PB_OBP_ECO_MA_6IN1': 56.94,
+    'PB_OBP_BAS_LI_6IN1': 56.94,
+    'PB_OBP_SWP_CO_6IN1': 64.74,  'PB_OBP_SWP_EG_6IN1': 64.74,
+    'PB_OBP_ECO_CO_10IN1':130.26, 'PB_OBP_ECO_EG_10IN1':130.26,
+    'PB_OBP_ECO_CH_10IN1':130.26, 'PB_OBP_ECO_MA_10IN1':130.26,
+    'PB_OBP_BAS_LI_10IN1':130.26,
+    # ── Peace Lily (PL) ──────────────────────────────────────────────────────────
+    'PL_PL_4IN1':         33.54,  'PL_PL_6IN1':         45.24,
+    'PL_PL_8IN1':         77.22,  'PL_PL_10IN1':        106.08,
+    'PB_PL_ECO_CO_4IN1':  43.68,  'PB_PL_ECO_EG_4IN1':  43.68,
+    'PB_PL_ECO_CH_4IN1':  43.68,  'PB_PL_ECO_MA_4IN1':  43.68,
+    'PB_PL_BAS_LI_4IN1':  43.68,
+    'PB_PL_ECO_CO_6IN1':  56.94,  'PB_PL_ECO_EG_6IN1':  56.94,
+    'PB_PL_ECO_CH_6IN1':  56.94,  'PB_PL_ECO_MA_6IN1':  56.94,
+    'PB_PL_BAS_LI_6IN1':  56.94,
+    'PB_PL_CP_FU_6IN1':   64.74,  'PB_PL_SWP_CO_6IN1':  64.74,
+    'PB_PL_SWP_EG_6IN1':  64.74,
+    'PB_PL_ECO_CO_8IN1':  94.38,  'PB_PL_ECO_EG_8IN1':  94.38,
+    'PB_PL_BAS_LI_8IN1':  94.38,
+    'PB_PL_ECO_CO_10IN1': 130.26, 'PB_PL_ECO_EG_10IN1': 130.26,
+    'PB_PL_ECO_CH_10IN1': 130.26, 'PB_PL_ECO_MA_10IN1': 130.26,
+    'PB_PL_BAS_LI_10IN1': 130.26,
+    # ── Guzmania Bromeliad (GUZ) ─────────────────────────────────────────────────
+    'PL_GUZ_4IN1':        33.54,  'PL_GUZ_6IN1':        45.24,
+    'PB_GUZ_ECO_CO_4IN1': 43.68,  'PB_GUZ_ECO_EG_4IN1': 43.68,
+    'PB_GUZ_ECO_CH_4IN1': 43.68,  'PB_GUZ_ECO_MA_4IN1': 43.68,
+    'PB_GUZ_BAS_LI_4IN1': 43.68,  'PB_GUZ_CP_GW_4IN1':  51.48,
+    'PB_GUZ_ECO_CO_6IN1': 56.94,  'PB_GUZ_ECO_EG_6IN1': 56.94,
+    'PB_GUZ_ECO_CH_6IN1': 56.94,  'PB_GUZ_ECO_MA_6IN1': 56.94,
+    'PB_GUZ_BAS_LI_6IN1': 56.94,  'PB_GUZ_CP_FU_6IN1':  64.74,
+    # ── Alocasia Polly (API) ─────────────────────────────────────────────────────
+    'PL_API_4IN1':        33.54,  'PL_API_6IN1':        45.24,
+    'PL_API_10IN1':       106.08,
+    'PB_API_ECO_CO_4IN1': 43.68,  'PB_API_ECO_EG_4IN1': 43.68,
+    'PB_API_ECO_CH_4IN1': 43.68,  'PB_API_ECO_MA_4IN1': 43.68,
+    'PB_API_BAS_LI_4IN1': 43.68,
+    'PB_API_ECO_CO_6IN1': 56.94,  'PB_API_ECO_EG_6IN1': 56.94,
+    'PB_API_ECO_CH_6IN1': 56.94,  'PB_API_ECO_MA_6IN1': 56.94,
+    'PB_API_BAS_LI_6IN1': 56.94,
+    'PB_API_SWP_CO_6IN1': 64.74,  'PB_API_SWP_EG_6IN1': 64.74,
+    'PB_API_ECO_CO_10IN1':130.26, 'PB_API_ECO_EG_10IN1':130.26,
+    'PB_API_ECO_CH_10IN1':130.26, 'PB_API_ECO_MA_10IN1':130.26,
+    'PB_API_BAS_LI_10IN1':130.26,
+    # ── Philodendron Birkin (PBK) ────────────────────────────────────────────────
+    'PL_PBK_4IN1':        33.54,  'PL_PBK_6IN1':        45.24,
+    'PB_PBK_ECO_CO_4IN1': 43.68,  'PB_PBK_ECO_EG_4IN1': 43.68,
+    'PB_PBK_ECO_CH_4IN1': 43.68,  'PB_PBK_ECO_MA_4IN1': 43.68,
+    'PB_PBK_BAS_LI_4IN1': 43.68,
+    'PB_PBK_ECO_CO_6IN1': 56.94,  'PB_PBK_ECO_EG_6IN1': 56.94,
+    'PB_PBK_ECO_CH_6IN1': 56.94,  'PB_PBK_ECO_MA_6IN1': 56.94,
+    'PB_PBK_BAS_LI_6IN1': 56.94,
+    'PB_PBK_SWP_CO_6IN1': 64.74,  'PB_PBK_SWP_EG_6IN1': 64.74,
+    # ── Ficus Folia (FF) ────────────────────────────────────────────────────────
+    'PL_FF_4IN1':         33.54,  'PL_FF_6IN1':         45.24,
+    'PB_FF_ECO_CO_4IN1':  43.68,  'PB_FF_ECO_EG_4IN1':  43.68,
+    'PB_FF_ECO_CH_4IN1':  43.68,  'PB_FF_ECO_MA_4IN1':  43.68,
+    'PB_FF_CP_GW_4IN1':   51.48,  'PB_FF_BAS_LI_4IN1':  43.68,
+    'PB_FF_ECO_CO_6IN1':  56.94,  'PB_FF_ECO_EG_6IN1':  56.94,
+    'PB_FF_ECO_CH_6IN1':  56.94,  'PB_FF_ECO_MA_6IN1':  56.94,
+    'PB_FF_BAS_LI_6IN1':  56.94,  'PB_FF_CP_FU_6IN1':   64.74,
+    'PB_FF_SWP_CO_6IN1':  64.74,  'PB_FF_SWP_EG_6IN1':  64.74,
+    # ── Money Tree (MT) ──────────────────────────────────────────────────────────
+    'PL_MT_4IN1':         33.54,  'PL_MT_6IN1':         45.24,
+    'PL_MT_8IN1':         77.22,  'PL_MT_10IN1':        106.08,
+    'PB_MT_ECO_CO_4IN1':  43.68,  'PB_MT_ECO_EG_4IN1':  43.68,
+    'PB_MT_ECO_CH_4IN1':  43.68,  'PB_MT_ECO_MA_4IN1':  43.68,
+    'PB_MT_CP_GW_4IN1':   51.48,  'PB_MT_BAS_LI_4IN1':  43.68,
+    'PB_MT_ECO_CO_6IN1':  56.94,  'PB_MT_ECO_EG_6IN1':  56.94,
+    'PB_MT_ECO_CH_6IN1':  56.94,  'PB_MT_ECO_MA_6IN1':  56.94,
+    'PB_MT_BAS_LI_6IN1':  56.94,  'PB_MT_CP_FU_6IN1':   64.74,
+    'PB_MT_SWP_CO_6IN1':  64.74,  'PB_MT_SWP_EG_6IN1':  64.74,
+    'PB_MT_ECO_CO_8IN1':  94.38,  'PB_MT_ECO_EG_8IN1':  94.38,
+    'PB_MT_BAS_LI_8IN1':  94.38,
+    'PB_MT_ECO_CO_10IN1': 130.26, 'PB_MT_ECO_EG_10IN1': 130.26,
+    'PB_MT_ECO_CH_10IN1': 130.26, 'PB_MT_ECO_MA_10IN1': 130.26,
+    'PB_MT_BAS_LI_10IN1': 130.26,
+}
+for sku, cost in MANUAL_LR_COSTS.items():
+    mcg_costs[sku] = cost                   # LR cost = source of truth for these SKUs
+    mcg_costs[sku.upper()] = cost
+print(f"  Lively Root costs applied: {len(MANUAL_LR_COSTS)} SKUs")
 
 print("\nWriting data files...")
 write_json('mcg_total.json',     mcg_costs)
