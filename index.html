@@ -202,7 +202,11 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 .saved-chip.active{border-color:var(--accent);background:rgba(110,231,183,.08);color:var(--accent)}
 .saved-chip .chip-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
 .saved-chip .chip-date{color:var(--muted);font-size:.68rem;white-space:nowrap}
+.saved-chip .chip-range{color:var(--accent2);font-size:.68rem;white-space:nowrap;font-weight:500}
 .saved-chip .chip-del{color:var(--muted);font-size:.9rem;line-height:1;flex-shrink:0}
+.period-match{margin-top:10px;padding:8px 12px;border-radius:6px;font-size:.78rem;display:none}
+.period-match.ok{background:rgba(110,231,183,.08);border:1px solid rgba(110,231,183,.25);color:var(--green)}
+.period-match.warn{background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.25);color:var(--yellow)}
 .saved-chip .chip-del:hover{color:var(--red)}
 .no-saved{color:var(--muted);font-size:.75rem;font-style:italic}
 
@@ -274,7 +278,19 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <div class="filename" id="name-costs"></div>
         </div>
 
+        <div class="upload-zone" id="zone-hpd" onclick="document.getElementById('input-hpd').click()"
+             ondragover="event.preventDefault();this.classList.add('drag')"
+             ondragleave="this.classList.remove('drag')"
+             ondrop="handleDrop(event,'hpd')">
+          <input type="file" id="input-hpd" accept=".csv" onchange="handleFile(this,'hpd')">
+          <div class="icon">🌿</div>
+          <div class="label">HPD Shipping Log <span style="color:var(--muted);font-weight:400">(optional)</span></div>
+          <div class="hint">HPD "Shipping Log Data Extraction" CSV · shows actual vs prepaid shipping P&L</div>
+          <div class="filename" id="name-hpd"></div>
+        </div>
+
         <div id="upload-error" class="error-msg" style="display:none"></div>
+        <div class="period-match" id="period-match"></div>
         <button class="calc-btn" id="calc-btn" onclick="runCalc()" disabled>Calculate Gross Profit</button>
 
         <!-- Saved files -->
@@ -289,6 +305,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <div class="saved-row" id="saved-ship"></div>
           <div class="saved-label" style="margin-top:8px">Additional Costs</div>
           <div class="saved-row" id="saved-costs"></div>
+          <div class="saved-label" style="margin-top:8px">HPD Shipping Log</div>
+          <div class="saved-row" id="saved-hpd"></div>
         </div>
 
       </div>
@@ -358,6 +376,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button class="view-tab"        id="tab-lowsku"     onclick="switchView('lowsku')">📉 Low Margin SKU</button>
       <button class="view-tab"        id="tab-giftcard"   onclick="switchView('giftcard')">🎟️ Gift Cards</button>
       <button class="view-tab"        id="tab-influencer" onclick="switchView('influencer')">🎁 Influencer</button>
+      <button class="view-tab"        id="tab-freeship"   onclick="switchView('freeship')">🚚 Free Ship</button>
+      <button class="view-tab"        id="tab-hpd"        onclick="switchView('hpd')">🌿 HPD Ship</button>
     </div>
 
     <!-- SKU view -->
@@ -572,6 +592,80 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div>
     </div><!-- /view-influencer -->
 
+    <!-- Free Ship view -->
+    <div id="view-freeship" style="display:none">
+    <div class="lm-threshold">
+      <span style="font-size:.85rem;font-weight:600">🚚 Free Shipping Orders</span>
+      <span class="lm-summary" id="fs-summary"></span>
+      <button class="logout-btn" onclick="downloadFreeShipCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table id="fs-table">
+        <thead>
+          <tr>
+            <th onclick="sortFsBy('orderNum')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortFsBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortFsBy('source')">Channel <span class="sort-icon">↕</span></th>
+            <th>Type</th>
+            <th onclick="sortFsBy('lineCount')" class="num">Lines <span class="sort-icon">↕</span></th>
+            <th onclick="sortFsBy('revenue')" class="num">Revenue <span class="sort-icon">↕</span></th>
+            <th onclick="sortFsBy('cogs')" class="num">COGS <span class="sort-icon">↕</span></th>
+            <th onclick="sortFsBy('gp')" class="num">GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortFsBy('gpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
+            <th class="num">Ship Paid</th>
+            <th onclick="sortFsBy('netGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
+            <th onclick="sortFsBy('netGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody id="fs-table-body"></tbody>
+        <tfoot id="fs-tfoot"></tfoot>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev-fs" onclick="changeFsPage(-1)">← Prev</button>
+      <span class="page-info" id="page-info-fs"></span>
+      <button id="btn-next-fs" onclick="changeFsPage(1)">Next →</button>
+    </div>
+    </div><!-- /view-freeship -->
+
+    <!-- HPD Shipping view -->
+    <div id="view-hpd" style="display:none">
+    <div class="lm-threshold">
+      <span style="font-size:.85rem;font-weight:600">🌿 HPD Shipping P&L</span>
+      <span class="lm-summary" id="hpd-summary"></span>
+      <button class="logout-btn" onclick="downloadHpdCsv()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
+    </div>
+    <div id="hpd-cards" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px"></div>
+    <div class="table-wrap">
+      <table id="hpd-table">
+        <thead>
+          <tr>
+            <th id="hpdth-shopifyOrderNum" onclick="sortHpdBy('shopifyOrderNum')">Order # <span class="sort-icon">↕</span></th>
+            <th id="hpdth-date" onclick="sortHpdBy('date')">Date <span class="sort-icon">↕</span></th>
+            <th id="hpdth-hpdOrderNum" onclick="sortHpdBy('hpdOrderNum')">HPD Order <span class="sort-icon">↕</span></th>
+            <th id="hpdth-carrier" onclick="sortHpdBy('carrier')">Carrier <span class="sort-icon">↕</span></th>
+            <th id="hpdth-state" onclick="sortHpdBy('state')">State <span class="sort-icon">↕</span></th>
+            <th id="hpdth-itemCount" onclick="sortHpdBy('itemCount')" class="num">Items <span class="sort-icon">↕</span></th>
+            <th id="hpdth-source" onclick="sortHpdBy('source')">Source <span class="sort-icon">↕</span></th>
+            <th id="hpdth-shipCollected" onclick="sortHpdBy('shipCollected')" class="num">Ship Collected $ <span class="sort-icon">↕</span></th>
+            <th id="hpdth-shipPaid" onclick="sortHpdBy('shipPaid')" class="num">Ship Cost $ <span class="sort-icon">↕</span></th>
+            <th id="hpdth-shipPL" onclick="sortHpdBy('shipPL')" class="num" title="Ship Collected − Ship Cost">Ship P&amp;L $ <span class="sort-icon">↕</span></th>
+            <th id="hpdth-prepaid" onclick="sortHpdBy('prepaid')" class="num" title="HPD prepaid fixed price (actual orders only)">Prepaid $ <span class="sort-icon">↕</span></th>
+            <th id="hpdth-costDiff" onclick="sortHpdBy('costDiff')" class="num" title="Net Terms − Prepaid (actual orders only)">Net vs Prepaid <span class="sort-icon">↕</span></th>
+          </tr>
+        </thead>
+        <tbody id="hpd-table-body"></tbody>
+        <tfoot id="hpd-tfoot"></tfoot>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev-hpd" onclick="changeHpdPage(-1)">← Prev</button>
+      <span class="page-info" id="page-info-hpd"></span>
+      <button id="btn-next-hpd" onclick="changeHpdPage(1)">Next →</button>
+    </div>
+    </div><!-- /view-hpd -->
+
     <!-- Low Margin SKU view -->
     <div id="view-lowsku" style="display:none">
     <div class="lm-threshold">
@@ -610,19 +704,20 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 </div>
 
 <script type="module">
-import { parseCSV, parseShipStation, parseAdditionalCosts, calculate, summarize } from './js/calculator.js';
+import { parseCSV, parseShipStation, parseAdditionalCosts, parseHpdLog, calculate, summarize } from './js/calculator.js';
 
 // ─── State ────────────────────────────────────────────────────────
-let ordersFiles = [], shipFile = null, costsFile = null;
-let savedOrdersTexts = null, savedShipText = null, savedCostsText = null;
-let selectedSavedCosts = null;
+let ordersFiles = [], shipFile = null, costsFile = null, hpdFile = null;
+let savedOrdersTexts = null, savedShipText = null, savedCostsText = null, savedHpdText = null;
+let selectedSavedCosts = null, selectedSavedHpd = null;
+let hpdData = null; // Map<shopifyOrderNum, entry> from parseHpdLog
 let allLines = [], filteredLines = [], sortKey = 'date', sortAsc = false;
 let currentPage = 1;
 const PAGE_SIZE = 100;
 
 // ─── localStorage helpers ─────────────────────────────────────────
 const LS_KEY = 'gp_saved_files';
-const MAX_ORDERS = 8, MAX_SHIP = 4, MAX_COSTS = 2;
+const MAX_ORDERS = 8, MAX_SHIP = 4, MAX_COSTS = 2, MAX_HPD = 4;
 
 function lsLoad() {
   try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { return []; }
@@ -632,14 +727,15 @@ function lsSave(arr) {
     console.warn('localStorage full, skipping save:', e);
   }
 }
-function saveFilesToLS(name, type, text) {
+function saveFilesToLS(name, type, text, range = null) {
   let arr = lsLoad();
   arr = arr.filter(f => !(f.name === name && f.type === type));
-  arr.push({ id: Date.now(), name, type, savedAt: new Date().toLocaleDateString(), text });
+  arr.push({ id: Date.now(), name, type, savedAt: new Date().toLocaleDateString(), text, range });
   const orders = arr.filter(f => f.type === 'orders').slice(-MAX_ORDERS);
   const ship   = arr.filter(f => f.type === 'ship').slice(-MAX_SHIP);
   const costs  = arr.filter(f => f.type === 'costs').slice(-MAX_COSTS);
-  lsSave([...orders, ...ship, ...costs]);
+  const hpd    = arr.filter(f => f.type === 'hpd').slice(-MAX_HPD);
+  lsSave([...orders, ...ship, ...costs, ...hpd]);
 }
 function deleteFromLS(id) {
   // Remove key first to free space, then re-save the filtered list
@@ -650,27 +746,31 @@ function deleteFromLS(id) {
 }
 window.clearAllSavedFiles = () => {
   localStorage.removeItem(LS_KEY);
-  savedOrdersTexts = null; savedShipText = null; savedCostsText = null;
-  selectedSavedOrders = new Set(); selectedSavedShip = null; selectedSavedCosts = null;
+  savedOrdersTexts = null; savedShipText = null; savedCostsText = null; savedHpdText = null;
+  selectedSavedOrders = new Set(); selectedSavedShip = null; selectedSavedCosts = null; selectedSavedHpd = null;
   renderSavedFiles();
 };
 
 // ─── Render saved file chips ──────────────────────────────────────
 function renderSavedFiles() {
   const all = lsLoad();
-  ['orders','ship','costs'].forEach(type => {
+  ['orders','ship','costs','hpd'].forEach(type => {
     const el = document.getElementById('saved-' + type);
     const files = all.filter(f => f.type === type);
     if (!files.length) {
       el.innerHTML = '<span class="no-saved">None saved yet</span>';
       return;
     }
-    el.innerHTML = files.map(f => `
+    el.innerHTML = files.map(f => {
+      const rangeLabel = f.range ? fmtDateRange(f.range.min, f.range.max) : '';
+      return `
       <div class="saved-chip" id="chip-${f.id}" onclick="selectSaved(${f.id},'${type}')">
         <span class="chip-name" title="${f.name}">${f.name}</span>
+        ${rangeLabel ? `<span class="chip-range">${rangeLabel}</span>` : ''}
         <span class="chip-date">${f.savedAt}</span>
         <span class="chip-del" onclick="event.stopPropagation();deleteFromLS(${f.id})" title="Remove">×</span>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   });
 }
 
@@ -730,9 +830,25 @@ window.selectSaved = (id, type) => {
       document.getElementById('name-costs').textContent = file.name;
       document.getElementById('zone-costs').classList.add('has-file');
     }
+  } else if (type === 'hpd') {
+    if (selectedSavedHpd === id) {
+      selectedSavedHpd = null;
+      document.getElementById('chip-' + id)?.classList.remove('active');
+      savedHpdText = null;
+      document.getElementById('name-hpd').textContent = '';
+      document.getElementById('zone-hpd').classList.remove('has-file');
+    } else {
+      if (selectedSavedHpd) document.getElementById('chip-' + selectedSavedHpd)?.classList.remove('active');
+      selectedSavedHpd = id;
+      document.getElementById('chip-' + id)?.classList.add('active');
+      savedHpdText = file.text;
+      document.getElementById('name-hpd').textContent = file.name;
+      document.getElementById('zone-hpd').classList.add('has-file');
+    }
   }
   document.getElementById('calc-btn').disabled =
     ordersFiles.length === 0 && (!savedOrdersTexts || savedOrdersTexts.length === 0);
+  updatePeriodMatch();
 };
 
 // Init saved files on load
@@ -745,7 +861,147 @@ renderSavedFiles();
   if (ships.length) selectSaved(ships[ships.length - 1].id, 'ship');
   const costsArr = all.filter(f => f.type === 'costs');
   if (costsArr.length) selectSaved(costsArr[costsArr.length - 1].id, 'costs');
+  const hpdArr = all.filter(f => f.type === 'hpd');
+  if (hpdArr.length) selectSaved(hpdArr[hpdArr.length - 1].id, 'hpd');
+  updatePeriodMatch();
 })();
+
+// ─── Date range helpers ───────────────────────────────────────────
+function detectDateRange(text, type) {
+  // Scan CSV text for dates without fully parsing it.
+  // Returns { min: 'YYYY-MM-DD', max: 'YYYY-MM-DD' } or null.
+  const lines = text.split('\n');
+  const headers = (lines[0] || '').split(',').map(h => h.replace(/"/g,'').trim());
+  const dates = [];
+
+  if (type === 'orders') {
+    // Shopify: "Created at" column → "2026-06-01 12:34:56 -0700"
+    const idx = headers.findIndex(h => h === 'Created at');
+    if (idx < 0) return null;
+    for (let i = 1; i < lines.length; i++) {
+      const v = quickField(lines[i], idx).slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) dates.push(v);
+    }
+  } else if (type === 'ship') {
+    // ShipStation: "Ship Date" column → "05/01/2026"
+    const idx = headers.findIndex(h => h === 'Ship Date');
+    if (idx < 0) return null;
+    for (let i = 1; i < lines.length; i++) {
+      const v = quickField(lines[i], idx);
+      const m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (m) dates.push(`${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`);
+    }
+  } else if (type === 'hpd') {
+    // HPD: "Date - Order Date" is the first column → "6/7/2026 19:02"
+    // Note: multiline fields exist but Date col is always on its own line
+    for (let i = 1; i < lines.length; i++) {
+      const v = quickField(lines[i], 0);
+      const m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (m) dates.push(`${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`);
+    }
+  }
+
+  if (!dates.length) return null;
+  dates.sort();
+  return { min: dates[0], max: dates[dates.length - 1] };
+}
+
+function quickField(line, idx) {
+  // Fast column extraction for simple CSVs (no multiline — good enough for date cols)
+  let col = 0, i = 0, inQ = false;
+  let field = '';
+  for (; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQ = !inQ; continue; }
+    if (ch === ',' && !inQ) {
+      if (col === idx) return field.trim();
+      col++; field = '';
+    } else {
+      field += ch;
+    }
+  }
+  return col === idx ? field.trim() : '';
+}
+
+function fmtDateRange(min, max) {
+  if (!min) return '';
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const fmtD = d => {
+    const [, m, day] = d.split('-');
+    return `${months[parseInt(m)-1]} ${parseInt(day)}`;
+  };
+  if (min === max) return fmtD(min);
+  // Same month: "Jun 1–7"  |  Different month: "May 28–Jun 4"
+  const [yMin, mMin] = min.split('-');
+  const [yMax, mMax] = max.split('-');
+  if (mMin === mMax && yMin === yMax) {
+    return `${months[parseInt(mMin)-1]} ${parseInt(min.split('-')[2])}–${parseInt(max.split('-')[2])}`;
+  }
+  return `${fmtD(min)}–${fmtD(max)}`;
+}
+
+function getRangeFromSelected(type) {
+  // Return combined date range for currently selected saved files of a given type
+  const all = lsLoad();
+  if (type === 'orders') {
+    if (ordersFiles.length) return null; // fresh upload — no LS range yet
+    const ids = [...selectedSavedOrders];
+    const files = ids.map(id => all.find(f => f.id === id)).filter(Boolean);
+    if (!files.length) return null;
+    const mins = files.map(f => f.range?.min).filter(Boolean).sort();
+    const maxs = files.map(f => f.range?.max).filter(Boolean).sort();
+    return mins.length ? { min: mins[0], max: maxs[maxs.length-1] } : null;
+  }
+  if (type === 'ship') {
+    const f = all.find(f => f.id === selectedSavedShip);
+    return f?.range || null;
+  }
+  if (type === 'hpd') {
+    const f = all.find(f => f.id === selectedSavedHpd);
+    return f?.range || null;
+  }
+  return null;
+}
+
+function updatePeriodMatch() {
+  const el = document.getElementById('period-match');
+  if (!el) return;
+
+  const ordRange  = getRangeFromSelected('orders');
+  const shipRange = getRangeFromSelected('ship');
+  const hpdRange  = getRangeFromSelected('hpd');
+
+  const loaded = [
+    ordRange  ? { label: 'Orders',    range: ordRange  } : null,
+    shipRange ? { label: 'ShipStation', range: shipRange } : null,
+    hpdRange  ? { label: 'HPD',       range: hpdRange  } : null,
+  ].filter(Boolean);
+
+  if (loaded.length < 2) { el.style.display = 'none'; return; }
+
+  // Check if all ranges overlap
+  const allMins = loaded.map(x => x.range.min).sort();
+  const allMaxs = loaded.map(x => x.range.max).sort();
+  const overlapMin = allMins[allMins.length - 1]; // latest start
+  const overlapMax = allMaxs[0];                  // earliest end
+  const hasOverlap = overlapMin <= overlapMax;
+
+  // Build per-file labels
+  const parts = loaded.map(x => `${x.label}: ${fmtDateRange(x.range.min, x.range.max)}`).join(' · ');
+
+  if (hasOverlap) {
+    const allSame = loaded.every(x => x.range.min === loaded[0].range.min && x.range.max === loaded[0].range.max);
+    el.className = 'period-match ok';
+    el.textContent = allSame
+      ? `✓ All files cover ${fmtDateRange(loaded[0].range.min, loaded[0].range.max)}`
+      : `⚠ Periods overlap — ${parts}`;
+    el.style.display = '';
+  } else {
+    el.className = 'period-match warn';
+    el.textContent = `⚠ Period mismatch — ${parts}`;
+    el.style.display = '';
+  }
+}
 
 // ─── File handling ────────────────────────────────────────────────
 window.handleFile = async (input, type) => {
@@ -756,7 +1012,7 @@ window.handleFile = async (input, type) => {
     document.getElementById('zone-orders').classList.add('has-file');
     for (const f of ordersFiles) {
       const text = await f.text();
-      saveFilesToLS(f.name, 'orders', text);
+      saveFilesToLS(f.name, 'orders', text, detectDateRange(text, 'orders'));
     }
     renderSavedFiles();
   } else if (type === 'ship') {
@@ -765,7 +1021,7 @@ window.handleFile = async (input, type) => {
     if (shipFile) {
       document.getElementById('zone-ship').classList.add('has-file');
       const text = await shipFile.text();
-      saveFilesToLS(shipFile.name, 'ship', text);
+      saveFilesToLS(shipFile.name, 'ship', text, detectDateRange(text, 'ship'));
       renderSavedFiles();
     }
   } else if (type === 'costs') {
@@ -777,18 +1033,28 @@ window.handleFile = async (input, type) => {
       saveFilesToLS(costsFile.name, 'costs', text);
       renderSavedFiles();
     }
+  } else if (type === 'hpd') {
+    hpdFile = input.files[0] || null;
+    document.getElementById('name-hpd').textContent = hpdFile ? hpdFile.name : '';
+    if (hpdFile) {
+      document.getElementById('zone-hpd').classList.add('has-file');
+      const text = await hpdFile.text();
+      saveFilesToLS(hpdFile.name, 'hpd', text, detectDateRange(text, 'hpd'));
+      renderSavedFiles();
+    }
   }
   document.getElementById('calc-btn').disabled =
     ordersFiles.length === 0 && (!savedOrdersTexts || savedOrdersTexts.length === 0);
+  updatePeriodMatch();
 };
 
 window.handleDrop = (ev, type) => {
   ev.preventDefault();
-  const zoneId = type === 'orders' ? 'zone-orders' : type === 'ship' ? 'zone-ship' : 'zone-costs';
+  const zoneId  = type === 'orders' ? 'zone-orders'  : type === 'ship' ? 'zone-ship'  : type === 'hpd' ? 'zone-hpd'  : 'zone-costs';
+  const inputId = type === 'orders' ? 'input-orders' : type === 'ship' ? 'input-ship' : type === 'hpd' ? 'input-hpd' : 'input-costs';
   document.getElementById(zoneId).classList.remove('drag');
   const files = Array.from(ev.dataTransfer.files).filter(f => f.name.endsWith('.csv'));
   if (!files.length) return;
-  const inputId = type === 'orders' ? 'input-orders' : type === 'ship' ? 'input-ship' : 'input-costs';
   const input = document.getElementById(inputId);
   const dt = new DataTransfer();
   files.forEach(f => dt.items.add(f));
@@ -835,9 +1101,17 @@ window.runCalc = async () => {
       shipCosts = parseShipStation(parseCSV(shipText));
     }
 
+    const hpdText = hpdFile ? await hpdFile.text() : savedHpdText;
+    if (hpdText) {
+      setLoadingMsg('Parsing HPD log…');
+      hpdData = parseHpdLog(hpdText);
+    } else {
+      hpdData = null;
+    }
+
     setLoadingMsg('Calculating gross profit…');
     await new Promise(r => setTimeout(r, 20));
-    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias);
+    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias, hpdData);
     renderDashboard(allLines);
 
     document.getElementById('upload-screen').style.display = 'none';
@@ -1031,6 +1305,8 @@ window.filterTable = () => {
   if (currentView === 'lowsku')     renderLowSkuView();
   if (currentView === 'giftcard')   renderGiftCardView();
   if (currentView === 'influencer') renderInfluencerView();
+  if (currentView === 'freeship')   renderFreeShipView();
+  // HPD view uses its own data (hpdData), not filteredLines — no re-render needed on filter change
 };
 
 window.sortBy = key => {
@@ -1185,15 +1461,17 @@ window.newFiles = () => {
   document.getElementById('upload-screen').style.display = '';
   document.getElementById('btn-new-files').style.display = 'none';
   // Reset file inputs and saved selections
-  ordersFiles = []; shipFile = null; costsFile = null;
-  savedOrdersTexts = null; savedShipText = null; savedCostsText = null;
-  selectedSavedOrders = new Set(); selectedSavedShip = null; selectedSavedCosts = null;
+  ordersFiles = []; shipFile = null; costsFile = null; hpdFile = null;
+  savedOrdersTexts = null; savedShipText = null; savedCostsText = null; savedHpdText = null;
+  selectedSavedOrders = new Set(); selectedSavedShip = null; selectedSavedCosts = null; selectedSavedHpd = null;
   document.getElementById('name-orders').textContent = '';
   document.getElementById('name-ship').textContent = '';
   document.getElementById('name-costs').textContent = '';
+  document.getElementById('name-hpd').textContent = '';
   document.getElementById('zone-orders').classList.remove('has-file');
   document.getElementById('zone-ship').classList.remove('has-file');
   document.getElementById('zone-costs').classList.remove('has-file');
+  document.getElementById('zone-hpd').classList.remove('has-file');
   document.getElementById('calc-btn').disabled = true;
   document.getElementById('upload-error').style.display = 'none';
   renderSavedFiles(); // re-render chips without active state
@@ -1257,7 +1535,9 @@ window.switchView = view => {
   document.getElementById('view-lowsku').style.display     = view === 'lowsku'     ? '' : 'none';
   document.getElementById('view-giftcard').style.display   = view === 'giftcard'   ? '' : 'none';
   document.getElementById('view-influencer').style.display = view === 'influencer' ? '' : 'none';
-  ['sku','order','sub','lowmargin','lowsku','giftcard','influencer'].forEach(v =>
+  document.getElementById('view-freeship').style.display   = view === 'freeship'   ? '' : 'none';
+  document.getElementById('view-hpd').style.display        = view === 'hpd'        ? '' : 'none';
+  ['sku','order','sub','lowmargin','lowsku','giftcard','influencer','freeship','hpd'].forEach(v =>
     document.getElementById(`tab-${v}`).classList.toggle('active', v === view));
   if (view === 'order')      renderOrderView();
   if (view === 'sub')        renderSubView();
@@ -1265,6 +1545,8 @@ window.switchView = view => {
   if (view === 'lowsku')     renderLowSkuView();
   if (view === 'giftcard')   renderGiftCardView();
   if (view === 'influencer') renderInfluencerView();
+  if (view === 'freeship')   renderFreeShipView();
+  if (view === 'hpd')        renderHpdView();
 };
 
 function computeOrderRows(lines) {
@@ -1895,6 +2177,420 @@ window.downloadInfluencerCSV = () => {
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = 'influencer_orders.csv';
+  a.click();
+};
+
+// ─── Free Ship View ───────────────────────────────────────────────
+const FS_PAGE_SIZE = 100;
+let fsSortKey = 'date', fsSortAsc = false, fsPage = 1, fsRows = [];
+let fsLinesByOrder = new Map();
+let fsExpanded = new Set();
+
+window.sortFsBy = key => {
+  if (fsSortKey === key) fsSortAsc = !fsSortAsc; else { fsSortKey = key; fsSortAsc = false; }
+  fsPage = 1; renderFsPage();
+};
+window.changeFsPage = dir => {
+  const max = Math.ceil(fsRows.length / FS_PAGE_SIZE);
+  fsPage = Math.max(1, Math.min(max, fsPage + dir));
+  fsExpanded.clear();
+  renderFsPage();
+};
+window.toggleFsExpand = orderNum => {
+  if (fsExpanded.has(orderNum)) fsExpanded.delete(orderNum);
+  else fsExpanded.add(orderNum);
+  renderFsPage();
+};
+
+window.renderFreeShipView = function() {
+  fsLinesByOrder.clear();
+  for (const li of filteredLines) {
+    if (li.isFreeShip !== 'YES') continue;
+    if (!fsLinesByOrder.has(li.orderNum)) fsLinesByOrder.set(li.orderNum, []);
+    fsLinesByOrder.get(li.orderNum).push(li);
+  }
+  const freeLines = filteredLines.filter(li => li.isFreeShip === 'YES');
+  fsRows = computeOrderRows(freeLines);
+
+  fsRows.sort((a, b) => {
+    let va = a[fsSortKey], vb = b[fsSortKey];
+    if (va === null || va === undefined) va = fsSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = fsSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return fsSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return fsSortAsc ? va - vb : vb - va;
+  });
+
+  const totalShipPaid = fsRows.reduce((s, o) => s + (o.shipPaid || 0), 0);
+  const totalRevenue  = fsRows.reduce((s, o) => s + (o.revenue  || 0), 0);
+  document.getElementById('fs-summary').textContent =
+    `${fsRows.length} orders · revenue ${fmt(totalRevenue)} · ship cost absorbed ${fmt(totalShipPaid)}`;
+
+  fsPage = 1;
+  fsExpanded.clear();
+  renderFsPage();
+};
+
+function renderFsPage() {
+  const start = (fsPage - 1) * FS_PAGE_SIZE;
+  const page  = fsRows.slice(start, start + FS_PAGE_SIZE);
+  const max   = Math.ceil(fsRows.length / FS_PAGE_SIZE);
+
+  updateOrderTotals(fsRows, 'fs-tfoot');
+
+  document.getElementById('fs-table-body').innerHTML = page.map(o => {
+    const isOpen = fsExpanded.has(o.orderNum);
+    const safe   = CSS.escape ? CSS.escape(o.orderNum) : o.orderNum.replace(/[^a-zA-Z0-9]/g, '_');
+    const lines  = fsLinesByOrder.get(o.orderNum) || [];
+
+    const detailHtml = isOpen ? `
+      <tr id="fs-detail-${safe}" class="lm-detail-row">
+        <td colspan="13" style="padding:8px 12px!important">
+          <table class="detail-subtable">
+            <thead><tr>
+              <th>SKU</th><th>Product</th>
+              <th class="num" style="text-align:right">Qty</th>
+              <th class="num" style="text-align:right">Revenue</th>
+              <th class="num" style="text-align:right">COGS</th>
+              <th class="num" style="text-align:right">GP $</th>
+              <th class="num" style="text-align:right">GP%</th>
+              <th class="num" style="text-align:right">Net GP $</th>
+              <th class="num" style="text-align:right">Net GP%</th>
+              <th>Cost source</th>
+            </tr></thead>
+            <tbody>
+              ${lines.map(li => {
+                const miss = li.costSource === 'COST MISSING';
+                return `<tr>
+                  <td style="font-size:.75rem;white-space:nowrap">${li.sku}</td>
+                  <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.75rem"
+                      title="${li.product}">${li.product}</td>
+                  <td class="num" style="text-align:right">${li.qty}</td>
+                  <td class="num" style="text-align:right">${fmt(li.lineRevenue)}</td>
+                  <td class="num ${miss?'missing':''}" style="text-align:right">${miss?'?':fmt(li.lineCogs)}</td>
+                  <td class="num ${gpClass(li.lineGp)}" style="text-align:right">${fmt(li.lineGp)}</td>
+                  <td class="num ${gpClass(li.lineGpPct)}" style="text-align:right">${li.lineGpPct!==null?li.lineGpPct.toFixed(1)+'%':'—'}</td>
+                  <td class="num ${gpClass(li.lineNetGp)}" style="text-align:right">${li.lineNetGp!==null?fmt(li.lineNetGp):'—'}</td>
+                  <td class="num ${gpClass(li.lineNetGpPct)}" style="text-align:right">${li.lineNetGpPct!==null?li.lineNetGpPct.toFixed(1)+'%':'—'}</td>
+                  <td style="font-size:.72rem;color:var(--muted)">${li.costSource||''}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </td>
+      </tr>` : '';
+
+    return `<tr class="lm-order-row${isOpen?' open':''}" onclick="toggleFsExpand('${o.orderNum.replace(/'/g,"\\'")}')">
+      <td>${o.orderNum}</td>
+      <td>${o.date || ''}</td>
+      <td>${o.source || ''}</td>
+      <td style="color:var(--muted);font-size:.72rem">${o.orderCat || ''}</td>
+      <td class="num">${o.lineCount}</td>
+      <td class="num">${fmt(o.revenue)}</td>
+      <td class="num ${o.missingCost?'missing':''}">${o.missingCost?'~':''}${fmt(o.cogs)}</td>
+      <td class="num ${gpClass(o.gp)}">${fmt(o.gp)}</td>
+      <td class="num ${gpClass(o.gpPct)}">${o.gpPct!==null?o.gpPct.toFixed(1)+'%':'—'}</td>
+      <td class="num">${o.shipPaid!==null?fmt(o.shipPaid):''}</td>
+      <td class="num ${gpClass(o.netGp)}">${o.netGp!==null?fmt(o.netGp):'—'}</td>
+      <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct!==null?o.netGpPct.toFixed(1)+'%':'—'}</td>
+      <td style="color:var(--muted);font-size:.72rem">${o.shipNote||''}</td>
+    </tr>${detailHtml}`;
+  }).join('');
+
+  document.getElementById('page-info-fs').textContent =
+    `${fsRows.length} orders · page ${fsPage}/${Math.max(1,max)}`;
+  document.getElementById('btn-prev-fs').disabled = fsPage <= 1;
+  document.getElementById('btn-next-fs').disabled = fsPage >= max;
+}
+
+window.downloadFreeShipCSV = () => {
+  if (!fsRows.length) return;
+  const rows = [['Order','Date','Channel','Type','Lines','Revenue','COGS','GP $','GP %',
+                 'Ship Paid','Net GP $','Net GP %','Notes',
+                 '--- SKU ---','Product','Qty','Line Revenue','Line COGS','Line GP $','Line GP %',
+                 'Line Net GP $','Line Net GP %','Cost Source']];
+  for (const o of fsRows) {
+    const lines = fsLinesByOrder.get(o.orderNum) || [];
+    lines.forEach((li, i) => {
+      rows.push([
+        i===0?o.orderNum:'', i===0?(o.date||''):'', i===0?(o.source||''):'',
+        i===0?(o.orderCat||''):'', i===0?o.lineCount:'',
+        i===0?(o.revenue??''):'', i===0?(o.cogs??''):'',
+        i===0?(o.gp??''):'', i===0?(o.gpPct!==null?o.gpPct+'%':''):'',
+        i===0?(o.shipPaid??''):'',
+        i===0?(o.netGp??''):'', i===0?(o.netGpPct!==null?o.netGpPct+'%':''):'',
+        i===0?(o.shipNote||''):'',
+        li.sku, li.product, li.qty,
+        li.lineRevenue??'', li.lineCogs??'',
+        li.lineGp??'', li.lineGpPct!==null?li.lineGpPct+'%':'',
+        li.lineNetGp??'', li.lineNetGpPct!==null?li.lineNetGpPct+'%':'',
+        li.costSource||''
+      ]);
+    });
+  }
+  const csv = rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'free_ship_orders.csv';
+  a.click();
+};
+
+// ─── HPD Shipping View ────────────────────────────────────────────
+const HPD_PAGE_SIZE = 100;
+let hpdSortKey = 'date', hpdSortAsc = false, hpdPage = 1, hpdRows = [];
+let hpdExpanded = new Set();
+
+function updateHpdSortIcons() {
+  ['shopifyOrderNum','date','hpdOrderNum','carrier','state','itemCount',
+   'source','shipCollected','shipPaid','shipPL','prepaid','costDiff'].forEach(k => {
+    const th = document.getElementById('hpdth-' + k);
+    if (!th) return;
+    const icon = th.querySelector('.sort-icon');
+    if (!icon) return;
+    if (k === hpdSortKey) icon.textContent = hpdSortAsc ? '↑' : '↓';
+    else icon.textContent = '↕';
+    th.classList.toggle('sorted', k === hpdSortKey);
+  });
+}
+
+window.sortHpdBy = key => {
+  if (hpdSortKey === key) hpdSortAsc = !hpdSortAsc;
+  else { hpdSortKey = key; hpdSortAsc = false; }
+  hpdPage = 1;
+  hpdRows.sort((a, b) => {
+    let va = a[hpdSortKey], vb = b[hpdSortKey];
+    if (va === null || va === undefined) va = hpdSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = hpdSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return hpdSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return hpdSortAsc ? va - vb : vb - va;
+  });
+  updateHpdSortIcons();
+  renderHpdPage();
+};
+window.changeHpdPage = dir => {
+  const max = Math.ceil(hpdRows.length / HPD_PAGE_SIZE);
+  hpdPage = Math.max(1, Math.min(max, hpdPage + dir));
+  hpdExpanded.clear();
+  renderHpdPage();
+};
+window.toggleHpdExpand = id => {
+  if (hpdExpanded.has(id)) hpdExpanded.delete(id);
+  else hpdExpanded.add(id);
+  renderHpdPage();
+};
+
+window.renderHpdView = function() {
+  // ── Build combined rows from allLines (all HP Dropship first-rows) ──
+  // This shows EVERY HP order: actual (HPD log) AND estimated (weight-based)
+  const orderLineCounts = new Map();
+  for (const li of allLines) {
+    orderLineCounts.set(li.orderNum, (orderLineCounts.get(li.orderNum) || 0) + 1);
+  }
+
+  const combined = [];
+  for (const li of allLines) {
+    if (li.shipCollected === null) continue; // skip non-first rows
+    if (!li.shipNote) continue;
+    const isActual = li.shipNote.startsWith('HPD actual');
+    const isEst    = li.shipNote.startsWith('HP est');
+    if (!isActual && !isEst) continue;
+
+    const clean    = li.orderNum.replace(/^#/, '');
+    const hpdEntry = hpdData ? hpdData.get(clean) : null;
+
+    // items[]: use hpdData if available, else build a placeholder
+    const items = hpdEntry ? hpdEntry.items : [];
+
+    combined.push({
+      shopifyOrderNum: clean,
+      date:       li.date || '',
+      hpdOrderNum: hpdEntry ? hpdEntry.hpdOrderNum
+                  : isActual ? (li.shipNote.match(/\(([^)]+)\)/)?.[1] || '—') : '—',
+      carrier:    hpdEntry ? hpdEntry.carrier : '',
+      state:      hpdEntry ? hpdEntry.state : '',
+      itemCount:  orderLineCounts.get(li.orderNum) || 1,
+      source:     isActual ? 'actual' : 'est',
+      shipCollected: li.shipCollected,
+      shipPaid:   li.shipPaid,
+      shipPL:     li.shipCollected !== null && li.shipPaid !== null
+                    ? Math.round((li.shipCollected - li.shipPaid) * 100) / 100 : null,
+      prepaid:    hpdEntry ? hpdEntry.prepaid   : null,
+      costDiff:   hpdEntry ? hpdEntry.costDiff  : null,
+      shipNote:   li.shipNote,
+      items,
+    });
+  }
+
+  if (!combined.length) {
+    document.getElementById('hpd-summary').textContent =
+      'No HP Dropship orders in loaded data.';
+    document.getElementById('hpd-cards').innerHTML = '';
+    document.getElementById('hpd-table-body').innerHTML =
+      `<tr><td colspan="12" style="text-align:center;color:var(--muted);padding:32px">
+        No HP Dropship orders found. Load Shopify orders that include House Plant Dropship items.
+      </td></tr>`;
+    document.getElementById('hpd-tfoot').innerHTML = '';
+    document.getElementById('page-info-hpd').textContent = '';
+    document.getElementById('btn-prev-hpd').disabled = true;
+    document.getElementById('btn-next-hpd').disabled = true;
+    return;
+  }
+
+  hpdRows = combined;
+  hpdRows.sort((a, b) => {
+    let va = a[hpdSortKey], vb = b[hpdSortKey];
+    if (va === null || va === undefined) va = hpdSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = hpdSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return hpdSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return hpdSortAsc ? va - vb : vb - va;
+  });
+  updateHpdSortIcons();
+
+  // ── Summary stats ──
+  const actualRows = hpdRows.filter(r => r.source === 'actual');
+  const estRows    = hpdRows.filter(r => r.source === 'est');
+  const totalCollected = hpdRows.reduce((s,r) => s + (r.shipCollected||0), 0);
+  const totalPaid      = hpdRows.reduce((s,r) => s + (r.shipPaid||0), 0);
+  const totalPL        = hpdRows.reduce((s,r) => s + (r.shipPL||0), 0);
+  const totalDiff      = actualRows.reduce((s,r) => s + (r.costDiff||0), 0);
+
+  const plColor   = totalPL > 0.01 ? 'var(--green)' : totalPL < -0.01 ? 'var(--red)' : 'var(--text)';
+  const diffColor = totalDiff > 0.01 ? 'var(--red)' : totalDiff < -0.01 ? 'var(--green)' : 'var(--text)';
+
+  document.getElementById('hpd-summary').textContent =
+    `${hpdRows.length} orders (${actualRows.length} actual · ${estRows.length} estimated)`;
+
+  document.getElementById('hpd-cards').innerHTML = `
+    <div class="card">
+      <div class="label">HP Orders</div>
+      <div class="value">${hpdRows.length}</div>
+      <div class="sub" style="color:var(--green)">${actualRows.length} ✓ actual</div>
+      <div class="sub" style="color:var(--yellow)">${estRows.length} ⚠ estimated</div>
+    </div>
+    <div class="card">
+      <div class="label">Ship Collected</div>
+      <div class="value" style="font-size:1.3rem">${fmt(totalCollected)}</div>
+      <div class="sub">From customers</div>
+    </div>
+    <div class="card">
+      <div class="label">Ship Cost Paid</div>
+      <div class="value" style="font-size:1.3rem">${fmt(totalPaid)}</div>
+      <div class="sub">${actualRows.length} actual · ${estRows.length} est</div>
+    </div>
+    <div class="card">
+      <div class="label">Shipping P&amp;L</div>
+      <div class="value" style="font-size:1.3rem;color:${plColor}">${totalPL>=0?'+':''}${fmt(totalPL)}</div>
+      <div class="sub">Collected − Cost</div>
+    </div>
+    ${actualRows.length ? `<div class="card">
+      <div class="label">Net vs Prepaid</div>
+      <div class="value" style="font-size:1.3rem;color:${diffColor}">${totalDiff>=0?'+':''}${fmt(totalDiff)}</div>
+      <div class="sub">Actual − Prepaid (${actualRows.length} orders)</div>
+    </div>` : ''}
+  `;
+
+  hpdPage = 1;
+  hpdExpanded.clear();
+  renderHpdPage();
+};
+
+function renderHpdPage() {
+  const start = (hpdPage - 1) * HPD_PAGE_SIZE;
+  const page  = hpdRows.slice(start, start + HPD_PAGE_SIZE);
+  const max   = Math.ceil(hpdRows.length / HPD_PAGE_SIZE);
+
+  // Tfoot totals
+  if (hpdRows.length) {
+    const tColl = hpdRows.reduce((s,r)=>s+(r.shipCollected||0),0);
+    const tPaid = hpdRows.reduce((s,r)=>s+(r.shipPaid||0),0);
+    const tPL   = hpdRows.reduce((s,r)=>s+(r.shipPL||0),0);
+    const tDiff = hpdRows.filter(r=>r.source==='actual').reduce((s,r)=>s+(r.costDiff||0),0);
+    const plCls = tPL>0.01?'pos':tPL<-0.01?'neg':'';
+    const dCls  = tDiff>0.01?'neg':tDiff<-0.01?'pos':'';
+    document.getElementById('hpd-tfoot').innerHTML = `<tr class="totals-row">
+      <td colspan="6">Total (${hpdRows.length} orders)</td>
+      <td></td>
+      <td class="num">${fmt(tColl)}</td>
+      <td class="num">${fmt(tPaid)}</td>
+      <td class="num ${plCls}">${tPL>=0?'+':''}${fmt(tPL)}</td>
+      <td class="num"></td>
+      <td class="num ${dCls}">${tDiff!==0?(tDiff>=0?'+':'')+fmt(tDiff):''}</td>
+    </tr>`;
+  } else {
+    document.getElementById('hpd-tfoot').innerHTML = '';
+  }
+
+  document.getElementById('hpd-table-body').innerHTML = page.map(r => {
+    const isOpen  = hpdExpanded.has(r.shopifyOrderNum);
+    const safeId  = r.shopifyOrderNum.replace(/[^a-zA-Z0-9]/g, '_');
+    const isActual = r.source === 'actual';
+    const srcBadge = isActual
+      ? `<span style="font-size:.72rem;color:var(--green);font-weight:600;white-space:nowrap">✓ Actual</span>`
+      : `<span style="font-size:.72rem;color:var(--yellow);font-weight:600;white-space:nowrap">⚠ Est</span>`;
+    const plCls   = (r.shipPL||0) > 0.01 ? 'pos' : (r.shipPL||0) < -0.01 ? 'neg' : '';
+    const diffCls = (r.costDiff||0) > 0.01 ? 'neg' : (r.costDiff||0) < -0.01 ? 'pos' : '';
+
+    const detailHtml = isOpen && r.items.length ? `
+      <tr id="hpd-detail-${safeId}" class="lm-detail-row">
+        <td colspan="12" style="padding:8px 12px!important">
+          <table class="detail-subtable">
+            <thead><tr><th>SKU</th><th class="num">Qty</th></tr></thead>
+            <tbody>
+              ${r.items.map(it => `<tr>
+                <td style="font-size:.75rem;white-space:nowrap">${it.sku}</td>
+                <td class="num">${it.qty}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </td>
+      </tr>` : '';
+
+    return `<tr class="lm-order-row${isOpen?' open':''}" onclick="toggleHpdExpand('${r.shopifyOrderNum.replace(/'/g,"\\'")}')">
+      <td>#${r.shopifyOrderNum}</td>
+      <td>${r.date}</td>
+      <td style="font-size:.78rem;color:var(--muted)">${r.hpdOrderNum}</td>
+      <td style="font-size:.78rem;max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${r.carrier}">${r.carrier}</td>
+      <td>${r.state}</td>
+      <td class="num">${r.itemCount}</td>
+      <td>${srcBadge}</td>
+      <td class="num">${r.shipCollected !== null ? fmt(r.shipCollected) : '—'}</td>
+      <td class="num">${r.shipPaid !== null ? fmt(r.shipPaid) : '—'}</td>
+      <td class="num ${plCls}">${r.shipPL !== null ? (r.shipPL>=0?'+':'')+fmt(r.shipPL) : '—'}</td>
+      <td class="num">${isActual && r.prepaid !== null ? fmt(r.prepaid) : ''}</td>
+      <td class="num ${diffCls}">${isActual && r.costDiff !== null ? (r.costDiff>=0?'+':'')+fmt(r.costDiff) : ''}</td>
+    </tr>${detailHtml}`;
+  }).join('');
+
+  document.getElementById('page-info-hpd').textContent =
+    `${hpdRows.length} orders · page ${hpdPage}/${Math.max(1,max)}`;
+  document.getElementById('btn-prev-hpd').disabled = hpdPage <= 1;
+  document.getElementById('btn-next-hpd').disabled = hpdPage >= max;
+}
+
+window.downloadHpdCsv = () => {
+  if (!hpdRows.length) return;
+  const rows = [['Shopify Order #','Date','HPD Order','Carrier','State','Items','Source',
+                 'Ship Collected $','Ship Cost $','Ship P&L $','Prepaid $','Net vs Prepaid $',
+                 '--- SKU ---','Qty']];
+  for (const r of hpdRows) {
+    const itemList = r.items.length ? r.items : [{ sku: '', qty: '' }];
+    itemList.forEach((it, i) => {
+      rows.push([
+        i===0?'#'+r.shopifyOrderNum:'', i===0?r.date:'',
+        i===0?r.hpdOrderNum:'', i===0?r.carrier:'', i===0?r.state:'',
+        i===0?r.itemCount:'', i===0?r.source:'',
+        i===0?(r.shipCollected??''):'',
+        i===0?(r.shipPaid??''):'',
+        i===0?(r.shipPL??''):'',
+        i===0?(r.source==='actual'?(r.prepaid??''):''):'',
+        i===0?(r.source==='actual'?(r.costDiff??''):''):'',
+        it.sku, it.qty
+      ]);
+    });
+  }
+  const csv = rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'hpd_shipping_pl.csv';
   a.click();
 };
 

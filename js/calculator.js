@@ -326,9 +326,108 @@ export function parseShipStation(rows) {
   return costs;
 }
 
+// ─── HPD Log parser ───────────────────────────────────────────────────────────
+// Parses the HPD "Shipping Log Data Extraction" CSV.
+// The "Notes - To Buyer" field contains embedded newlines — requires RFC 4180 parser.
+// Returns Map<shopifyOrderNum, { hpdOrderNum, shopifyOrderNum, date, carrier, state,
+//                                netTerms, prepaid, costDiff, items[] }>
+export function parseHpdLog(text) {
+  const allRows = _parseRfc4180(text);
+  if (allRows.length < 2) return new Map();
+  const headers = allRows[0];
+  const idxOf = name => headers.findIndex(h => h.trim() === name);
+
+  const iDate     = idxOf('Date - Order Date');
+  const iOrder    = idxOf('Order - Number');
+  const iCarrier  = idxOf('Carrier - Service Selected');
+  const iState    = idxOf('Ship To - State');
+  const iQty      = idxOf('Item - Qty');
+  const iSku      = idxOf('Item - SKU');
+  const iNotes    = idxOf('Notes - From Buyer');
+  const iNet      = idxOf('Actual Net Terms Cost (Labor + Carrier Shipping)');
+  const iPrepaid  = idxOf('Prepaid Fixed Price');
+  const iDiff     = idxOf('Cost Difference (Net Terms - Prepaid)');
+
+  const result = new Map();        // shopifyOrderNum → entry
+  const hpdToShopify = new Map();  // hpdOrderNum → shopifyOrderNum
+
+  for (let r = 1; r < allRows.length; r++) {
+    const row = allRows[r];
+    const hpdOrder = (row[iOrder] || '').trim();
+    if (!hpdOrder) continue; // skip summary / total rows
+
+    // Shopify order # is embedded in Notes HTML: <br/>#469322<br/>
+    let shopifyNum = hpdToShopify.get(hpdOrder) || '';
+    if (!shopifyNum) {
+      const notes = row[iNotes] || '';
+      const m = notes.match(/#(\d+)/);
+      if (m) { shopifyNum = m[1]; hpdToShopify.set(hpdOrder, shopifyNum); }
+    }
+    if (!shopifyNum) continue;
+
+    const parseMoney = v => {
+      const s = (v || '').trim().replace(/[$,]/g, '');
+      const n = parseFloat(s);
+      return isNaN(n) ? null : n;
+    };
+    const netTerms = parseMoney(row[iNet]);
+    const prepaid  = parseMoney(row[iPrepaid]);
+    const costDiff = parseMoney(row[iDiff]);
+
+    if (!result.has(shopifyNum)) {
+      result.set(shopifyNum, {
+        hpdOrderNum:     hpdOrder,
+        shopifyOrderNum: shopifyNum,
+        date:    (row[iDate]    || '').trim(),
+        carrier: (row[iCarrier] || '').trim(),
+        state:   (row[iState]   || '').trim(),
+        netTerms: null, prepaid: null, costDiff: null,
+        items: [],
+      });
+    }
+    const entry = result.get(shopifyNum);
+    // Net Terms appears only on the first item row of each HPD order
+    if (entry.netTerms === null && netTerms !== null) {
+      entry.netTerms = netTerms;
+      entry.prepaid  = prepaid;
+      entry.costDiff = costDiff;
+    }
+    entry.items.push({
+      sku: (row[iSku] || '').trim(),
+      qty: parseInt(row[iQty] || '1') || 1,
+    });
+  }
+
+  return result;
+}
+
+// RFC 4180 parser: handles quoted fields containing embedded newlines/commas
+function _parseRfc4180(text) {
+  const rows = [];
+  let row = [], field = '', inQ = false;
+  const t = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (t[i + 1] === '"') { field += '"'; i++; }
+        else inQ = false;
+      } else { field += ch; }
+    } else {
+      if      (ch === '"')  { inQ = true; }
+      else if (ch === ',')  { row.push(field); field = ''; }
+      else if (ch === '\n') { row.push(field); field = ''; rows.push(row); row = []; }
+      else                  { field += ch; }
+    }
+  }
+  row.push(field);
+  if (row.some(f => f !== '')) rows.push(row);
+  return rows;
+}
+
 // ─── Main calculation ─────────────────────────────────────────────────────────
 
-export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}) {
+export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}, hpdShipCosts = null) {
   // ── Pre-pass: order store composition + HP weight ──
   const orderStores  = new Map(); // orderNum → Set of stores
   const orderShipping = new Map(); // orderNum → customer paid shipping
@@ -454,10 +553,19 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       if (orderCat === 'Pure HP Dropship') {
         const hpW    = orderHpWeight.get(orderNum) || 0;
         const hpRate = hpW > 0 ? hpShipRate(hpW) : custShipping;
-        shipPaid  = hpRate;
-        shipPaidSS = 0; shipPaidHP = hpRate;
-        shipDelta = Math.round((custShipping - hpRate) * 100) / 100;
-        shipNote  = `HP pass-through (${hpW.toFixed(2)}lb)`;
+        const hpdEntry = hpdShipCosts ? hpdShipCosts.get(orderNumClean) : null;
+        if (hpdEntry && hpdEntry.netTerms !== null) {
+          // Actual HPD cost from log file — overrides weight-based estimate
+          shipPaid  = hpdEntry.netTerms;
+          shipPaidSS = 0; shipPaidHP = hpdEntry.netTerms;
+          shipDelta = Math.round((custShipping - hpdEntry.netTerms) * 100) / 100;
+          shipNote  = `HPD actual (${hpdEntry.hpdOrderNum})`;
+        } else {
+          shipPaid  = hpRate;
+          shipPaidSS = 0; shipPaidHP = hpRate;
+          shipDelta = Math.round((custShipping - hpRate) * 100) / 100;
+          shipNote  = `HP est (${hpW.toFixed(2)}lb)`;
+        }
 
       } else if (orderCat === 'Pure 17381') {
         shipPaid  = ssRate;
