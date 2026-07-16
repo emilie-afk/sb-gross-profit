@@ -242,6 +242,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div>
     <div style="display:flex;gap:8px">
       <button class="logout-btn" id="btn-new-files" onclick="newFiles()" style="display:none">↑ New files</button>
+      <button class="logout-btn" id="btn-projection" onclick="openProjectionPage()" style="display:none;border-color:var(--accent);color:var(--accent)">📈 Projection</button>
       <button class="logout-btn" onclick="logout()">Sign out</button>
     </div>
   </div>
@@ -386,7 +387,6 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button class="view-tab"        id="tab-influencer" onclick="switchView('influencer')">🎁 Influencer</button>
       <button class="view-tab"        id="tab-freeship"   onclick="switchView('freeship')">🚚 Free Ship</button>
       <button class="view-tab"        id="tab-hpd"        onclick="switchView('hpd')">🌿 HPD Ship</button>
-      <button class="view-tab"        id="tab-proj"       onclick="switchView('proj')">📈 Projection</button>
     </div>
 
     <!-- SKU view -->
@@ -675,52 +675,6 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div>
     </div><!-- /view-hpd -->
 
-    <!-- Projection view -->
-    <div id="view-proj" style="display:none">
-    <div class="lm-threshold" style="gap:8px">
-      <span style="font-size:.85rem;font-weight:600">📈 Price Projection</span>
-      <input class="search-input" id="proj-search" placeholder="Search SKU or product name…"
-             style="max-width:280px;flex:0 1 280px"
-             onkeydown="if(event.key==='Enter')addProjFromData()">
-      <button class="logout-btn" onclick="addProjFromData()" style="white-space:nowrap">+ Add from data</button>
-      <button class="logout-btn" onclick="addProjManual()" style="white-space:nowrap">+ Add as new SKU</button>
-      <label class="logout-btn" style="cursor:pointer;white-space:nowrap" title="CSV with SKU or plant name columns. Optional: Qty, Price columns.">
-        📂 Import CSV
-        <input type="file" accept=".csv" style="display:none" onchange="handleProjCsvImport(this)">
-      </label>
-      <button class="logout-btn" onclick="clearProjRows()"
-              style="white-space:nowrap;color:var(--red);border-color:var(--red)">Clear all</button>
-      <button class="logout-btn" onclick="downloadProjCsv()"
-              style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
-    </div>
-    <div id="proj-cards" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px"></div>
-    <div class="table-wrap" id="proj-table-wrap" style="display:none">
-      <table id="proj-table">
-        <thead>
-          <tr>
-            <th style="min-width:110px">SKU</th>
-            <th style="min-width:160px">Product</th>
-            <th>Type</th>
-            <th class="num" style="min-width:80px">Qty</th>
-            <th class="num" style="min-width:90px">Sell Price</th>
-            <th class="num" style="min-width:90px">Cost/unit</th>
-            <th class="num">Revenue</th>
-            <th class="num">COGS</th>
-            <th class="num">GP $</th>
-            <th class="num">GP%</th>
-            <th style="width:32px"></th>
-          </tr>
-        </thead>
-        <tbody id="proj-table-body"></tbody>
-        <tfoot id="proj-tfoot"></tfoot>
-      </table>
-    </div>
-    <div id="proj-empty" style="text-align:center;color:var(--muted);padding:48px;font-size:.9rem">
-      Search for a SKU or product above, then click <strong>+ Add from data</strong> to model price
-      changes on existing SKUs, or <strong>+ Add as new SKU</strong> to add products with no recent sales.
-    </div>
-    </div><!-- /view-proj -->
-
     <!-- Low Margin SKU view -->
     <div id="view-lowsku" style="display:none">
     <div class="lm-threshold">
@@ -756,6 +710,73 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div><!-- /view-lowsku -->
 
   </div><!-- /dashboard -->
+
+  <!-- Projection page (standalone, full-page) -->
+  <div id="projection-page" style="display:none" class="main">
+
+    <!-- Page header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;
+                margin-bottom:24px;flex-wrap:wrap;gap:12px">
+      <div style="display:flex;align-items:center;gap:14px">
+        <button onclick="closeProjectionPage()" class="logout-btn"
+                style="font-size:.82rem;display:flex;align-items:center;gap:5px">
+          ← Dashboard
+        </button>
+        <h2 style="font-size:1.05rem;font-weight:700;color:var(--text)">📈 Price Projection</h2>
+      </div>
+      <button class="logout-btn" onclick="downloadProjCsv()"
+              style="font-size:.75rem;white-space:nowrap">↓ Download CSV</button>
+    </div>
+
+    <!-- Controls -->
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:20px">
+      <input class="search-input" id="proj-search" placeholder="Search SKU or product name…"
+             style="max-width:300px;flex:0 1 300px"
+             onkeydown="if(event.key==='Enter')addProjFromData()">
+      <button class="logout-btn" onclick="addProjFromData()" style="white-space:nowrap">+ Add from data</button>
+      <button class="logout-btn" onclick="addProjManual()" style="white-space:nowrap">+ Add as new SKU</button>
+      <label class="logout-btn" style="cursor:pointer;white-space:nowrap"
+             title="CSV columns: SKU or Name/Product/Plant, optional Qty and Price">
+        📂 Import CSV
+        <input type="file" accept=".csv" style="display:none" onchange="handleProjCsvImport(this)">
+      </label>
+      <button class="logout-btn" onclick="clearProjRows()"
+              style="white-space:nowrap;color:var(--red);border-color:var(--red)">Clear all</button>
+    </div>
+
+    <!-- Summary cards -->
+    <div id="proj-cards" style="margin-bottom:24px"></div>
+
+    <!-- Table -->
+    <div class="table-wrap" id="proj-table-wrap" style="display:none;max-height:calc(100vh - 340px)">
+      <table id="proj-table">
+        <thead>
+          <tr>
+            <th style="min-width:110px">SKU</th>
+            <th style="min-width:160px">Product</th>
+            <th>Type</th>
+            <th class="num" style="min-width:80px">Qty</th>
+            <th class="num" style="min-width:90px">Sell Price</th>
+            <th class="num" style="min-width:90px">Cost/unit</th>
+            <th class="num">Revenue</th>
+            <th class="num">COGS</th>
+            <th class="num">GP $</th>
+            <th class="num">GP%</th>
+            <th style="width:32px"></th>
+          </tr>
+        </thead>
+        <tbody id="proj-table-body"></tbody>
+        <tfoot id="proj-tfoot"></tfoot>
+      </table>
+    </div>
+
+    <div id="proj-empty" style="text-align:center;color:var(--muted);padding:64px;font-size:.9rem">
+      Search for a SKU or product above, then click <strong>+ Add from data</strong> to model price
+      changes on existing SKUs, or <strong>+ Add as new SKU</strong> to add products with no recent sales.
+    </div>
+
+  </div><!-- /projection-page -->
+
 </div>
 
 <script type="module">
@@ -1185,7 +1206,8 @@ window.runCalc = async () => {
 
     document.getElementById('upload-screen').style.display = 'none';
     document.getElementById('dashboard').style.display = 'block';
-    document.getElementById('btn-new-files').style.display = '';
+    document.getElementById('btn-new-files').style.display   = '';
+    document.getElementById('btn-projection').style.display  = '';
     const dateRange = getDateRange(allLines);
     document.getElementById('topbar-sub').textContent =
       `${allLines.length.toLocaleString()} line items · ${dateRange}`;
@@ -1528,7 +1550,8 @@ function deltaClass(v) { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg
 window.newFiles = () => {
   document.getElementById('dashboard').style.display = 'none';
   document.getElementById('upload-screen').style.display = '';
-  document.getElementById('btn-new-files').style.display = 'none';
+  document.getElementById('btn-new-files').style.display  = 'none';
+  document.getElementById('btn-projection').style.display = 'none';
   // Reset file inputs and saved selections
   ordersFiles = []; shipFile = null; costsFile = null; hpdFile = null;
   savedOrdersTexts = null; savedShipText = null; savedCostsText = null; savedHpdText = null;
@@ -1606,8 +1629,7 @@ window.switchView = view => {
   document.getElementById('view-influencer').style.display = view === 'influencer' ? '' : 'none';
   document.getElementById('view-freeship').style.display   = view === 'freeship'   ? '' : 'none';
   document.getElementById('view-hpd').style.display        = view === 'hpd'        ? '' : 'none';
-  document.getElementById('view-proj').style.display       = view === 'proj'       ? '' : 'none';
-  ['sku','order','sub','lowmargin','lowsku','giftcard','influencer','freeship','hpd','proj'].forEach(v =>
+  ['sku','order','sub','lowmargin','lowsku','giftcard','influencer','freeship','hpd'].forEach(v =>
     document.getElementById(`tab-${v}`).classList.toggle('active', v === view));
   if (view === 'order')      renderOrderView();
   if (view === 'sub')        renderSubView();
@@ -1617,7 +1639,6 @@ window.switchView = view => {
   if (view === 'influencer') renderInfluencerView();
   if (view === 'freeship')   renderFreeShipView();
   if (view === 'hpd')        renderHpdView();
-  if (view === 'proj')       renderProjView();
 };
 
 function computeOrderRows(lines) {
@@ -2663,6 +2684,22 @@ window.downloadHpdCsv = () => {
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = 'hpd_shipping_pl.csv';
   a.click();
+};
+
+// ─── Projection page nav ─────────────────────────────────────────
+window.openProjectionPage = function() {
+  document.getElementById('dashboard').style.display        = 'none';
+  document.getElementById('projection-page').style.display  = '';
+  document.getElementById('btn-new-files').style.display    = 'none';
+  document.getElementById('btn-projection').style.display   = 'none';
+  renderProjView();
+};
+
+window.closeProjectionPage = function() {
+  document.getElementById('projection-page').style.display  = 'none';
+  document.getElementById('dashboard').style.display        = '';
+  document.getElementById('btn-new-files').style.display    = '';
+  document.getElementById('btn-projection').style.display   = '';
 };
 
 // ─── Projection View ─────────────────────────────────────────────
