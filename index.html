@@ -210,6 +210,14 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 .saved-chip .chip-del:hover{color:var(--red)}
 .no-saved{color:var(--muted);font-size:.75rem;font-style:italic}
 
+/* Projection table */
+.proj-input{background:var(--surface2);border:1px solid var(--border);border-radius:4px;
+  color:var(--text);padding:3px 6px;font-size:.78rem;font-family:inherit;outline:none}
+.proj-input:focus{border-color:var(--accent)}
+.proj-input[type=number]{text-align:right;width:80px}
+.proj-input.needs-price{border-color:var(--yellow);background:rgba(251,191,36,.07)}
+.proj-input.needs-price:focus{border-color:var(--accent);background:var(--surface2)}
+
 /* Misc */
 .missing-warn{
   background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);
@@ -378,6 +386,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button class="view-tab"        id="tab-influencer" onclick="switchView('influencer')">🎁 Influencer</button>
       <button class="view-tab"        id="tab-freeship"   onclick="switchView('freeship')">🚚 Free Ship</button>
       <button class="view-tab"        id="tab-hpd"        onclick="switchView('hpd')">🌿 HPD Ship</button>
+      <button class="view-tab"        id="tab-proj"       onclick="switchView('proj')">📈 Projection</button>
     </div>
 
     <!-- SKU view -->
@@ -666,6 +675,52 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div>
     </div><!-- /view-hpd -->
 
+    <!-- Projection view -->
+    <div id="view-proj" style="display:none">
+    <div class="lm-threshold" style="gap:8px">
+      <span style="font-size:.85rem;font-weight:600">📈 Price Projection</span>
+      <input class="search-input" id="proj-search" placeholder="Search SKU or product name…"
+             style="max-width:280px;flex:0 1 280px"
+             onkeydown="if(event.key==='Enter')addProjFromData()">
+      <button class="logout-btn" onclick="addProjFromData()" style="white-space:nowrap">+ Add from data</button>
+      <button class="logout-btn" onclick="addProjManual()" style="white-space:nowrap">+ Add as new SKU</button>
+      <label class="logout-btn" style="cursor:pointer;white-space:nowrap" title="CSV with SKU or plant name columns. Optional: Qty, Price columns.">
+        📂 Import CSV
+        <input type="file" accept=".csv" style="display:none" onchange="handleProjCsvImport(this)">
+      </label>
+      <button class="logout-btn" onclick="clearProjRows()"
+              style="white-space:nowrap;color:var(--red);border-color:var(--red)">Clear all</button>
+      <button class="logout-btn" onclick="downloadProjCsv()"
+              style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
+    </div>
+    <div id="proj-cards" style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px"></div>
+    <div class="table-wrap" id="proj-table-wrap" style="display:none">
+      <table id="proj-table">
+        <thead>
+          <tr>
+            <th style="min-width:110px">SKU</th>
+            <th style="min-width:160px">Product</th>
+            <th>Type</th>
+            <th class="num" style="min-width:80px">Qty</th>
+            <th class="num" style="min-width:90px">Sell Price</th>
+            <th class="num" style="min-width:90px">Cost/unit</th>
+            <th class="num">Revenue</th>
+            <th class="num">COGS</th>
+            <th class="num">GP $</th>
+            <th class="num">GP%</th>
+            <th style="width:32px"></th>
+          </tr>
+        </thead>
+        <tbody id="proj-table-body"></tbody>
+        <tfoot id="proj-tfoot"></tfoot>
+      </table>
+    </div>
+    <div id="proj-empty" style="text-align:center;color:var(--muted);padding:48px;font-size:.9rem">
+      Search for a SKU or product above, then click <strong>+ Add from data</strong> to model price
+      changes on existing SKUs, or <strong>+ Add as new SKU</strong> to add products with no recent sales.
+    </div>
+    </div><!-- /view-proj -->
+
     <!-- Low Margin SKU view -->
     <div id="view-lowsku" style="display:none">
     <div class="lm-threshold">
@@ -714,6 +769,13 @@ let hpdData = null; // Map<shopifyOrderNum, entry> from parseHpdLog
 let allLines = [], filteredLines = [], sortKey = 'date', sortAsc = false;
 let currentPage = 1;
 const PAGE_SIZE = 100;
+
+// Projection state
+let projRows = [];
+let projNextId = 1;
+// Cost tables stored at calc time for 0-sales SKU lookup
+let _projMcgCosts = {}, _projProductCosts = {}, _projAdditionalCosts = {};
+let _projHpByName = {}, _projSkuAlias = {};
 
 // ─── localStorage helpers ─────────────────────────────────────────
 const LS_KEY = 'gp_saved_files';
@@ -1085,6 +1147,13 @@ window.runCalc = async () => {
       const uploaded = parseAdditionalCosts(parseCSV(costsText));
       additionalCosts = { ...additionalCosts, ...uploaded };
     }
+
+    // Store cost tables for Projection tab 0-sales SKU lookup
+    _projMcgCosts      = mcgCosts;
+    _projProductCosts  = productCosts;
+    _projAdditionalCosts = { ...additionalCosts };
+    _projHpByName      = hpByName;
+    _projSkuAlias      = skuAlias;
 
     setLoadingMsg('Parsing orders…');
     const orderTexts = ordersFiles.length
@@ -1537,7 +1606,8 @@ window.switchView = view => {
   document.getElementById('view-influencer').style.display = view === 'influencer' ? '' : 'none';
   document.getElementById('view-freeship').style.display   = view === 'freeship'   ? '' : 'none';
   document.getElementById('view-hpd').style.display        = view === 'hpd'        ? '' : 'none';
-  ['sku','order','sub','lowmargin','lowsku','giftcard','influencer','freeship','hpd'].forEach(v =>
+  document.getElementById('view-proj').style.display       = view === 'proj'       ? '' : 'none';
+  ['sku','order','sub','lowmargin','lowsku','giftcard','influencer','freeship','hpd','proj'].forEach(v =>
     document.getElementById(`tab-${v}`).classList.toggle('active', v === view));
   if (view === 'order')      renderOrderView();
   if (view === 'sub')        renderSubView();
@@ -1547,6 +1617,7 @@ window.switchView = view => {
   if (view === 'influencer') renderInfluencerView();
   if (view === 'freeship')   renderFreeShipView();
   if (view === 'hpd')        renderHpdView();
+  if (view === 'proj')       renderProjView();
 };
 
 function computeOrderRows(lines) {
@@ -2591,6 +2662,505 @@ window.downloadHpdCsv = () => {
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
   a.download = 'hpd_shipping_pl.csv';
+  a.click();
+};
+
+// ─── Projection View ─────────────────────────────────────────────
+
+function projLookupCost(sku, product) {
+  const k = (sku || '').trim().toUpperCase();
+  if (!k) return null;
+  // Gift cards have $0 COGS
+  if (/^GC\d/i.test(k)) return 0;
+  // MCG Total sheet (exact SKU match)
+  if (_projMcgCosts[k]       !== undefined) return _projMcgCosts[k];
+  // Pot SKU suffix variant (e.g. EEZZ7650.WH → try EEZZ7650)
+  if (k.includes('.')) {
+    const base = k.split('.')[0];
+    if (_projMcgCosts[base] !== undefined) return _projMcgCosts[base];
+  }
+  // Product costs (exact SKU)
+  if (_projProductCosts[k]   !== undefined) return _projProductCosts[k];
+  // Additional/manual costs
+  if (_projAdditionalCosts[k] !== undefined) return _projAdditionalCosts[k];
+  // SKU alias lookup
+  if (_projSkuAlias && _projSkuAlias[k] && _projSkuAlias[k] !== k)
+    return projLookupCost(_projSkuAlias[k], product);
+  // HP by product name (for numeric variant-ID SKUs)
+  if (_projHpByName && product && /^\d+$/.test(k)) {
+    const norm = (product || '').toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim();
+    if (_projHpByName[norm] !== undefined) return _projHpByName[norm];
+    for (const [hk, hv] of Object.entries(_projHpByName)) {
+      if (norm.startsWith(hk)) return hv;
+    }
+  }
+  return null;
+}
+
+window.addProjFromData = function() {
+  const q = (document.getElementById('proj-search').value || '').trim().toLowerCase();
+  if (!q) { alert('Enter a SKU or product name to search.'); return; }
+  if (!allLines.length) { alert('Run the calculator first to load order data.'); return; }
+
+  const matches = allLines.filter(li =>
+    (li.sku || '').toLowerCase().includes(q) ||
+    (li.product || '').toLowerCase().includes(q)
+  );
+  if (!matches.length) { alert('No matching SKUs found in loaded orders.'); return; }
+
+  // Group by uppercase SKU
+  const bySkuMap = new Map();
+  for (const li of matches) {
+    const k = (li.sku || '').toUpperCase();
+    if (!bySkuMap.has(k)) bySkuMap.set(k, { sku: li.sku, product: li.product, lines: [] });
+    bySkuMap.get(k).lines.push(li);
+  }
+
+  let added = 0;
+  for (const [, grp] of bySkuMap) {
+    const totalQty = grp.lines.reduce((s, l) => s + (l.qty || 0), 0);
+    const totalRev = grp.lines.reduce((s, l) => s + (l.lineRevenue || 0), 0);
+    // Cost per unit: avg from known-cost lines, else look up from cost tables
+    const costLines = grp.lines.filter(l => l.lineCogs !== null && l.qty > 0);
+    const costPerUnit = costLines.length
+      ? Math.round(costLines.reduce((s,l)=>s+l.lineCogs,0) / costLines.reduce((s,l)=>s+l.qty,0) * 100) / 100
+      : (projLookupCost(grp.sku, grp.product) ?? 0);
+    const avgSellPrice = totalQty > 0 ? Math.round(totalRev / totalQty * 100) / 100 : 0;
+    // Store/type label
+    const types = [...new Set(grp.lines.map(l => l.store || ''))].filter(Boolean).join(', ');
+
+    projRows.push({
+      id: projNextId++,
+      sku: grp.sku,
+      product: grp.product,
+      type: types,
+      qty: totalQty,
+      sellPrice: avgSellPrice,
+      costPerUnit,
+    });
+    added++;
+  }
+  if (added) renderProjView();
+  document.getElementById('proj-search').value = '';
+};
+
+window.addProjManual = function() {
+  const raw = (document.getElementById('proj-search').value || '').trim().toUpperCase();
+  const cost = projLookupCost(raw, '') ?? 0;
+  projRows.push({
+    id: projNextId++,
+    sku: raw,
+    product: '',
+    type: '',
+    qty: 1,
+    sellPrice: 0,
+    costPerUnit: cost,
+  });
+  renderProjView();
+  document.getElementById('proj-search').value = '';
+};
+
+window.removeProjRow = function(id) {
+  projRows = projRows.filter(r => r.id !== id);
+  renderProjView();
+};
+
+// Called on oninput for numeric fields — updates data, refreshes computed cells only
+window.updateProjField = function(id, field, val) {
+  const row = projRows.find(r => r.id === id);
+  if (!row) return;
+  const n = parseFloat(val);
+  row[field] = isNaN(n) ? 0 : n;
+  refreshProjComputed();
+};
+
+// Called on onchange for text fields — updates data only (no re-render)
+window.updateProjText = function(id, field, val) {
+  const row = projRows.find(r => r.id === id);
+  if (!row) return;
+  row[field] = val;
+};
+
+window.clearProjRows = function() {
+  projRows = [];
+  renderProjView();
+};
+
+// Re-renders the entire projection view (called when rows are added/removed)
+function renderProjView() {
+  const wrap  = document.getElementById('proj-table-wrap');
+  const empty = document.getElementById('proj-empty');
+  const cards = document.getElementById('proj-cards');
+
+  if (!projRows.length) {
+    wrap.style.display  = 'none';
+    empty.style.display = '';
+    cards.innerHTML     = '';
+    return;
+  }
+
+  wrap.style.display  = '';
+  empty.style.display = 'none';
+
+  document.getElementById('proj-table-body').innerHTML = projRows.map(r => `
+    <tr>
+      <td><input class="proj-input" style="width:110px;text-align:left"
+            value="${(r.sku||'').replace(/"/g,'&quot;')}"
+            onchange="updateProjText(${r.id},'sku',this.value)"></td>
+      <td><input class="proj-input" style="width:180px;text-align:left"
+            value="${(r.product||'').replace(/"/g,'&quot;').replace(/</g,'&lt;')}"
+            onchange="updateProjText(${r.id},'product',this.value)"></td>
+      <td style="font-size:.72rem;color:var(--muted);max-width:120px;overflow:hidden;text-overflow:ellipsis"
+          title="${(r.type||'').replace(/"/g,'&quot;')}">${r.type||''}</td>
+      <td class="num">
+        <input class="proj-input" type="number" min="0" step="1" value="${r.qty}"
+               oninput="updateProjField(${r.id},'qty',this.value)">
+      </td>
+      <td class="num">
+        <input class="proj-input${r.sellPrice === 0 ? ' needs-price' : ''}"
+               id="proj-price-${r.id}"
+               type="number" min="0" step="0.01" value="${r.sellPrice}"
+               placeholder="0.00"
+               oninput="updateProjField(${r.id},'sellPrice',this.value)">
+      </td>
+      <td class="num">
+        <input class="proj-input" type="number" min="0" step="0.01" value="${r.costPerUnit}"
+               oninput="updateProjField(${r.id},'costPerUnit',this.value)">
+      </td>
+      <td class="num" id="proj-rev-${r.id}">—</td>
+      <td class="num" id="proj-cogs-${r.id}">—</td>
+      <td class="num" id="proj-gp-${r.id}">—</td>
+      <td class="num" id="proj-pct-${r.id}">—</td>
+      <td style="text-align:center">
+        <button onclick="removeProjRow(${r.id})"
+                style="background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer;
+                       line-height:1;padding:0 4px" title="Remove">×</button>
+      </td>
+    </tr>`).join('');
+
+  refreshProjComputed();
+}
+
+// Updates only the computed read-only cells + summary cards + footer (preserves input focus)
+function refreshProjComputed() {
+  let tRev = 0, tCogs = 0, tQty = 0;
+
+  for (const r of projRows) {
+    const rev  = Math.round(r.qty * r.sellPrice  * 100) / 100;
+    const cogs = Math.round(r.qty * r.costPerUnit * 100) / 100;
+    const gp   = Math.round((rev - cogs) * 100) / 100;
+    const gpPct = rev > 0 ? Math.round(gp / rev * 1000) / 10 : null;
+    tRev += rev; tCogs += cogs; tQty += r.qty;
+
+    const revEl    = document.getElementById(`proj-rev-${r.id}`);
+    const cogsEl   = document.getElementById(`proj-cogs-${r.id}`);
+    const gpEl     = document.getElementById(`proj-gp-${r.id}`);
+    const pctEl    = document.getElementById(`proj-pct-${r.id}`);
+    const priceEl  = document.getElementById(`proj-price-${r.id}`);
+    if (revEl)   revEl.textContent  = fmt(rev);
+    if (cogsEl)  cogsEl.textContent = fmt(cogs);
+    if (gpEl)    { gpEl.textContent = fmt(gp);  gpEl.className  = `num ${gpClass(gp)}`; }
+    if (pctEl)   { pctEl.textContent = gpPct !== null ? gpPct.toFixed(1)+'%' : '—';
+                   pctEl.className  = `num ${gpClass(gpPct)}`; }
+    // Yellow highlight on sell price when still 0 — clears as soon as user types a value
+    if (priceEl)  priceEl.classList.toggle('needs-price', r.sellPrice === 0);
+  }
+
+  tRev  = Math.round(tRev  * 100) / 100;
+  tCogs = Math.round(tCogs * 100) / 100;
+  const tGp    = Math.round((tRev - tCogs) * 100) / 100;
+  const tGpPct = tRev > 0 ? Math.round(tGp / tRev * 1000) / 10 : null;
+
+  // ── Current baseline from allLines ──
+  const curRev  = Math.round(allLines.reduce((s,l) => s + (l.lineRevenue || 0), 0) * 100) / 100;
+  const curCogs = Math.round(allLines.reduce((s,l) => s + (l.lineCogs    || 0), 0) * 100) / 100;
+  const curGp   = Math.round((curRev - curCogs) * 100) / 100;
+  const curGpPct = curRev > 0 ? Math.round(curGp / curRev * 1000) / 10 : null;
+  const hasBaseline = allLines.length > 0;
+
+  // ── Combined ──
+  const comRev  = Math.round((curRev  + tRev)  * 100) / 100;
+  const comCogs = Math.round((curCogs + tCogs) * 100) / 100;
+  const comGp   = Math.round((comRev - comCogs) * 100) / 100;
+  const comGpPct = comRev > 0 ? Math.round(comGp / comRev * 1000) / 10 : null;
+
+  // GP% delta (combined vs current)
+  const gpPctDelta = (comGpPct !== null && curGpPct !== null)
+    ? Math.round((comGpPct - curGpPct) * 10) / 10 : null;
+  const deltaSign  = gpPctDelta !== null ? (gpPctDelta >= 0 ? '+' : '') : '';
+  const deltaColor = gpPctDelta === null ? '' : gpPctDelta >= 0 ? 'var(--green)' : 'var(--red)';
+
+  const gpCardCls = tGpPct !== null && tGpPct >= 40 ? 'accent'
+                  : tGpPct !== null && tGpPct < 20  ? 'warn' : '';
+
+  const cardsEl = document.getElementById('proj-cards');
+
+  if (hasBaseline) {
+    // Three-panel comparison: Current | + Projection | Combined
+    cardsEl.innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:stretch;width:100%">
+
+        <!-- Current -->
+        <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-width:200px">
+          <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+                      color:var(--muted);padding:0 2px">Current (loaded data)</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="card" style="flex:1;min-width:120px">
+              <div class="label">Revenue</div>
+              <div class="value" style="font-size:1.1rem">${fmt(curRev)}</div>
+            </div>
+            <div class="card" style="flex:1;min-width:120px">
+              <div class="label">GP $</div>
+              <div class="value" style="font-size:1.1rem ${gpClass(curGp)?'color:var(--green)':''}">${fmt(curGp)}</div>
+            </div>
+            <div class="card" style="flex:1;min-width:100px">
+              <div class="label">GP%</div>
+              <div class="value" style="font-size:1.1rem">${curGpPct !== null ? curGpPct.toFixed(1)+'%' : '—'}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Arrow -->
+        <div style="display:flex;align-items:center;padding:20px 4px;color:var(--accent);font-size:1.4rem">+</div>
+
+        <!-- Projection adds -->
+        <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-width:200px">
+          <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+                      color:var(--accent2);padding:0 2px">+ Projection (${projRows.length} SKU${projRows.length!==1?'s':''})</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="card" style="flex:1;min-width:120px;border-color:var(--accent2)">
+              <div class="label">+ Revenue</div>
+              <div class="value" style="font-size:1.1rem;color:var(--accent2)">${fmt(tRev)}</div>
+            </div>
+            <div class="card" style="flex:1;min-width:120px;border-color:var(--accent2)">
+              <div class="label">+ GP $</div>
+              <div class="value" style="font-size:1.1rem;color:var(--accent2)">${fmt(tGp)}</div>
+              <div class="sub">${tGpPct !== null ? tGpPct.toFixed(1)+'% margin' : ''}</div>
+            </div>
+            <div class="card" style="flex:1;min-width:100px;border-color:var(--accent2)">
+              <div class="label">+ COGS</div>
+              <div class="value" style="font-size:1.1rem;color:var(--accent2)">${fmt(tCogs)}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Arrow -->
+        <div style="display:flex;align-items:center;padding:20px 4px;color:var(--accent);font-size:1.4rem">=</div>
+
+        <!-- Combined -->
+        <div style="display:flex;flex-direction:column;gap:8px;flex:1;min-width:200px">
+          <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+                      color:var(--green);padding:0 2px">Combined total</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <div class="card" style="flex:1;min-width:120px;border-color:rgba(110,231,183,.4)">
+              <div class="label">Revenue</div>
+              <div class="value" style="font-size:1.1rem">${fmt(comRev)}</div>
+              <div class="sub" style="font-size:.68rem;margin-top:4px;color:var(--muted)">
+                ${fmt(curRev)} + <span style="color:var(--accent2)">${fmt(tRev)}</span>
+              </div>
+            </div>
+            <div class="card accent" style="flex:1;min-width:120px">
+              <div class="label">GP $</div>
+              <div class="value" style="font-size:1.1rem">${fmt(comGp)}</div>
+            </div>
+            <div class="card accent" style="flex:1;min-width:100px">
+              <div class="label">GP%</div>
+              <div class="value" style="font-size:1.1rem">${comGpPct !== null ? comGpPct.toFixed(1)+'%' : '—'}</div>
+              ${gpPctDelta !== null ? `<div class="sub" style="color:${deltaColor};font-weight:600">${deltaSign}${gpPctDelta.toFixed(1)}% vs current</div>` : ''}
+            </div>
+          </div>
+        </div>
+
+      </div>`;
+  } else {
+    // No baseline loaded — projection-only view
+    cardsEl.innerHTML = `
+      <div class="card">
+        <div class="label">Projected Revenue</div>
+        <div class="value" style="font-size:1.3rem">${fmt(tRev)}</div>
+        <div class="sub">${projRows.length} SKU${projRows.length!==1?'s':''}</div>
+      </div>
+      <div class="card">
+        <div class="label">Projected COGS</div>
+        <div class="value" style="font-size:1.3rem">${fmt(tCogs)}</div>
+      </div>
+      <div class="card accent">
+        <div class="label">Projected GP $</div>
+        <div class="value" style="font-size:1.3rem">${fmt(tGp)}</div>
+      </div>
+      <div class="card ${gpCardCls}">
+        <div class="label">Projected GP%</div>
+        <div class="value" style="font-size:1.3rem">${tGpPct !== null ? tGpPct.toFixed(1)+'%' : '—'}</div>
+      </div>`;
+  }
+
+  document.getElementById('proj-tfoot').innerHTML = `<tr class="totals-row">
+    <td colspan="3">Total (${projRows.length} row${projRows.length!==1?'s':''})</td>
+    <td class="num">${tQty.toLocaleString()}</td>
+    <td></td><td></td>
+    <td class="num">${fmt(tRev)}</td>
+    <td class="num">${fmt(tCogs)}</td>
+    <td class="num ${gpClass(tGp)}">${fmt(tGp)}</td>
+    <td class="num ${gpClass(tGpPct)}">${tGpPct !== null ? tGpPct.toFixed(1)+'%' : '—'}</td>
+    <td></td>
+  </tr>`;
+}
+
+// ── CSV import helpers ────────────────────────────────────────────
+function splitCsvLine(line) {
+  const cols = []; let cur = '', inQ = false;
+  for (const ch of line) {
+    if (ch === '"') { inQ = !inQ; continue; }
+    if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ''; }
+    else cur += ch;
+  }
+  cols.push(cur.trim());
+  return cols;
+}
+
+function parseProjCsv(text) {
+  // Returns [{sku, name, qty, price}]
+  // Accepts: header row (sku/name/product/plant/qty/price) or bare list (col0=sku/name, col1=qty, col2=price)
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return [];
+
+  const firstLower = lines[0].toLowerCase();
+  const hasHeader  = /sku|name|product|plant|qty|quantity|price/.test(firstLower);
+  const dataLines  = hasHeader ? lines.slice(1) : lines;
+
+  if (hasHeader) {
+    const hdrs     = splitCsvLine(lines[0]).map(h => h.toLowerCase());
+    const skuIdx   = hdrs.findIndex(h => h === 'sku');
+    const nameIdx  = hdrs.findIndex(h => /name|product|plant|title/.test(h));
+    const qtyIdx   = hdrs.findIndex(h => /^(qty|quantity|count)$/.test(h));
+    const priceIdx = hdrs.findIndex(h => /^(price|sell.?price|sell)$/.test(h));
+
+    return dataLines.map(line => {
+      const c = splitCsvLine(line);
+      const sku   = skuIdx   >= 0 ? c[skuIdx]   || '' : '';
+      const name  = nameIdx  >= 0 ? c[nameIdx]  || '' : (skuIdx < 0 ? c[0] || '' : '');
+      const qty   = qtyIdx   >= 0 ? parseFloat(c[qtyIdx])   : NaN;
+      const price = priceIdx >= 0 ? parseFloat(c[priceIdx]) : NaN;
+      return { sku: sku.toUpperCase(), name, qty, price };
+    }).filter(r => r.sku || r.name);
+  } else {
+    // No header: col0 = SKU or name, col1 = qty (optional), col2 = price (optional)
+    return dataLines.map(line => {
+      const c = splitCsvLine(line);
+      const raw = c[0] || '';
+      // Heuristic: if col0 looks like a SKU (has digits + letters), treat as SKU; else product name
+      const looksLikeSku = /[A-Z0-9]{3,}/.test(raw.toUpperCase()) && !/\s{2,}/.test(raw);
+      return {
+        sku:   looksLikeSku ? raw.toUpperCase() : '',
+        name:  looksLikeSku ? '' : raw,
+        qty:   c[1] ? parseFloat(c[1]) : NaN,
+        price: c[2] ? parseFloat(c[2]) : NaN,
+      };
+    }).filter(r => r.sku || r.name);
+  }
+}
+
+window.handleProjCsvImport = async function(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const text = await file.text();
+  input.value = ''; // allow re-importing same file
+
+  const items = parseProjCsv(text);
+  if (!items.length) { alert('No rows found in CSV.'); return; }
+
+  let added = 0, notFound = 0;
+
+  for (const item of items) {
+    const csvQty   = !isNaN(item.qty)   && item.qty   > 0 ? item.qty   : 1;
+    const csvPrice = !isNaN(item.price) && item.price > 0 ? item.price : NaN;
+
+    // Match against allLines: SKU exact (case-insensitive) OR product name partial
+    const matches = allLines.filter(li => {
+      if (item.sku  && (li.sku     || '').toUpperCase() === item.sku)        return true;
+      if (item.name && (li.product || '').toLowerCase()
+            .includes(item.name.toLowerCase()))                              return true;
+      return false;
+    });
+
+    if (matches.length) {
+      // Group by SKU (same logic as addProjFromData)
+      const bySkuMap = new Map();
+      for (const li of matches) {
+        const k = (li.sku || '').toUpperCase();
+        if (!bySkuMap.has(k)) bySkuMap.set(k, { sku: li.sku, product: li.product, lines: [] });
+        bySkuMap.get(k).lines.push(li);
+      }
+      for (const [, grp] of bySkuMap) {
+        const totalQty = grp.lines.reduce((s,l) => s + (l.qty || 0), 0);
+        const totalRev = grp.lines.reduce((s,l) => s + (l.lineRevenue || 0), 0);
+        const costLines = grp.lines.filter(l => l.lineCogs !== null && l.qty > 0);
+        const costPerUnit = costLines.length
+          ? Math.round(costLines.reduce((s,l)=>s+l.lineCogs,0) / costLines.reduce((s,l)=>s+l.qty,0) * 100) / 100
+          : (projLookupCost(grp.sku, grp.product) ?? 0);
+        const avgSellPrice = !isNaN(csvPrice) ? csvPrice
+          : (totalQty > 0 ? Math.round(totalRev / totalQty * 100) / 100 : 0);
+        const types = [...new Set(grp.lines.map(l => l.store || ''))].filter(Boolean).join(', ');
+        projRows.push({
+          id: projNextId++, sku: grp.sku, product: grp.product, type: types,
+          qty: csvQty, sellPrice: avgSellPrice, costPerUnit,
+        });
+        added++;
+      }
+    } else {
+      // No match — add as manual row, cost from tables
+      const cost      = projLookupCost(item.sku, item.name) ?? 0;
+      const sellPrice = !isNaN(csvPrice) ? csvPrice : 0;
+      projRows.push({
+        id: projNextId++,
+        sku:          item.sku  || '',
+        product:      item.name || '',
+        type:         '',
+        qty:          csvQty,
+        sellPrice,
+        costPerUnit:  cost,
+      });
+      added++;
+      if (!item.sku && !item.name) notFound++;
+    }
+  }
+
+  if (added) renderProjView();
+  const msg = `Added ${added} row${added!==1?'s':''} from "${file.name}".`
+    + (notFound ? ` ${notFound} had no SKU or name — check those rows.` : '');
+  // Brief non-blocking notice
+  const notice = document.createElement('div');
+  notice.textContent = msg;
+  Object.assign(notice.style, {
+    position:'fixed', bottom:'24px', right:'24px', zIndex:'9999',
+    background:'var(--surface)', border:'1px solid var(--accent)', borderRadius:'8px',
+    padding:'10px 16px', color:'var(--text)', fontSize:'.82rem', maxWidth:'340px',
+    boxShadow:'var(--shadow)',
+  });
+  document.body.appendChild(notice);
+  setTimeout(() => notice.remove(), 3500);
+};
+
+window.downloadProjCsv = function() {
+  if (!projRows.length) return;
+  const header = ['SKU','Product','Type','Qty','Sell Price','Cost/unit','Revenue','COGS','GP $','GP%'];
+  const rows = [header];
+  for (const r of projRows) {
+    const rev  = Math.round(r.qty * r.sellPrice  * 100) / 100;
+    const cogs = Math.round(r.qty * r.costPerUnit * 100) / 100;
+    const gp   = Math.round((rev - cogs) * 100) / 100;
+    const gpPct = rev > 0 ? Math.round(gp / rev * 1000) / 10 : '';
+    rows.push([
+      r.sku, r.product, r.type, r.qty,
+      r.sellPrice, r.costPerUnit,
+      rev, cogs, gp,
+      gpPct !== '' ? gpPct + '%' : ''
+    ]);
+  }
+  const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = 'projection.csv';
   a.click();
 };
 
