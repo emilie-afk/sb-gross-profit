@@ -775,6 +775,32 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       changes on existing SKUs, or <strong>+ Add as new SKU</strong> to add products with no recent sales.
     </div>
 
+    <!-- ── Free Shipping Threshold Modeler ── -->
+    <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
+      <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">🚚 Free Shipping Threshold Change</h3>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:16px">
+        Models the impact on Succulents Box orders currently in the qualifying subtotal range.
+      </p>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:20px">
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Current threshold ($)</div>
+          <input type="number" id="fs-cur-thresh" value="89" min="0" step="1"
+                 class="search-input" style="width:80px">
+        </div>
+        <div style="color:var(--accent);font-size:1.1rem;padding-bottom:2px">→</div>
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">New threshold ($)</div>
+          <input type="number" id="fs-new-thresh" value="69" min="0" step="1"
+                 class="search-input" style="width:80px">
+        </div>
+        <button class="calc-btn" onclick="calcFsThreshold()"
+                style="width:auto;padding:8px 20px;font-size:.85rem;margin-top:0">
+          Calculate Impact
+        </button>
+      </div>
+      <div id="fs-model-results"></div>
+    </div>
+
   </div><!-- /projection-page -->
 
 </div>
@@ -2700,6 +2726,194 @@ window.closeProjectionPage = function() {
   document.getElementById('dashboard').style.display        = '';
   document.getElementById('btn-new-files').style.display    = '';
   document.getElementById('btn-projection').style.display   = '';
+};
+
+// ─── Free Shipping Threshold Modeler ─────────────────────────────
+let _fsRows = [];
+
+window.calcFsThreshold = function() {
+  const curThresh = parseFloat(document.getElementById('fs-cur-thresh').value) || 89;
+  const newThresh = parseFloat(document.getElementById('fs-new-thresh').value) || 69;
+  const resultEl  = document.getElementById('fs-model-results');
+  if (newThresh >= curThresh) {
+    resultEl.innerHTML = `<p style="color:var(--red);font-size:.84rem;padding:10px 0">New threshold must be lower than current threshold.</p>`;
+    return;
+  }
+  if (!allLines.length) {
+    resultEl.innerHTML = `<p style="color:var(--muted);font-size:.84rem;padding:10px 0">Run the calculator first to load order data.</p>`;
+    return;
+  }
+
+  // Build per-order map (first line item sets order-level shipping fields)
+  const orderMap = new Map();
+  for (const li of allLines) {
+    if (!orderMap.has(li.orderNum)) {
+      orderMap.set(li.orderNum, {
+        orderNum:       li.orderNum,
+        date:           li.date,
+        store:          li.store || '',
+        isFreeShip:     li.isFreeShip,
+        shipCollected:  li.shipCollected || 0,
+        shipPaid:       li.shipPaid      || 0,
+        mcgSubtotal:    0,   // only MCG/SB lines — this is what the free-ship threshold applies to
+        lineRevenue:    0,   // full order revenue (all vendors)
+        lineCogs:       0,
+        netGp:          0,
+        _hasNull:       false,
+      });
+    }
+    const o = orderMap.get(li.orderNum);
+    o.lineRevenue += li.lineRevenue || 0;
+    o.lineCogs    += li.lineCogs    || 0;
+    if ((li.store || '').includes('Succulents Box'))
+      o.mcgSubtotal += li.lineRevenue || 0;
+    if (li.lineNetGp !== null && li.lineNetGp !== undefined) o.netGp += li.lineNetGp;
+    else o._hasNull = true;
+  }
+
+  // Compute GP fields and filter
+  _fsRows = [];
+  for (const o of orderMap.values()) {
+    o.mcgSubtotal     = Math.round(o.mcgSubtotal     * 100) / 100;
+    o.lineRevenue     = Math.round(o.lineRevenue     * 100) / 100;
+    o.lineCogs        = Math.round(o.lineCogs        * 100) / 100;
+    if (o._hasNull) o.netGp = null;
+    else            o.netGp = Math.round(o.netGp     * 100) / 100;
+    o.netGpPct = (o.netGp !== null && o.lineRevenue > 0)
+      ? Math.round(o.netGp / o.lineRevenue * 1000) / 10 : null;
+
+    // Filter: orders where MCG subtotal falls in [newThresh, curThresh), currently paying shipping
+    if (o.isFreeShip === 'YES')                  continue;  // already free shipping
+    if (!o.shipCollected || o.shipCollected <= 0) continue;  // not paying ship
+    if (!o.mcgSubtotal || o.mcgSubtotal <= 0)    continue;  // no MCG lines
+    if (o.mcgSubtotal < newThresh)               continue;  // below new threshold
+    if (o.mcgSubtotal >= curThresh)              continue;  // already qualifies today
+
+    // Under new threshold: ship is now free → lose shipCollected revenue
+    o.newNetGp    = o.netGp !== null
+      ? Math.round((o.netGp - o.shipCollected) * 100) / 100 : null;
+    o.newNetGpPct = (o.newNetGp !== null && o.lineRevenue > 0)
+      ? Math.round(o.newNetGp / o.lineRevenue * 1000) / 10 : null;
+    o.gpPctDelta  = (o.netGpPct !== null && o.newNetGpPct !== null)
+      ? Math.round((o.newNetGpPct - o.netGpPct) * 10) / 10 : null;
+
+    _fsRows.push(o);
+  }
+
+  // Sort by GP% change (most impacted first)
+  _fsRows.sort((a, b) => (a.gpPctDelta || 0) - (b.gpPctDelta || 0));
+  _renderFsResults(curThresh, newThresh);
+};
+
+function _renderFsResults(curThresh, newThresh) {
+  const el = document.getElementById('fs-model-results');
+  if (!_fsRows.length) {
+    el.innerHTML = `<p style="color:var(--muted);font-size:.84rem;padding:10px 0">
+      No MCG-only orders found with product subtotal between
+      $${newThresh} and $${curThresh} that are currently paying shipping.</p>`;
+    return;
+  }
+
+  const shipLost    = Math.round(_fsRows.reduce((s,o) => s + (o.shipCollected||0), 0) * 100) / 100;
+  const curGpTotal  = Math.round(_fsRows.reduce((s,o) => s + (o.netGp||0),        0) * 100) / 100;
+  const newGpTotal  = Math.round(_fsRows.reduce((s,o) => s + (o.newNetGp||0),     0) * 100) / 100;
+  const revTotal    = Math.round(_fsRows.reduce((s,o) => s + (o.lineRevenue||0),  0) * 100) / 100;
+  const mcgTotal    = Math.round(_fsRows.reduce((s,o) => s + (o.mcgSubtotal||0),  0) * 100) / 100;
+  const curGpPct    = revTotal > 0 ? Math.round(curGpTotal / revTotal * 1000) / 10 : null;
+  const newGpPct    = revTotal > 0 ? Math.round(newGpTotal / revTotal * 1000) / 10 : null;
+  const pctDelta    = (curGpPct !== null && newGpPct !== null)
+    ? Math.round((newGpPct - curGpPct) * 10) / 10 : null;
+  const deltaColor  = pctDelta !== null ? (pctDelta >= 0 ? 'var(--green)' : 'var(--red)') : '';
+
+  el.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px">
+      <div class="card">
+        <div class="label">Orders affected</div>
+        <div class="value" style="font-size:1.3rem">${_fsRows.length}</div>
+        <div class="sub">currently paying shipping</div>
+      </div>
+      <div class="card" style="border-color:var(--red)">
+        <div class="label">Shipping Revenue Lost</div>
+        <div class="value" style="font-size:1.3rem;color:var(--red)">${fmt(-shipLost)}</div>
+        <div class="sub">ship no longer charged to customer</div>
+      </div>
+      <div class="card">
+        <div class="label">Current Net GP%</div>
+        <div class="value" style="font-size:1.3rem">${curGpPct !== null ? curGpPct.toFixed(1)+'%' : '—'}</div>
+        <div class="sub">on these orders</div>
+      </div>
+      <div class="card" style="${pctDelta !== null && pctDelta < 0 ? 'border-color:var(--red)' : ''}">
+        <div class="label">New Net GP%</div>
+        <div class="value" style="font-size:1.3rem">${newGpPct !== null ? newGpPct.toFixed(1)+'%' : '—'}</div>
+        <div class="sub" style="color:${deltaColor};font-weight:600">
+          ${pctDelta !== null ? (pctDelta >= 0 ? '+' : '') + pctDelta.toFixed(1)+'% vs current' : ''}
+        </div>
+      </div>
+    </div>
+
+    <div class="table-wrap" style="max-height:420px;overflow-y:auto">
+      <table>
+        <thead><tr>
+          <th>Order #</th><th>Date</th>
+          <th class="num">MCG Subtotal</th>
+          <th class="num">Ship Collected</th>
+          <th class="num">Cur Net GP $</th>
+          <th class="num">Cur Net GP%</th>
+          <th class="num">New Net GP $</th>
+          <th class="num">New Net GP%</th>
+          <th class="num">GP% Change</th>
+        </tr></thead>
+        <tbody>
+          ${_fsRows.map(o => {
+            const dc = (o.gpPctDelta||0) >= 0 ? 'pos' : 'neg';
+            return `<tr>
+              <td style="font-size:.77rem">${o.orderNum}</td>
+              <td style="font-size:.77rem">${o.date||''}</td>
+              <td class="num">${fmt(o.mcgSubtotal)}</td>
+              <td class="num" style="color:var(--red)">${fmt(o.shipCollected)}</td>
+              <td class="num ${gpClass(o.netGp)}">${o.netGp !== null ? fmt(o.netGp) : '—'}</td>
+              <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct !== null ? o.netGpPct.toFixed(1)+'%' : '—'}</td>
+              <td class="num ${gpClass(o.newNetGp)}">${o.newNetGp !== null ? fmt(o.newNetGp) : '—'}</td>
+              <td class="num ${gpClass(o.newNetGpPct)}">${o.newNetGpPct !== null ? o.newNetGpPct.toFixed(1)+'%' : '—'}</td>
+              <td class="num ${dc}" style="font-weight:600">${o.gpPctDelta !== null ? (o.gpPctDelta>=0?'+':'')+o.gpPctDelta.toFixed(1)+'%' : '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+        <tfoot><tr class="totals-row">
+          <td colspan="2">TOTAL (${_fsRows.length} orders)</td>
+          <td class="num">${fmt(mcgTotal)}</td>
+          <td class="num" style="color:var(--red);font-weight:700">${fmt(-shipLost)}</td>
+          <td class="num ${gpClass(curGpTotal)}">${fmt(curGpTotal)}</td>
+          <td class="num ${gpClass(curGpPct)}">${curGpPct !== null ? curGpPct.toFixed(1)+'%' : '—'}</td>
+          <td class="num ${gpClass(newGpTotal)}">${fmt(newGpTotal)}</td>
+          <td class="num ${gpClass(newGpPct)}">${newGpPct !== null ? newGpPct.toFixed(1)+'%' : '—'}</td>
+          <td class="num" style="color:${deltaColor};font-weight:700">${pctDelta !== null ? (pctDelta>=0?'+':'')+pctDelta.toFixed(1)+'%' : '—'}</td>
+        </tr></tfoot>
+      </table>
+    </div>
+
+    <div style="margin-top:10px;text-align:right">
+      <button class="logout-btn" onclick="downloadFsCsv()" style="font-size:.75rem">↓ Download CSV</button>
+    </div>`;
+}
+
+window.downloadFsCsv = function() {
+  if (!_fsRows.length) return;
+  const hdr = ['Order #','Date','Store','MCG Subtotal','Ship Collected',
+                'Current Net GP $','Current Net GP%','New Net GP $','New Net GP%','GP% Change'];
+  const rows = [hdr, ..._fsRows.map(o => [
+    o.orderNum, o.date||'', o.store,
+    o.mcgSubtotal, o.shipCollected,
+    o.netGp ?? '',    o.netGpPct    !== null ? o.netGpPct.toFixed(1)+'%'    : '',
+    o.newNetGp ?? '', o.newNetGpPct !== null ? o.newNetGpPct.toFixed(1)+'%' : '',
+    o.gpPctDelta      !== null ? (o.gpPctDelta>=0?'+':'')+o.gpPctDelta.toFixed(1)+'%' : '',
+  ])];
+  const csv = rows.map(r => r.map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = Object.assign(document.createElement('a'), {
+    href: 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv),
+    download: 'freeship_threshold_impact.csv',
+  });
+  a.click();
 };
 
 // ─── Projection View ─────────────────────────────────────────────
