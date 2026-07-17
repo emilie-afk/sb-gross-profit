@@ -775,6 +775,38 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       changes on existing SKUs, or <strong>+ Add as new SKU</strong> to add products with no recent sales.
     </div>
 
+    <!-- ── Combined Scenario ── -->
+    <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
+      <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">📊 Combined Scenario</h3>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:16px">
+        Model fulfillment cost reduction on all MCG units <em>and</em> free shipping threshold change together.
+      </p>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:20px">
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">MCG fulfillment cost reduction (per unit, $)</div>
+          <input type="number" id="sc-cost-reduce" value="0.50" min="0" step="0.01"
+                 class="search-input" style="width:90px">
+        </div>
+        <div style="width:1px;height:32px;background:var(--border);margin:0 4px"></div>
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Current free ship threshold ($)</div>
+          <input type="number" id="sc-cur-thresh" value="89" min="0" step="1"
+                 class="search-input" style="width:80px">
+        </div>
+        <div style="color:var(--accent);font-size:1.1rem;padding-bottom:2px">→</div>
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">New free ship threshold ($)</div>
+          <input type="number" id="sc-new-thresh" value="69" min="0" step="1"
+                 class="search-input" style="width:80px">
+        </div>
+        <button class="calc-btn" onclick="calcCombinedScenario()"
+                style="width:auto;padding:8px 20px;font-size:.85rem;margin-top:0">
+          Run Scenario
+        </button>
+      </div>
+      <div id="sc-results"></div>
+    </div>
+
     <!-- ── Free Shipping Threshold Modeler ── -->
     <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
       <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">🚚 Free Shipping Threshold Change</h3>
@@ -2759,12 +2791,14 @@ window.calcFsThreshold = function() {
         lineRevenue:    0,   // full order revenue (all vendors)
         lineCogs:       0,
         netGp:          0,
+        totalQty:       0,   // sum of all item quantities in order
         _hasNull:       false,
       });
     }
     const o = orderMap.get(li.orderNum);
     o.lineRevenue += li.lineRevenue || 0;
     o.lineCogs    += li.lineCogs    || 0;
+    o.totalQty    += li.qty || 1;
     if ((li.store || '').includes('Succulents Box'))
       o.mcgSubtotal += li.lineRevenue || 0;
     if (li.lineNetGp !== null && li.lineNetGp !== undefined) o.netGp += li.lineNetGp;
@@ -2896,6 +2930,7 @@ function _renderFsResults(curThresh, newThresh) {
       <table>
         <thead><tr>
           <th>Order #</th><th>Date</th>
+          <th class="num">Items</th>
           <th class="num">MCG Subtotal</th>
           <th class="num">Ship Collected</th>
           <th class="num">Cur Net GP $</th>
@@ -2910,6 +2945,7 @@ function _renderFsResults(curThresh, newThresh) {
             return `<tr>
               <td style="font-size:.77rem">${o.orderNum}</td>
               <td style="font-size:.77rem">${o.date||''}</td>
+              <td class="num">${o.totalQty}</td>
               <td class="num">${fmt(o.mcgSubtotal)}</td>
               <td class="num" style="color:var(--red)">${fmt(o.shipCollected)}</td>
               <td class="num ${gpClass(o.netGp)}">${o.netGp !== null ? fmt(o.netGp) : '—'}</td>
@@ -2922,6 +2958,7 @@ function _renderFsResults(curThresh, newThresh) {
         </tbody>
         <tfoot><tr class="totals-row">
           <td colspan="2">TOTAL (${_fsRows.length} orders)</td>
+          <td class="num">${_fsRows.reduce((s,o)=>s+(o.totalQty||0),0)}</td>
           <td class="num">${fmt(mcgTotal)}</td>
           <td class="num" style="color:var(--red);font-weight:700">${fmt(-shipLost)}</td>
           <td class="num ${gpClass(curGpTotal)}">${fmt(curGpTotal)}</td>
@@ -2940,11 +2977,11 @@ function _renderFsResults(curThresh, newThresh) {
 
 window.downloadFsCsv = function() {
   if (!_fsRows.length) return;
-  const hdr = ['Order #','Date','Store','MCG Subtotal','Ship Collected',
+  const hdr = ['Order #','Date','Store','Items','MCG Subtotal','Ship Collected',
                 'Current Net GP $','Current Net GP%','New Net GP $','New Net GP%','GP% Change'];
   const rows = [hdr, ..._fsRows.map(o => [
     o.orderNum, o.date||'', o.store,
-    o.mcgSubtotal, o.shipCollected,
+    o.totalQty, o.mcgSubtotal, o.shipCollected,
     o.netGp ?? '',    o.netGpPct    !== null ? o.netGpPct.toFixed(1)+'%'    : '',
     o.newNetGp ?? '', o.newNetGpPct !== null ? o.newNetGpPct.toFixed(1)+'%' : '',
     o.gpPctDelta      !== null ? (o.gpPctDelta>=0?'+':'')+o.gpPctDelta.toFixed(1)+'%' : '',
@@ -2955,6 +2992,130 @@ window.downloadFsCsv = function() {
     download: 'freeship_threshold_impact.csv',
   });
   a.click();
+};
+
+// ─── Combined Scenario ───────────────────────────────────────────
+window.calcCombinedScenario = function() {
+  const costReduce = parseFloat(document.getElementById('sc-cost-reduce').value) || 0;
+  const curThresh  = parseFloat(document.getElementById('sc-cur-thresh').value)  || 89;
+  const newThresh  = parseFloat(document.getElementById('sc-new-thresh').value)  || 69;
+  const resultEl   = document.getElementById('sc-results');
+
+  if (!allLines.length) {
+    resultEl.innerHTML = `<p style="color:var(--muted);font-size:.84rem;padding:10px 0">Run the calculator first to load order data.</p>`;
+    return;
+  }
+  if (newThresh >= curThresh) {
+    resultEl.innerHTML = `<p style="color:var(--red);font-size:.84rem;padding:10px 0">New threshold must be lower than current threshold.</p>`;
+    return;
+  }
+
+  // ── 1. Fulfillment cost reduction: MCG lines only ──
+  let costSavings  = 0;
+  let mcgUnitCount = 0;
+  let mcgLineCount = 0;
+  for (const li of allLines) {
+    if (!(li.store || '').includes('Succulents Box')) continue;
+    const qty = li.qty || 1;
+    costSavings  += qty * costReduce;
+    mcgUnitCount += qty;
+    mcgLineCount++;
+  }
+  costSavings = Math.round(costSavings * 100) / 100;
+
+  // ── 2. Free shipping impact: orders where MCG subtotal in [newThresh, curThresh) ──
+  const orderMap = new Map();
+  for (const li of allLines) {
+    if (!orderMap.has(li.orderNum)) {
+      orderMap.set(li.orderNum, {
+        isFreeShip:   li.isFreeShip,
+        shipCollected: li.shipCollected || 0,
+        mcgSubtotal:  0,
+      });
+    }
+    const o = orderMap.get(li.orderNum);
+    if ((li.store || '').includes('Succulents Box'))
+      o.mcgSubtotal += li.lineRevenue || 0;
+  }
+  let shipLost     = 0;
+  let fsOrderCount = 0;
+  for (const o of orderMap.values()) {
+    o.mcgSubtotal = Math.round(o.mcgSubtotal * 100) / 100;
+    if (o.isFreeShip === 'YES')                          continue;
+    if (!o.shipCollected || o.shipCollected <= 0)        continue;
+    if (!o.mcgSubtotal || o.mcgSubtotal <= 0)           continue;
+    if (o.mcgSubtotal < newThresh || o.mcgSubtotal >= curThresh) continue;
+    shipLost += o.shipCollected;
+    fsOrderCount++;
+  }
+  shipLost = Math.round(shipLost * 100) / 100;
+
+  // ── 3. Total dataset baseline ──
+  const totRev    = Math.round(allLines.reduce((s,l) => s + (l.lineRevenue||0), 0) * 100) / 100;
+  const totNetGp  = Math.round(allLines.reduce((s,l) => s + (l.lineNetGp||0),  0) * 100) / 100;
+  const netChange = Math.round((costSavings - shipLost) * 100) / 100;
+  const newTotGp  = Math.round((totNetGp + netChange) * 100) / 100;
+
+  const curGpPct  = totRev > 0 ? Math.round(totNetGp  / totRev * 1000) / 10 : null;
+  const newGpPct  = totRev > 0 ? Math.round(newTotGp  / totRev * 1000) / 10 : null;
+  const pctDelta  = (curGpPct !== null && newGpPct !== null)
+    ? Math.round((newGpPct - curGpPct) * 10) / 10 : null;
+  const deltaClr  = pctDelta !== null ? (pctDelta >= 0 ? 'var(--green)' : 'var(--red)') : '';
+  const netClr    = netChange >= 0 ? 'var(--green)' : 'var(--red)';
+
+  resultEl.innerHTML = `
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:16px">
+
+      <!-- Cost savings -->
+      <div class="card" style="border-color:var(--green)">
+        <div class="label">Fulfillment Cost Savings</div>
+        <div class="value" style="font-size:1.3rem;color:var(--green)">+${fmt(costSavings)}</div>
+        <div class="sub">${mcgUnitCount.toLocaleString()} MCG units × $${costReduce.toFixed(2)}</div>
+      </div>
+
+      <!-- Ship revenue lost -->
+      <div class="card" style="border-color:var(--red)">
+        <div class="label">Free Ship Revenue Lost</div>
+        <div class="value" style="font-size:1.3rem;color:var(--red)">${fmt(-shipLost)}</div>
+        <div class="sub">${fsOrderCount} orders, MCG $${newThresh}–$${curThresh}</div>
+      </div>
+
+      <!-- Net GP change -->
+      <div class="card" style="border-color:${netClr}">
+        <div class="label">Net GP Change</div>
+        <div class="value" style="font-size:1.3rem;color:${netClr}">${netChange >= 0 ? '+' : ''}${fmt(netChange)}</div>
+        <div class="sub" style="color:var(--muted)">cost savings ${netChange >= 0 ? '>' : '<'} ship absorbed</div>
+      </div>
+
+      <!-- Current GP% -->
+      <div class="card">
+        <div class="label">Current GP% (all orders)</div>
+        <div class="value" style="font-size:1.3rem">${curGpPct !== null ? curGpPct.toFixed(1)+'%' : '—'}</div>
+        <div class="sub">${fmt(totNetGp)} / ${fmt(totRev)}</div>
+      </div>
+
+      <!-- New GP% -->
+      <div class="card" style="border-color:${pctDelta !== null && pctDelta < 0 ? 'var(--red)' : pctDelta > 0 ? 'var(--green)' : 'var(--border)'}">
+        <div class="label">New GP% (all orders)</div>
+        <div class="value" style="font-size:1.3rem">${newGpPct !== null ? newGpPct.toFixed(1)+'%' : '—'}</div>
+        <div class="sub" style="color:${deltaClr};font-weight:600">
+          ${pctDelta !== null ? (pctDelta >= 0 ? '+' : '') + pctDelta.toFixed(1)+'% vs current' : ''}
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Breakdown bar -->
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 18px;
+                font-size:.8rem;display:flex;flex-wrap:wrap;gap:18px">
+      <span>📦 Cost reduction: <strong style="color:var(--green)">+${fmt(costSavings)}</strong></span>
+      <span style="color:var(--muted)">+</span>
+      <span>🚚 Free ship absorbed: <strong style="color:var(--red)">${fmt(-shipLost)}</strong></span>
+      <span style="color:var(--muted)">=</span>
+      <span>Net: <strong style="color:${netClr}">${netChange >= 0 ? '+' : ''}${fmt(netChange)}</strong></span>
+      <span style="color:var(--muted)">|</span>
+      <span>GP% impact: <strong style="color:${deltaClr}">${pctDelta !== null ? (pctDelta>=0?'+':'')+pctDelta.toFixed(1)+'%' : '—'}</strong></span>
+    </div>`;
 };
 
 // ─── Projection View ─────────────────────────────────────────────
