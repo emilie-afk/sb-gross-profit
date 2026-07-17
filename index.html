@@ -807,6 +807,51 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <div id="sc-results"></div>
     </div>
 
+    <!-- ── Item Count Free Shipping ── -->
+    <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
+      <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">📦 Item Count Free Shipping</h3>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:16px">
+        Find MCG orders by item count and model offering free shipping. Set a custom shipping cost to absorb per tier.
+      </p>
+
+      <!-- Product filter -->
+      <div style="margin-bottom:14px">
+        <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Product name filter (MCG — leave blank for all MCG items)</div>
+        <input type="text" id="ic-product-filter" placeholder='e.g. 2 inch, 2", Echeveria'
+               class="search-input" style="width:280px">
+      </div>
+
+      <!-- Tier table -->
+      <table style="margin-bottom:16px;border-collapse:collapse">
+        <thead>
+          <tr>
+            <th style="font-size:.72rem;color:var(--muted);font-weight:600;padding:6px 14px 6px 0;text-align:left">Item Count</th>
+            <th style="font-size:.72rem;color:var(--muted);font-weight:600;padding:6px 14px;text-align:center">Include</th>
+            <th style="font-size:.72rem;color:var(--muted);font-weight:600;padding:6px 0 6px 14px;text-align:left">Shipping cost to absorb ($)</th>
+          </tr>
+        </thead>
+        <tbody id="ic-tiers-body">
+          ${[2,3,4,5].map(n => `
+          <tr>
+            <td style="padding:5px 14px 5px 0;font-size:.84rem">${n} items</td>
+            <td style="padding:5px 14px;text-align:center">
+              <input type="checkbox" id="ic-chk-${n}" checked style="accent-color:var(--accent);width:15px;height:15px">
+            </td>
+            <td style="padding:5px 0 5px 14px">
+              <input type="number" id="ic-cost-${n}" value="${(4.99 + (n-2)*1).toFixed(2)}"
+                     min="0" step="0.01" class="proj-input" style="width:80px">
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+
+      <button class="calc-btn" onclick="calcItemCountFs()"
+              style="width:auto;padding:8px 20px;font-size:.85rem;margin-bottom:0">
+        Calculate Impact
+      </button>
+      <div id="ic-results" style="margin-top:20px"></div>
+    </div>
+
     <!-- ── Free Shipping Threshold Modeler ── -->
     <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
       <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">🚚 Free Shipping Threshold Change</h3>
@@ -3116,6 +3161,231 @@ window.calcCombinedScenario = function() {
       <span style="color:var(--muted)">|</span>
       <span>GP% impact: <strong style="color:${deltaClr}">${pctDelta !== null ? (pctDelta>=0?'+':'')+pctDelta.toFixed(1)+'%' : '—'}</strong></span>
     </div>`;
+};
+
+// ─── Item Count Free Shipping ────────────────────────────────────
+let _icRows = [];
+
+window.calcItemCountFs = function() {
+  const resultEl   = document.getElementById('ic-results');
+  const filterText = (document.getElementById('ic-product-filter').value || '').trim().toLowerCase();
+
+  if (!allLines.length) {
+    resultEl.innerHTML = `<p style="color:var(--muted);font-size:.84rem">Run the calculator first.</p>`;
+    return;
+  }
+
+  // Build checked tiers: { count → shipCost }
+  const tiers = {};
+  [2,3,4,5].forEach(n => {
+    const chk = document.getElementById(`ic-chk-${n}`);
+    if (chk && chk.checked) {
+      tiers[n] = parseFloat(document.getElementById(`ic-cost-${n}`).value) || 0;
+    }
+  });
+  if (!Object.keys(tiers).length) {
+    resultEl.innerHTML = `<p style="color:var(--muted);font-size:.84rem">Select at least one item count tier.</p>`;
+    return;
+  }
+
+  // Build order-level map
+  const orderMap = new Map();
+  for (const li of allLines) {
+    if (!orderMap.has(li.orderNum)) {
+      orderMap.set(li.orderNum, {
+        orderNum:      li.orderNum,
+        date:          li.date,
+        store:         li.store || '',
+        shipCollected: li.shipCollected || 0,
+        shipPaid:      li.shipPaid      || 0,
+        lineRevenue:   0,
+        lineCogs:      0,
+        netGp:         0,
+        matchQty:      0,   // qty of lines matching filter & MCG
+        _hasNull:      false,
+      });
+    }
+    const o = orderMap.get(li.orderNum);
+    o.lineRevenue += li.lineRevenue || 0;
+    o.lineCogs    += li.lineCogs    || 0;
+    if (li.lineNetGp !== null && li.lineNetGp !== undefined) o.netGp += li.lineNetGp;
+    else o._hasNull = true;
+
+    // Count matching MCG items
+    if ((li.store || '').includes('Succulents Box')) {
+      const name = (li.product || '').toLowerCase();
+      if (!filterText || name.includes(filterText)) {
+        o.matchQty += li.qty || 1;
+      }
+    }
+  }
+
+  // Compute GP fields, filter by tier
+  _icRows = [];
+  for (const o of orderMap.values()) {
+    o.lineRevenue = Math.round(o.lineRevenue * 100) / 100;
+    o.lineCogs    = Math.round(o.lineCogs    * 100) / 100;
+    o.lineGp      = Math.round((o.lineRevenue - o.lineCogs) * 100) / 100;
+    if (o._hasNull) o.netGp = null;
+    else            o.netGp = Math.round(o.netGp * 100) / 100;
+    o.netGpPct    = (o.netGp !== null && o.lineRevenue > 0)
+      ? Math.round(o.netGp / o.lineRevenue * 1000) / 10 : null;
+
+    const tierCost = tiers[o.matchQty];
+    if (tierCost === undefined) continue;   // matchQty not in selected tiers
+    if (!o.matchQty)            continue;
+
+    // New GP: absorb shipping (customer pays $0, company pays tierCost)
+    o.tierCost    = tierCost;
+    o.newNetGp    = Math.round((o.lineGp - tierCost) * 100) / 100;
+    o.newNetGpPct = o.lineRevenue > 0
+      ? Math.round(o.newNetGp / o.lineRevenue * 1000) / 10 : null;
+    o.gpChange    = Math.round((o.newNetGp - (o.netGp ?? o.lineGp)) * 100) / 100;
+    o.gpPctDelta  = (o.netGpPct !== null && o.newNetGpPct !== null)
+      ? Math.round((o.newNetGpPct - o.netGpPct) * 10) / 10 : null;
+
+    _icRows.push(o);
+  }
+
+  // Sort by item count, then by GP% change
+  _icRows.sort((a,b) => a.matchQty - b.matchQty || (a.gpPctDelta||0) - (b.gpPctDelta||0));
+
+  if (!_icRows.length) {
+    resultEl.innerHTML = `<p style="color:var(--muted);font-size:.84rem;padding:10px 0">
+      No MCG orders found matching those item counts${filterText ? ` and product filter "${filterText}"` : ''}.</p>`;
+    return;
+  }
+
+  // Summary per tier
+  const tierSummary = {};
+  for (const o of _icRows) {
+    if (!tierSummary[o.matchQty]) tierSummary[o.matchQty] = { count:0, shipAbsorbed:0, gpChange:0, rev:0 };
+    tierSummary[o.matchQty].count++;
+    tierSummary[o.matchQty].shipAbsorbed += o.tierCost;
+    tierSummary[o.matchQty].gpChange     += o.gpChange;
+    tierSummary[o.matchQty].rev          += o.lineRevenue;
+  }
+
+  // Overall totals
+  const totalShipAbsorbed = Math.round(_icRows.reduce((s,o) => s + o.tierCost,    0) * 100) / 100;
+  const totalGpChange     = Math.round(_icRows.reduce((s,o) => s + o.gpChange,    0) * 100) / 100;
+  const totalCurNetGp     = Math.round(_icRows.reduce((s,o) => s + (o.netGp||0),  0) * 100) / 100;
+  const totalNewNetGp     = Math.round(_icRows.reduce((s,o) => s + o.newNetGp,    0) * 100) / 100;
+  const totalRev          = Math.round(_icRows.reduce((s,o) => s + o.lineRevenue, 0) * 100) / 100;
+  const curGpPctAff       = totalRev > 0 ? Math.round(totalCurNetGp / totalRev * 1000) / 10 : null;
+  const newGpPctAff       = totalRev > 0 ? Math.round(totalNewNetGp / totalRev * 1000) / 10 : null;
+  const affDelta          = (curGpPctAff !== null && newGpPctAff !== null)
+    ? Math.round((newGpPctAff - curGpPctAff) * 10) / 10 : null;
+
+  // All-orders impact
+  const allRev    = Math.round(allLines.reduce((s,l) => s + (l.lineRevenue||0), 0) * 100) / 100;
+  const allNetGp  = Math.round(allLines.reduce((s,l) => s + (l.lineNetGp||0),  0) * 100) / 100;
+  const allCurPct = allRev > 0 ? Math.round(allNetGp / allRev * 1000) / 10 : null;
+  const allNewPct = allRev > 0 ? Math.round((allNetGp + totalGpChange) / allRev * 1000) / 10 : null;
+  const allDelta  = (allCurPct !== null && allNewPct !== null)
+    ? Math.round((allNewPct - allCurPct) * 10) / 10 : null;
+
+  const gc = v => v >= 0 ? 'var(--green)' : 'var(--red)';
+
+  resultEl.innerHTML = `
+    <!-- Tier summary cards -->
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px">
+      ${Object.entries(tierSummary).map(([n, t]) => `
+        <div class="card" style="min-width:150px">
+          <div class="label">${n}-item orders</div>
+          <div class="value" style="font-size:1.1rem">${t.count} orders</div>
+          <div class="sub">Ship absorbed: <span style="color:var(--red)">${fmt(-t.shipAbsorbed)}</span></div>
+          <div class="sub">GP change: <span style="color:${gc(t.gpChange)}">${t.gpChange>=0?'+':''}${fmt(t.gpChange)}</span></div>
+        </div>`).join('')}
+
+      <div class="card" style="border-color:${gc(totalGpChange)}">
+        <div class="label">Total GP Change</div>
+        <div class="value" style="font-size:1.2rem;color:${gc(totalGpChange)}">${totalGpChange>=0?'+':''}${fmt(totalGpChange)}</div>
+        <div class="sub">${_icRows.length} orders · ${fmt(-totalShipAbsorbed)} ship absorbed</div>
+      </div>
+
+      <div class="card">
+        <div class="label">Affected Orders GP%</div>
+        <div class="value" style="font-size:1.1rem">${curGpPctAff !== null ? curGpPctAff.toFixed(1)+'%' : '—'}
+          <span style="font-size:.8rem;color:${gc(affDelta||0)};margin-left:4px">→ ${newGpPctAff !== null ? newGpPctAff.toFixed(1)+'%' : '—'}</span>
+        </div>
+        <div class="sub" style="color:${gc(affDelta||0)};font-weight:600">${affDelta !== null ? (affDelta>=0?'+':'')+affDelta.toFixed(1)+'% vs current' : ''}</div>
+      </div>
+
+      <div class="card" style="border-color:${gc(allDelta||0)}">
+        <div class="label">All Orders GP%</div>
+        <div class="value" style="font-size:1.1rem">${allCurPct !== null ? allCurPct.toFixed(1)+'%' : '—'}
+          <span style="font-size:.8rem;color:${gc(allDelta||0)};margin-left:4px">→ ${allNewPct !== null ? allNewPct.toFixed(1)+'%' : '—'}</span>
+        </div>
+        <div class="sub" style="color:${gc(allDelta||0)};font-weight:600">${allDelta !== null ? (allDelta>=0?'+':'')+allDelta.toFixed(1)+'% impact on total' : ''}</div>
+      </div>
+    </div>
+
+    <!-- Per-order table -->
+    <div class="table-wrap" style="max-height:400px;overflow-y:auto">
+      <table>
+        <thead><tr>
+          <th>Order #</th><th>Date</th>
+          <th class="num">Items</th>
+          <th class="num">Ship Absorbed</th>
+          <th class="num">Order Rev</th>
+          <th class="num">Cur Net GP $</th>
+          <th class="num">Cur Net GP%</th>
+          <th class="num">New Net GP $</th>
+          <th class="num">New Net GP%</th>
+          <th class="num">GP% Change</th>
+        </tr></thead>
+        <tbody>
+          ${_icRows.map(o => {
+            const dc = (o.gpPctDelta||0) >= 0 ? 'pos' : 'neg';
+            return `<tr>
+              <td style="font-size:.77rem">${o.orderNum}</td>
+              <td style="font-size:.77rem">${o.date||''}</td>
+              <td class="num" style="font-weight:600">${o.matchQty}</td>
+              <td class="num" style="color:var(--red)">${fmt(-o.tierCost)}</td>
+              <td class="num">${fmt(o.lineRevenue)}</td>
+              <td class="num ${gpClass(o.netGp)}">${o.netGp !== null ? fmt(o.netGp) : '—'}</td>
+              <td class="num ${gpClass(o.netGpPct)}">${o.netGpPct !== null ? o.netGpPct.toFixed(1)+'%' : '—'}</td>
+              <td class="num ${gpClass(o.newNetGp)}">${fmt(o.newNetGp)}</td>
+              <td class="num ${gpClass(o.newNetGpPct)}">${o.newNetGpPct !== null ? o.newNetGpPct.toFixed(1)+'%' : '—'}</td>
+              <td class="num ${dc}" style="font-weight:600">${o.gpPctDelta !== null ? (o.gpPctDelta>=0?'+':'')+o.gpPctDelta.toFixed(1)+'%' : '—'}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+        <tfoot><tr class="totals-row">
+          <td colspan="2">TOTAL (${_icRows.length} orders)</td>
+          <td class="num">—</td>
+          <td class="num" style="color:var(--red);font-weight:700">${fmt(-totalShipAbsorbed)}</td>
+          <td class="num">${fmt(totalRev)}</td>
+          <td class="num ${gpClass(totalCurNetGp)}">${fmt(totalCurNetGp)}</td>
+          <td class="num ${gpClass(curGpPctAff)}">${curGpPctAff !== null ? curGpPctAff.toFixed(1)+'%' : '—'}</td>
+          <td class="num ${gpClass(totalNewNetGp)}">${fmt(totalNewNetGp)}</td>
+          <td class="num ${gpClass(newGpPctAff)}">${newGpPctAff !== null ? newGpPctAff.toFixed(1)+'%' : '—'}</td>
+          <td class="num" style="color:${gc(affDelta||0)};font-weight:700">${affDelta !== null ? (affDelta>=0?'+':'')+affDelta.toFixed(1)+'%' : '—'}</td>
+        </tr></tfoot>
+      </table>
+    </div>
+
+    <div style="margin-top:10px;text-align:right">
+      <button class="logout-btn" onclick="downloadIcCsv()" style="font-size:.75rem">↓ Download CSV</button>
+    </div>`;
+};
+
+window.downloadIcCsv = function() {
+  if (!_icRows.length) return;
+  const hdr = ['Order #','Date','Store','Items','Ship Absorbed','Order Rev',
+               'Cur Net GP $','Cur Net GP%','New Net GP $','New Net GP%','GP% Change'];
+  const rows = [hdr, ..._icRows.map(o => [
+    o.orderNum, o.date||'', o.store, o.matchQty, -o.tierCost, o.lineRevenue,
+    o.netGp??'', o.netGpPct !== null ? o.netGpPct.toFixed(1)+'%' : '',
+    o.newNetGp,  o.newNetGpPct !== null ? o.newNetGpPct.toFixed(1)+'%' : '',
+    o.gpPctDelta !== null ? (o.gpPctDelta>=0?'+':'')+o.gpPctDelta.toFixed(1)+'%' : '',
+  ])];
+  const csv = rows.map(r => r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  Object.assign(document.createElement('a'), {
+    href: 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv),
+    download: 'itemcount_freeship_impact.csv',
+  }).click();
 };
 
 // ─── Projection View ─────────────────────────────────────────────
