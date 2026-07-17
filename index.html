@@ -2817,16 +2817,29 @@ function _renderFsResults(curThresh, newThresh) {
   const shipLost    = Math.round(_fsRows.reduce((s,o) => s + (o.shipCollected||0), 0) * 100) / 100;
   const curGpTotal  = Math.round(_fsRows.reduce((s,o) => s + (o.netGp||0),        0) * 100) / 100;
   const newGpTotal  = Math.round(_fsRows.reduce((s,o) => s + (o.newNetGp||0),     0) * 100) / 100;
-  const revTotal    = Math.round(_fsRows.reduce((s,o) => s + (o.lineRevenue||0),  0) * 100) / 100;
+  const affRevTotal = Math.round(_fsRows.reduce((s,o) => s + (o.lineRevenue||0),  0) * 100) / 100;
   const mcgTotal    = Math.round(_fsRows.reduce((s,o) => s + (o.mcgSubtotal||0),  0) * 100) / 100;
-  const curGpPct    = revTotal > 0 ? Math.round(curGpTotal / revTotal * 1000) / 10 : null;
-  const newGpPct    = revTotal > 0 ? Math.round(newGpTotal / revTotal * 1000) / 10 : null;
-  const pctDelta    = (curGpPct !== null && newGpPct !== null)
-    ? Math.round((newGpPct - curGpPct) * 10) / 10 : null;
-  const deltaColor  = pctDelta !== null ? (pctDelta >= 0 ? 'var(--green)' : 'var(--red)') : '';
+
+  // GP% on affected orders only
+  const affCurGpPct = affRevTotal > 0 ? Math.round(curGpTotal / affRevTotal * 1000) / 10 : null;
+  const affNewGpPct = affRevTotal > 0 ? Math.round(newGpTotal / affRevTotal * 1000) / 10 : null;
+  const affDelta    = (affCurGpPct !== null && affNewGpPct !== null)
+    ? Math.round((affNewGpPct - affCurGpPct) * 10) / 10 : null;
+
+  // Impact on TOTAL dataset (allLines)
+  const totRev      = Math.round(allLines.reduce((s,l) => s + (l.lineRevenue||0), 0) * 100) / 100;
+  const totNetGp    = Math.round(allLines.reduce((s,l) => s + (l.lineNetGp||0),   0) * 100) / 100;
+  const totCurGpPct = totRev > 0 ? Math.round(totNetGp / totRev * 1000) / 10 : null;
+  const totNewGpPct = totRev > 0 ? Math.round((totNetGp - shipLost) / totRev * 1000) / 10 : null;
+  const totDelta    = (totCurGpPct !== null && totNewGpPct !== null)
+    ? Math.round((totNewGpPct - totCurGpPct) * 10) / 10 : null;
+
+  const affDeltaClr = affDelta !== null ? (affDelta >= 0 ? 'var(--green)' : 'var(--red)') : '';
+  const totDeltaClr = totDelta !== null ? (totDelta >= 0 ? 'var(--green)' : 'var(--red)') : '';
 
   el.innerHTML = `
-    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px">
+    <!-- Row 1: overview numbers -->
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:8px">
       <div class="card">
         <div class="label">Orders affected</div>
         <div class="value" style="font-size:1.3rem">${_fsRows.length}</div>
@@ -2838,15 +2851,43 @@ function _renderFsResults(curThresh, newThresh) {
         <div class="sub">ship no longer charged to customer</div>
       </div>
       <div class="card">
-        <div class="label">Current Net GP%</div>
-        <div class="value" style="font-size:1.3rem">${curGpPct !== null ? curGpPct.toFixed(1)+'%' : '—'}</div>
-        <div class="sub">on these orders</div>
+        <div class="label">Total Orders Revenue</div>
+        <div class="value" style="font-size:1.1rem">${fmt(totRev)}</div>
+        <div class="sub" style="color:var(--muted)">all orders in file</div>
       </div>
-      <div class="card" style="${pctDelta !== null && pctDelta < 0 ? 'border-color:var(--red)' : ''}">
-        <div class="label">New Net GP%</div>
-        <div class="value" style="font-size:1.3rem">${newGpPct !== null ? newGpPct.toFixed(1)+'%' : '—'}</div>
-        <div class="sub" style="color:${deltaColor};font-weight:600">
-          ${pctDelta !== null ? (pctDelta >= 0 ? '+' : '') + pctDelta.toFixed(1)+'% vs current' : ''}
+      <div class="card">
+        <div class="label">Affected MCG Revenue</div>
+        <div class="value" style="font-size:1.1rem">${fmt(mcgTotal)}</div>
+        <div class="sub" style="color:var(--muted)">${totRev > 0 ? (mcgTotal/totRev*100).toFixed(1)+'% of total' : ''}</div>
+      </div>
+    </div>
+
+    <!-- Row 2: GP% impact -->
+    <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px">
+      <!-- Affected orders GP% -->
+      <div class="card">
+        <div class="label" style="font-size:.68rem">AFFECTED ORDERS — Current GP%</div>
+        <div class="value" style="font-size:1.2rem">${affCurGpPct !== null ? affCurGpPct.toFixed(1)+'%' : '—'}</div>
+        <div class="sub">${fmt(affRevTotal)} order rev</div>
+      </div>
+      <div class="card" style="${affDelta !== null && affDelta < 0 ? 'border-color:var(--red)' : ''}">
+        <div class="label" style="font-size:.68rem">AFFECTED ORDERS — New GP%</div>
+        <div class="value" style="font-size:1.2rem">${affNewGpPct !== null ? affNewGpPct.toFixed(1)+'%' : '—'}</div>
+        <div class="sub" style="color:${affDeltaClr};font-weight:600">
+          ${affDelta !== null ? (affDelta>=0?'+':'')+affDelta.toFixed(1)+'% vs current' : ''}
+        </div>
+      </div>
+      <!-- Total dataset GP% -->
+      <div class="card">
+        <div class="label" style="font-size:.68rem">ALL ORDERS — Current GP%</div>
+        <div class="value" style="font-size:1.2rem">${totCurGpPct !== null ? totCurGpPct.toFixed(1)+'%' : '—'}</div>
+        <div class="sub">${fmt(totRev)} total rev</div>
+      </div>
+      <div class="card" style="${totDelta !== null && totDelta < 0 ? 'border-color:var(--red)' : ''}">
+        <div class="label" style="font-size:.68rem">ALL ORDERS — New GP%</div>
+        <div class="value" style="font-size:1.2rem">${totNewGpPct !== null ? totNewGpPct.toFixed(1)+'%' : '—'}</div>
+        <div class="sub" style="color:${totDeltaClr};font-weight:600">
+          ${totDelta !== null ? (totDelta>=0?'+':'')+totDelta.toFixed(1)+'% vs current' : ''}
         </div>
       </div>
     </div>
@@ -2884,10 +2925,10 @@ function _renderFsResults(curThresh, newThresh) {
           <td class="num">${fmt(mcgTotal)}</td>
           <td class="num" style="color:var(--red);font-weight:700">${fmt(-shipLost)}</td>
           <td class="num ${gpClass(curGpTotal)}">${fmt(curGpTotal)}</td>
-          <td class="num ${gpClass(curGpPct)}">${curGpPct !== null ? curGpPct.toFixed(1)+'%' : '—'}</td>
+          <td class="num ${gpClass(affCurGpPct)}">${affCurGpPct !== null ? affCurGpPct.toFixed(1)+'%' : '—'}</td>
           <td class="num ${gpClass(newGpTotal)}">${fmt(newGpTotal)}</td>
-          <td class="num ${gpClass(newGpPct)}">${newGpPct !== null ? newGpPct.toFixed(1)+'%' : '—'}</td>
-          <td class="num" style="color:${deltaColor};font-weight:700">${pctDelta !== null ? (pctDelta>=0?'+':'')+pctDelta.toFixed(1)+'%' : '—'}</td>
+          <td class="num ${gpClass(affNewGpPct)}">${affNewGpPct !== null ? affNewGpPct.toFixed(1)+'%' : '—'}</td>
+          <td class="num" style="color:${affDeltaClr};font-weight:700">${affDelta !== null ? (affDelta>=0?'+':'')+affDelta.toFixed(1)+'%' : '—'}</td>
         </tr></tfoot>
       </table>
     </div>
