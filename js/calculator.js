@@ -188,6 +188,13 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   // 0. Hard overrides — these take priority over the MCG Total sheet
   // Gift cards — no physical cost
   if (/^GC\d/i.test(key)) return [0.00, 'Gift Card (no COGS)'];
+  // Printables — digital products, zero COGS
+  {
+    const nameU = (productName || '').toUpperCase();
+    if (nameU.startsWith('PRINTABLE') || nameU.startsWith('FREE PRINTABLE')) {
+      return [0.00, 'Printable (no COGS)'];
+    }
+  }
   // Random/assorted 2" MCG succulents (JN prefix, no size prefix like S2/C2)
   // These are bulk-assorted plants at $2/plant, not the specific-species $4 tier
   if (/^JN\d/i.test(key)) return [2.00, 'MCG tier (Random 2" $2)'];
@@ -204,11 +211,17 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
 
   // 1. MCG Total sheet has the exact cost — always wins
   if (mcgCosts[key] !== undefined)     return [mcgCosts[key],     'MCG Total sheet'];
-  // 1b. Pot SKU variant suffix (e.g. EEZZ7650.WH → try base EEZZ7650)
+  // 1b. Pot SKU dot-variant suffix (e.g. EEZZ7650.WH → try base EEZZ7650)
   //     Single-unit costs like EEZZ7620.BR-1 are stored directly in mcgCosts (step 1 above)
   if (key.includes('.')) {
     const base = key.split('.')[0];
     if (mcgCosts[base] !== undefined) return [mcgCosts[base], 'MCG Pot Costs'];
+  }
+  // 1c. Pot SKU dash-variant suffix (e.g. EEZZ2741-1 → try base EEZZ2741)
+  //     Only for pot SKU prefixes to avoid breaking BD-/4X-/other dash-prefixed SKUs
+  if ((key.startsWith('EEZZ') || key.startsWith('EBZZ') || key.startsWith('EEVZ')) && key.includes('-')) {
+    const base = key.split('-')[0];
+    if (mcgCosts[base] !== undefined) return [mcgCosts[base], 'MCG Pot Costs (dash variant)'];
   }
   // 2. HP/product costs baked in at deploy time
   if (productCosts[key] !== undefined) return [productCosts[key], 'Products export'];
@@ -236,6 +249,19 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     const canonical = skuAlias[key];
     return getCost(canonical, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, {});
     // pass empty alias to avoid infinite loops if canonical itself is aliased
+  }
+  // 7. MCG vendor + product name size fallback
+  //    Handles specialty MCG plants (Mangave, etc.) not yet in the cost sheet.
+  //    Rule: 1.5" Plug = 2" succulent tier; 2" = 2" tier; 4" = 4" tier.
+  if ((vendor || '').toLowerCase().includes('succulents box') ||
+      (vendor || '').toLowerCase() === 'succulents box') {
+    const n = (productName || '');
+    if (/\b1\.5["'′]?\s*(plug|inch|in\b)/i.test(n) || /\(1\.5["\s]/i.test(n))
+      return [MCG_TIER['2inch'], 'MCG size fallback (1.5" plug → 2" tier)'];
+    if (/\b2["'′]?\s*(plug|inch|in\b)/i.test(n) || /\(2["\s]/i.test(n))
+      return [MCG_TIER['2inch'], 'MCG size fallback (2" tier)'];
+    if (/\b4["'′]?\s*(plug|inch|in\b)/i.test(n) || /\(4["\s]/i.test(n))
+      return [MCG_TIER['4inch'], 'MCG size fallback (4" tier)'];
   }
   return [null, 'COST MISSING'];
 }
@@ -311,19 +337,52 @@ export function parseAdditionalCosts(rows) {
 // ─── ShipStation parser ───────────────────────────────────────────────────────
 
 export function parseShipStation(rows) {
-  // Returns Map: orderNum (no #) → total shipping cost
-  const costs = new Map();
-  for (const row of rows) {
-    const orderCol = Object.keys(row).find(k => k.trim().toLowerCase() === 'order #');
-    const rateCol  = Object.keys(row).find(k => k.trim().toLowerCase() === 'rate');
-    if (!orderCol || !rateCol) break;
-    const num  = (row[orderCol] || '').trim().replace(/^#/, '');
-    const rate = cleanMoney(row[rateCol]);
-    if (num && rate !== null) {
-      costs.set(num, (costs.get(num) || 0) + rate);
+  // Returns { costs: Map<orderNum, totalRate>, apsCosts: Map<orderNum, apsRate> }
+  // Auto-detects "line items" format (has 'Shipment #' column) vs summary format.
+  // Line items format: Rate repeats per line within a shipment → dedupe by Shipment #.
+  // apsCosts is populated only in line items format (APS shipments identified by AS- SKU prefix).
+  const costs    = new Map();
+  const apsCosts = new Map();
+
+  if (!rows.length) return { costs, apsCosts };
+
+  const isLineItems = Object.keys(rows[0]).some(k => k.trim() === 'Shipment #');
+
+  if (isLineItems) {
+    // Pass 1: collect rate + APS flag per shipment
+    const shipRate = new Map();  // shipmentId → { rate, orderNum }
+    const shipHasAps = new Map(); // shipmentId → bool
+
+    for (const row of rows) {
+      const shipId   = (row['Shipment #'] || '').trim();
+      const orderNum = (row['Order #']    || '').trim().replace(/^#/, '');
+      const rate     = cleanMoney(row['Rate'] || '') || 0;
+      const sku      = (row['Item SKU']   || '').trim();
+      if (!shipId || !orderNum) continue;
+      if (!shipRate.has(shipId)) shipRate.set(shipId, { rate, orderNum });
+      if (sku.startsWith('AS-')) shipHasAps.set(shipId, true);
+    }
+
+    // Pass 2: accumulate per order
+    for (const [shipId, { rate, orderNum }] of shipRate) {
+      costs.set(orderNum, (costs.get(orderNum) || 0) + rate);
+      if (shipHasAps.get(shipId)) {
+        apsCosts.set(orderNum, (apsCosts.get(orderNum) || 0) + rate);
+      }
+    }
+  } else {
+    // Original summary format: one effective row per order
+    for (const row of rows) {
+      const orderCol = Object.keys(row).find(k => k.trim().toLowerCase() === 'order #');
+      const rateCol  = Object.keys(row).find(k => k.trim().toLowerCase() === 'rate');
+      if (!orderCol || !rateCol) break;
+      const num  = (row[orderCol] || '').trim().replace(/^#/, '');
+      const rate = cleanMoney(row[rateCol]);
+      if (num && rate !== null) costs.set(num, (costs.get(num) || 0) + rate);
     }
   }
-  return costs;
+
+  return { costs, apsCosts };
 }
 
 // ─── HPD Log parser ───────────────────────────────────────────────────────────
@@ -533,7 +592,13 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const lineRevenue = isInfluencerSample
       ? 0
       : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
-    const [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias);
+    let [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias);
+    // Route insurance — pass-through: cost = what customer paid, GP = $0
+    if (/^ROUTEINS/i.test(sku) ||
+        (product || '').toUpperCase().includes('SHIPPING PROTECTION BY ROUTE')) {
+      unitCost   = unitPrice;
+      costSource = 'Route (pass-through)';
+    }
     // getCost() returns per-delivery cost for SUB/GSUB ($3/plant/mo).
     // Use first delivery only — future months have no matching revenue in this view.
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;

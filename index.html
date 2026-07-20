@@ -878,6 +878,38 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <div id="fs-model-results"></div>
     </div>
 
+    <!-- ── APS Shipping Surcharge Projection ───────────────────────────── -->
+    <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
+      <h3 style="font-size:.95rem;font-weight:700;margin-bottom:6px">✈️ Air Plant Shop — Multi-Item Shipping Projection</h3>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:16px">
+        APS item prices include a shipping surcharge (+$6 individual, +$8 pack, +$10 arrangement).
+        Model the GP impact of discounting that surcharge on the 2nd+ item to encourage multi-item orders.<br>
+        <span style="color:var(--yellow)">⚠ Requires the ShipStation <em>line items</em> export — upload it as your ShipStation CSV.</span>
+      </p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:20px">
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Discount — 2nd item ($)</div>
+          <input type="number" id="aps-disc-2" value="3" min="0" step="0.5"
+                 class="search-input" style="width:72px">
+        </div>
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">3rd item ($)</div>
+          <input type="number" id="aps-disc-3" value="4" min="0" step="0.5"
+                 class="search-input" style="width:72px">
+        </div>
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">4th+ item ($)</div>
+          <input type="number" id="aps-disc-4" value="5" min="0" step="0.5"
+                 class="search-input" style="width:72px">
+        </div>
+        <button class="calc-btn" onclick="calcApsProjection()"
+                style="width:auto;padding:8px 20px;font-size:.85rem;margin-top:0">
+          Calculate Impact
+        </button>
+      </div>
+      <div id="aps-results"></div>
+    </div>
+
   </div><!-- /projection-page -->
 
 </div>
@@ -890,6 +922,7 @@ let ordersFiles = [], shipFile = null, costsFile = null, hpdFile = null;
 let savedOrdersTexts = null, savedShipText = null, savedCostsText = null, savedHpdText = null;
 let selectedSavedCosts = null, selectedSavedHpd = null;
 let hpdData = null; // Map<shopifyOrderNum, entry> from parseHpdLog
+let apsShipCosts = new Map(); // orderNum → APS shipment Rate (from line-items SS format)
 let allLines = [], filteredLines = [], sortKey = 'date', sortAsc = false;
 let currentPage = 1;
 const PAGE_SIZE = 100;
@@ -1291,7 +1324,9 @@ window.runCalc = async () => {
     const shipText = shipFile ? await shipFile.text() : savedShipText;
     if (shipText) {
       setLoadingMsg('Parsing ShipStation…');
-      shipCosts = parseShipStation(parseCSV(shipText));
+      const ssResult = parseShipStation(parseCSV(shipText));
+      shipCosts    = ssResult.costs;
+      apsShipCosts = ssResult.apsCosts;
     }
 
     const hpdText = hpdFile ? await hpdFile.text() : savedHpdText;
@@ -3386,6 +3421,214 @@ window.downloadIcCsv = function() {
     href: 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv),
     download: 'itemcount_freeship_impact.csv',
   }).click();
+};
+
+// ─── APS Shipping Surcharge Projection ───────────────────────────
+window.calcApsProjection = function() {
+  const resultEl = document.getElementById('aps-results');
+  if (!allLines.length) { resultEl.innerHTML = '<p style="color:var(--yellow)">Load order data first.</p>'; return; }
+
+  const disc2 = parseFloat(document.getElementById('aps-disc-2').value) || 0;
+  const disc3 = parseFloat(document.getElementById('aps-disc-3').value) || 0;
+  const disc4 = parseFloat(document.getElementById('aps-disc-4').value) || 0;
+
+  const hasApsShip = apsShipCosts.size > 0;
+
+  // Build per-order APS summary from allLines
+  // APS lines: SKU starts with 'AS-'
+  const orderMap = new Map();
+  for (const li of allLines) {
+    const sku = (li.sku || '').toUpperCase();
+    if (!sku.startsWith('AS-')) continue;
+
+    if (!orderMap.has(li.orderNum)) {
+      orderMap.set(li.orderNum, {
+        orderNum: li.orderNum,
+        date: li.date,
+        apsRevenue: 0,
+        apsCogs: 0,
+        apsQty: 0,
+        apsShipCost: null,
+        _hasNull: false,
+      });
+    }
+    const o = orderMap.get(li.orderNum);
+    o.apsRevenue += li.lineRevenue || 0;
+    o.apsCogs    += li.lineCogs    || 0;
+    o.apsQty     += li.qty         || 1;
+    if (li.lineNetGp === null) o._hasNull = true;
+  }
+
+  // Attach APS ship cost
+  for (const [orderNum, o] of orderMap) {
+    const rate = apsShipCosts.get(orderNum);
+    o.apsShipCost = rate !== undefined ? rate : null;
+    o.apsGp = o._hasNull ? null
+      : (o.apsShipCost !== null ? o.apsRevenue - o.apsCogs - o.apsShipCost : o.apsRevenue - o.apsCogs);
+  }
+
+  const orders = [...orderMap.values()];
+
+  // Group by tier
+  const tiers = { 1: [], 2: [], 3: [], 4: [], '5+': [] };
+  for (const o of orders) {
+    const t = o.apsQty >= 5 ? '5+' : String(o.apsQty);
+    (tiers[t] || tiers['5+']).push(o);
+  }
+
+  // Compute discount per order (items 2, 3, 4+)
+  function calcDiscount(qty) {
+    if (qty <= 1) return 0;
+    let d = disc2; // 2nd item
+    if (qty >= 3) d += disc3;
+    if (qty >= 4) d += disc4 * (qty - 3);
+    return Math.round(d * 100) / 100;
+  }
+
+  const fmt  = v => v == null ? '—' : '$' + v.toFixed(2);
+  const pct  = (gp, rev) => (rev > 0 && gp != null) ? (gp / rev * 100).toFixed(1) + '%' : '—';
+  const clr  = v => v == null ? '' : v >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // Totals across all tiers
+  let totRev = 0, totGp = 0, totNewGp = 0, totDiscLost = 0;
+  let totOrders = 0;
+  for (const o of orders) {
+    totRev += o.apsRevenue;
+    if (o.apsGp !== null) { totGp += o.apsGp; totNewGp += o.apsGp - calcDiscount(o.apsQty); }
+    totDiscLost += calcDiscount(o.apsQty);
+    totOrders++;
+  }
+
+  // Summary cards
+  const gpDelta = totNewGp - totGp;
+  const curGpPct = totRev > 0 ? (totGp / totRev * 100) : null;
+  const newGpPct = totRev > 0 ? (totNewGp / (totRev - totDiscLost) * 100) : null;
+
+  let html = `
+  <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px">
+    <div class="card">
+      <div class="label">APS Orders</div>
+      <div class="value">${totOrders}</div>
+      <div class="sub">with APS items</div>
+    </div>
+    <div class="card">
+      <div class="label">APS Revenue</div>
+      <div class="value">${fmt(totRev)}</div>
+      <div class="sub">incl. ship surcharge</div>
+    </div>
+    <div class="card" style="border-color:var(--red)">
+      <div class="label">Revenue Lost (discount)</div>
+      <div class="value" style="color:var(--red)">-${fmt(totDiscLost)}</div>
+      <div class="sub">on 2nd+ items</div>
+    </div>
+    <div class="card">
+      <div class="label">Current APS GP%</div>
+      <div class="value">${curGpPct !== null ? curGpPct.toFixed(1)+'%' : '—'}</div>
+      <div class="sub">${hasApsShip ? 'incl. APS ship cost' : 'excl. ship (upload line items SS)'}</div>
+    </div>
+    <div class="card" style="border-color:${gpDelta >= 0 ? 'var(--green)' : 'var(--red)'}">
+      <div class="label">New APS GP%</div>
+      <div class="value" style="color:${gpDelta >= 0 ? 'var(--green)' : 'var(--red)'}">
+        ${newGpPct !== null ? newGpPct.toFixed(1)+'%' : '—'}
+      </div>
+      <div class="sub">GP change: ${gpDelta >= 0 ? '+' : ''}${fmt(gpDelta)}</div>
+    </div>
+  </div>`;
+
+  if (!hasApsShip) {
+    html += `<div style="padding:10px 14px;background:rgba(255,200,0,.08);border:1px solid var(--yellow);border-radius:6px;font-size:.78rem;color:var(--yellow);margin-bottom:16px">
+      ⚠ Upload the ShipStation <strong>line items</strong> export to include APS shipping cost in GP calculations.
+      GP% above reflects revenue − COGS only.
+    </div>`;
+  }
+
+  // Per-tier table
+  html += `<table class="proj-table" style="width:100%;font-size:.78rem">
+    <thead><tr>
+      <th>Items</th><th>Orders</th>
+      <th>Avg APS Rev</th><th>Avg APS COGS</th>
+      <th>${hasApsShip ? 'Avg Ship Cost' : 'Ship Cost'}</th>
+      <th>Cur GP%</th><th>Discount Given</th><th>New GP%</th><th>Break-even Disc</th>
+    </tr></thead><tbody>`;
+
+  for (const tier of ['1','2','3','4','5+']) {
+    const grp = tiers[tier];
+    if (!grp.length) continue;
+
+    const n        = grp.length;
+    const avgRev   = grp.reduce((s,o) => s + o.apsRevenue, 0) / n;
+    const avgCogs  = grp.reduce((s,o) => s + o.apsCogs,    0) / n;
+    const avgShip  = hasApsShip
+      ? grp.reduce((s,o) => s + (o.apsShipCost||0), 0) / n
+      : null;
+    const avgGp    = grp.reduce((s,o) => s + (o.apsGp||0), 0) / n;
+    const disc     = calcDiscount(tier === '5+' ? 5 : parseInt(tier));
+    const avgNewGp = avgGp - disc;
+    const avgNewRev= avgRev - disc;
+
+    // Break-even: max discount where GP ≥ 0
+    const beDisc   = avgGp; // if avgGp - d >= 0 → d <= avgGp
+
+    const curPct   = avgRev > 0 ? (avgGp  / avgRev   * 100).toFixed(1) + '%' : '—';
+    const newPct   = avgNewRev > 0 ? (avgNewGp / avgNewRev * 100).toFixed(1) + '%' : '—';
+    const newClr   = avgNewGp >= avgGp ? 'var(--green)' : 'var(--red)';
+
+    html += `<tr>
+      <td style="text-align:center">${tier}</td>
+      <td style="text-align:center">${n}</td>
+      <td>${fmt(avgRev)}</td>
+      <td>${fmt(avgCogs)}</td>
+      <td>${avgShip !== null ? fmt(avgShip) : '<span style="color:var(--muted)">—</span>'}</td>
+      <td>${curPct}</td>
+      <td style="color:var(--red)">${disc > 0 ? '-'+fmt(disc) : '—'}</td>
+      <td style="color:${newClr}">${newPct}</td>
+      <td style="color:var(--muted)">${fmt(Math.max(0, beDisc))}</td>
+    </tr>`;
+  }
+
+  html += `</tbody></table>
+  <div style="font-size:.72rem;color:var(--muted);margin-top:8px">
+    Break-even disc = max total discount where avg order GP stays ≥ $0. Ship cost column blank if regular SS format uploaded.
+  </div>`;
+
+  // Per-order detail (multi-item orders only)
+  const multiOrders = orders.filter(o => o.apsQty >= 2).sort((a,b) => b.apsQty - a.apsQty);
+  if (multiOrders.length) {
+    html += `<div style="margin-top:20px;font-size:.8rem;font-weight:700;margin-bottom:8px">
+      Multi-item APS orders (${multiOrders.length})
+    </div>
+    <table class="proj-table" style="width:100%;font-size:.75rem">
+      <thead><tr>
+        <th>Order</th><th>Date</th><th>Items</th>
+        <th>APS Revenue</th><th>APS COGS</th>
+        <th>Ship Cost</th><th>Cur GP</th><th>Cur GP%</th>
+        <th>Discount</th><th>New GP</th><th>New GP%</th>
+      </tr></thead><tbody>`;
+    for (const o of multiOrders) {
+      const disc     = calcDiscount(o.apsQty);
+      const newGp    = o.apsGp !== null ? o.apsGp - disc : null;
+      const newRev   = o.apsRevenue - disc;
+      const curP     = pct(o.apsGp, o.apsRevenue);
+      const newP     = pct(newGp, newRev);
+      const newClr   = newGp !== null && o.apsGp !== null && newGp < o.apsGp ? 'var(--red)' : 'var(--green)';
+      html += `<tr>
+        <td>${o.orderNum}</td>
+        <td>${o.date||'—'}</td>
+        <td style="text-align:center">${o.apsQty}</td>
+        <td>${fmt(o.apsRevenue)}</td>
+        <td>${fmt(o.apsCogs)}</td>
+        <td>${o.apsShipCost !== null ? fmt(o.apsShipCost) : '<span style="color:var(--muted)">—</span>'}</td>
+        <td>${fmt(o.apsGp)}</td>
+        <td>${curP}</td>
+        <td style="color:var(--red)">${disc > 0 ? '-'+fmt(disc) : '—'}</td>
+        <td style="color:${newClr}">${fmt(newGp)}</td>
+        <td style="color:${newClr}">${newP}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  resultEl.innerHTML = html;
 };
 
 // ─── Projection View ─────────────────────────────────────────────
