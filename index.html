@@ -349,6 +349,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       </div>
     </div>
 
+    <!-- Channel × Vendor breakdown -->
+    <div class="section-title">Channel &amp; Vendor Breakdown</div>
+    <div id="channel-breakdown" style="margin-bottom:24px"></div>
+
     <!-- Shipping analysis -->
     <div class="section-title">Shipping Analysis</div>
     <div class="ship-grid" id="ship-grid"></div>
@@ -1507,8 +1511,9 @@ function renderCharts(s) {
     }
   });
 
-  // Revenue by channel
+  // Revenue by channel — donut with % tooltip
   const channels = Object.entries(s.byChannel).sort((a,b) => b[1].revenue - a[1].revenue);
+  const totChRev  = channels.reduce((sum,[,v]) => sum + v.revenue, 0);
   if (chartChannel) chartChannel.destroy();
   chartChannel = new Chart(document.getElementById('chart-channel'), {
     type: 'doughnut',
@@ -1520,10 +1525,83 @@ function renderCharts(s) {
       responsive: true, maintainAspectRatio: false,
       plugins: {
         legend: { position: 'right', labels: { color:'#94a3b8', font:{size:11}, boxWidth:12 } },
-        tooltip: { callbacks: { label: ctx => ` $${Math.round(ctx.parsed).toLocaleString()}` }}
+        tooltip: { callbacks: { label: ctx => {
+          const pct = totChRev > 0 ? (ctx.parsed / totChRev * 100).toFixed(1) : 0;
+          return ` $${Math.round(ctx.parsed).toLocaleString()} (${pct}%)`;
+        }}}
       }
     }
   });
+
+  // Channel × Vendor breakdown table
+  renderChannelBreakdown(s, totChRev);
+}
+
+function renderChannelBreakdown(s, totChRev) {
+  const el = document.getElementById('channel-breakdown');
+  if (!el) return;
+
+  const fmt  = v => '$' + v.toFixed(2);
+  const pct  = (a, b) => b > 0 ? (a / b * 100).toFixed(1) + '%' : '—';
+  const gpClr = v => v >= 40 ? 'var(--green)' : v >= 20 ? 'var(--yellow)' : 'var(--red)';
+
+  const channels = Object.entries(s.byChannel).sort((a,b) => b[1].revenue - a[1].revenue);
+
+  let html = `<table class="proj-table" style="width:100%;font-size:.78rem">
+    <thead><tr>
+      <th>Channel</th>
+      <th class="num">Revenue</th>
+      <th class="num">Rev %</th>
+      <th class="num">GP $</th>
+      <th class="num">GP %</th>
+      <th>Top Vendor (Revenue)</th>
+      <th class="num">Vendor Rev</th>
+      <th class="num">Vendor Rev %</th>
+      <th>Top Vendor (GP)</th>
+      <th class="num">Vendor GP</th>
+      <th class="num">Vendor GP %</th>
+    </tr></thead><tbody>`;
+
+  for (const [ch, cv] of channels) {
+    const revPct  = totChRev > 0 ? cv.revenue / totChRev * 100 : 0;
+    const gpPctV  = cv.revenue > 0 ? cv.gp / cv.revenue * 100 : 0;
+
+    // Per-store breakdown for this channel
+    const stores  = Object.entries((s.byChannelStore || {})[ch] || {})
+      .map(([name, v]) => ({ name, ...v, gpPct: v.revenue > 0 ? v.gp / v.revenue * 100 : 0 }));
+
+    const topByRev = stores.sort((a,b) => b.revenue - a.revenue)[0];
+    const topByGp  = [...stores].sort((a,b) => b.gp - a.gp)[0];
+
+    html += `<tr>
+      <td><strong>${ch || 'Unknown'}</strong></td>
+      <td class="num">${fmt(cv.revenue)}</td>
+      <td class="num">${revPct.toFixed(1)}%</td>
+      <td class="num">${fmt(cv.gp)}</td>
+      <td class="num" style="color:${gpClr(gpPctV)}">${pct(cv.gp, cv.revenue)}</td>
+      <td style="color:var(--muted)">${topByRev ? topByRev.name : '—'}</td>
+      <td class="num">${topByRev ? fmt(topByRev.revenue) : '—'}</td>
+      <td class="num">${topByRev ? pct(topByRev.revenue, cv.revenue) : '—'}</td>
+      <td style="color:var(--muted)">${topByGp  ? topByGp.name  : '—'}</td>
+      <td class="num">${topByGp  ? fmt(topByGp.gp)      : '—'}</td>
+      <td class="num" style="color:${topByGp ? gpClr(topByGp.gpPct) : ''}">${topByGp ? pct(topByGp.gp, topByGp.revenue) : '—'}</td>
+    </tr>`;
+  }
+
+  // Totals row
+  const totGp  = channels.reduce((s,[,v]) => s + v.gp,      0);
+  const totGpP = totChRev > 0 ? totGp / totChRev * 100 : 0;
+  html += `<tr class="tfoot-total">
+    <td><strong>Total</strong></td>
+    <td class="num">${fmt(totChRev)}</td>
+    <td class="num">100%</td>
+    <td class="num">${fmt(totGp)}</td>
+    <td class="num" style="color:${gpClr(totGpP)}">${totGpP.toFixed(1)}%</td>
+    <td colspan="6"></td>
+  </tr>`;
+
+  html += `</tbody></table>`;
+  el.innerHTML = html;
 }
 
 // ─── Shipping cards ────────────────────────────────────────────────

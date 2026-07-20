@@ -721,7 +721,8 @@ export function summarize(lineItems) {
   let totalShipCollected = 0, totalShipPaid = 0;
   let missingCost = 0;
   const byStore = {};
-  const byChannel = {};
+  const byChannel = {};      // channel → { revenue, cogs, gp }
+  const byChannelStore = {}; // channel → { store → { revenue, cogs } }
   const shipByType = {};
   // Shipping paid breakdown by vendor
   const shipByVendor = {
@@ -745,8 +746,15 @@ export function summarize(lineItems) {
     // By channel
     if (li.source) {
       const c = li.source;
-      if (!byChannel[c]) byChannel[c] = { revenue:0, gp:0 };
+      if (!byChannel[c]) byChannel[c] = { revenue:0, cogs:0, gp:0 };
       byChannel[c].revenue += li.lineRevenue || 0;
+      byChannel[c].cogs    += li.lineCogs    || 0;
+      // By channel × store
+      if (!byChannelStore[c]) byChannelStore[c] = {};
+      const st = li.store || 'Unknown';
+      if (!byChannelStore[c][st]) byChannelStore[c][st] = { revenue:0, cogs:0 };
+      byChannelStore[c][st].revenue += li.lineRevenue || 0;
+      byChannelStore[c][st].cogs    += li.lineCogs    || 0;
     }
 
     // Shipping by order type
@@ -786,8 +794,10 @@ export function summarize(lineItems) {
 
   // Back-fill store/channel GP with the same formula (product only, no shipping split)
   for (const s of Object.values(byStore))   s.gp = Math.round((s.revenue - s.cogs) * 100) / 100;
-  for (const c of Object.values(byChannel)) c.gp = Math.round((c.revenue - (byChannel[c]?.cogs||0)) * 100) / 100;
+  for (const c of Object.values(byChannel)) c.gp = Math.round((c.revenue - c.cogs) * 100) / 100;
+  for (const ch of Object.values(byChannelStore))
+    for (const st of Object.values(ch)) st.gp = Math.round((st.revenue - st.cogs) * 100) / 100;
 
   return { totalRevenue, productRevenue, totalShipCollected, totalShipPaid,
-           totalCogs, totalGp, gpPct, missingCost, byStore, byChannel, shipByType, shipByVendor };
+           totalCogs, totalGp, gpPct, missingCost, byStore, byChannel, byChannelStore, shipByType, shipByVendor };
 }
