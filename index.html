@@ -3515,8 +3515,9 @@ window.renderApsView = function() {
   }
 
   // Attach ship cost and compute GP
+  // li.orderNum keeps '#' prefix (e.g. '#469741'); apsShipCosts keys are stripped ('469741')
   for (const [num, o] of orderMap) {
-    const rate = apsShipCosts.get(num);
+    const rate = apsShipCosts.get(num.replace(/^#/, ''));
     o.apsShipCost  = rate !== undefined ? rate : null;
     o.apsGpPreShip = o._hasNull ? null : o.apsRevenue - o.apsCogs;
     o.apsNetGp     = o._hasNull ? null
@@ -3624,7 +3625,7 @@ function renderApsPage() {
       ? `<td class="num" style="color:var(--red)">${fmt(o.apsShipCost)}</td>`
       : `<td class="num" style="color:var(--muted)">—</td>`;
     return `<tr>
-      <td>#${o.orderNum}</td>
+      <td>${o.orderNum}</td>
       <td>${o.date || '—'}</td>
       <td>${o.source || '—'}</td>
       <td class="num">${o.apsQty}</td>
@@ -3693,7 +3694,7 @@ window.calcApsProjection = function() {
     if (li.lineNetGp === null) o._hasNull = true;
   }
   for (const [orderNum, o] of orderMap) {
-    const rate = apsShipCosts.get(orderNum);
+    const rate = apsShipCosts.get(orderNum.replace(/^#/, ''));
     o.apsShipCost = rate !== undefined ? rate : null;
     o.apsGp = o._hasNull ? null
       : (o.apsShipCost !== null ? o.apsRevenue - o.apsCogs - o.apsShipCost
