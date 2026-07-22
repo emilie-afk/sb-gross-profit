@@ -848,6 +848,74 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <div id="sc-results"></div>
     </div>
 
+    <!-- ── MCG Volume Discount ── -->
+    <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
+      <h3 style="font-size:.95rem;font-weight:700;margin-bottom:6px">🌵 MCG Volume Discount — Fulfillment Cost Reduction</h3>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:16px">
+        Discount per plant by order size. Current order counts are pre-filled from data — edit to model volume growth.
+      </p>
+
+      <!-- Tier input table -->
+      <table style="font-size:.8rem;border-collapse:collapse;margin-bottom:16px">
+        <thead>
+          <tr style="color:var(--muted);font-size:.72rem">
+            <th style="padding:4px 12px 4px 0;text-align:left">Tier</th>
+            <th style="padding:4px 12px;text-align:center">Disc / plant ($)</th>
+            <th style="padding:4px 12px;text-align:center">Current orders</th>
+            <th style="padding:4px 12px;text-align:center">Projected orders</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="padding:4px 12px 4px 0;color:var(--text)">1 plant</td>
+            <td style="padding:4px 12px;text-align:center">
+              <input type="number" id="vd-disc-1" value="0" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
+            </td>
+            <td style="padding:4px 12px;text-align:center;color:var(--muted)" id="vd-cur-1">—</td>
+            <td style="padding:4px 12px;text-align:center">
+              <input type="number" id="vd-vol-1" value="" min="0" step="1" class="search-input" style="width:80px;text-align:center" placeholder="—">
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:4px 12px 4px 0;color:var(--text)">2–3 plants</td>
+            <td style="padding:4px 12px;text-align:center">
+              <input type="number" id="vd-disc-2" value="0.20" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
+            </td>
+            <td style="padding:4px 12px;text-align:center;color:var(--muted)" id="vd-cur-2">—</td>
+            <td style="padding:4px 12px;text-align:center">
+              <input type="number" id="vd-vol-2" value="" min="0" step="1" class="search-input" style="width:80px;text-align:center" placeholder="—">
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:4px 12px 4px 0;color:var(--text)">4–7 plants</td>
+            <td style="padding:4px 12px;text-align:center">
+              <input type="number" id="vd-disc-3" value="0.50" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
+            </td>
+            <td style="padding:4px 12px;text-align:center;color:var(--muted)" id="vd-cur-3">—</td>
+            <td style="padding:4px 12px;text-align:center">
+              <input type="number" id="vd-vol-3" value="" min="0" step="1" class="search-input" style="width:80px;text-align:center" placeholder="—">
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:4px 12px 4px 0;color:var(--text)">8+ plants</td>
+            <td style="padding:4px 12px;text-align:center">
+              <input type="number" id="vd-disc-4" value="0.60" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
+            </td>
+            <td style="padding:4px 12px;text-align:center;color:var(--muted)" id="vd-cur-4">—</td>
+            <td style="padding:4px 12px;text-align:center">
+              <input type="number" id="vd-vol-4" value="" min="0" step="1" class="search-input" style="width:80px;text-align:center" placeholder="—">
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <button class="calc-btn" onclick="calcMcgVolumeDiscount()"
+              style="width:auto;padding:8px 20px;font-size:.85rem">
+        Calculate Impact
+      </button>
+      <div id="vd-results" style="margin-top:20px"></div>
+    </div>
+
     <!-- ── Item Count Free Shipping ── -->
     <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
       <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">📦 Item Count Free Shipping</h3>
@@ -3339,6 +3407,176 @@ window.calcCombinedScenario = function() {
       <span style="color:var(--muted)">|</span>
       <span>GP% impact: <strong style="color:${deltaClr}">${pctDelta !== null ? (pctDelta>=0?'+':'')+pctDelta.toFixed(1)+'%' : '—'}</strong></span>
     </div>`;
+};
+
+// ─── MCG Volume Discount ─────────────────────────────────────────
+// Stores per-tier stats after first analysis so projected volumes can scale them
+let _vdTierStats = null;
+
+window.calcMcgVolumeDiscount = function() {
+  const resultEl = document.getElementById('vd-results');
+  if (!allLines.length) { resultEl.innerHTML = '<p style="color:var(--yellow)">Load order data first.</p>'; return; }
+
+  const d1 = parseFloat(document.getElementById('vd-disc-1').value) || 0;
+  const d2 = parseFloat(document.getElementById('vd-disc-2').value) || 0;
+  const d3 = parseFloat(document.getElementById('vd-disc-3').value) || 0;
+  const d4 = parseFloat(document.getElementById('vd-disc-4').value) || 0;
+  const discs = { '1': d1, '2–3': d2, '4–7': d3, '8+': d4 };
+
+  function tierKey(qty) {
+    if (qty <= 1) return '1';
+    if (qty <= 3) return '2–3';
+    if (qty <= 7) return '4–7';
+    return '8+';
+  }
+
+  // ── Build per-order MCG stats from actual data ──
+  const orderMap = new Map();
+  for (const li of allLines) {
+    if (!(li.store || '').includes('Succulents Box')) continue;
+    if (!orderMap.has(li.orderNum)) {
+      orderMap.set(li.orderNum, { mcgQty: 0, revenue: 0, netGp: 0, _null: false });
+    }
+    const o = orderMap.get(li.orderNum);
+    o.mcgQty  += li.qty || 1;
+    o.revenue += li.lineRevenue || 0;
+    if (li.lineNetGp !== null) o.netGp += li.lineNetGp; else o._null = true;
+  }
+
+  // Compute per-tier averages from actual data
+  const buckets = { '1': [], '2–3': [], '4–7': [], '8+': [] };
+  for (const o of orderMap.values()) buckets[tierKey(o.mcgQty)].push(o);
+
+  _vdTierStats = {};
+  for (const [tier, grp] of Object.entries(buckets)) {
+    const n = grp.length;
+    _vdTierStats[tier] = {
+      currentOrders: n,
+      totalPlants:   grp.reduce((s,o) => s + o.mcgQty,  0),
+      avgPlants:     n ? grp.reduce((s,o) => s + o.mcgQty,  0) / n : 0,
+      avgRevenue:    n ? grp.reduce((s,o) => s + o.revenue, 0) / n : 0,
+      avgNetGp:      n ? grp.reduce((s,o) => s + (o._null ? 0 : o.netGp), 0) / n : 0,
+    };
+  }
+
+  // ── Populate "Current orders" cells and seed projected inputs on first run ──
+  const tierIds = { '1': '1', '2–3': '2', '4–7': '3', '8+': '4' };
+  for (const [tier, id] of Object.entries(tierIds)) {
+    const cur = _vdTierStats[tier].currentOrders;
+    const curEl = document.getElementById(`vd-cur-${id}`);
+    if (curEl) curEl.textContent = cur;
+    const volEl = document.getElementById(`vd-vol-${id}`);
+    if (volEl && volEl.value === '') volEl.value = cur; // seed only if empty
+  }
+
+  // ── Read projected volumes (may have been edited) ──
+  const projVols = {
+    '1':   parseInt(document.getElementById('vd-vol-1').value) || _vdTierStats['1'].currentOrders,
+    '2–3': parseInt(document.getElementById('vd-vol-2').value) || _vdTierStats['2–3'].currentOrders,
+    '4–7': parseInt(document.getElementById('vd-vol-3').value) || _vdTierStats['4–7'].currentOrders,
+    '8+':  parseInt(document.getElementById('vd-vol-4').value) || _vdTierStats['8+'].currentOrders,
+  };
+
+  // ── All-orders baseline (current file) ──
+  const totRev   = allLines.reduce((s, li) => s + (li.lineRevenue || 0), 0);
+  const totNetGp = allLines.reduce((s, li) => s + (li.lineNetGp   || 0), 0);
+  const totGpPct = totRev > 0 ? totNetGp / totRev * 100 : null;
+
+  // ── Compute savings for current and projected volumes ──
+  const fmt  = v => v == null ? '—' : '$' + v.toFixed(2);
+  const gClr = v => v == null ? '' : v >= 0 ? 'var(--green)' : 'var(--red)';
+  const gpClr = v => v >= 30 ? 'var(--green)' : v >= 15 ? 'var(--yellow)' : 'var(--red)';
+
+  let curSavings  = 0;
+  let projSavings = 0;
+
+  // Per-tier table
+  let html = `<table class="proj-table" style="width:100%;font-size:.78rem;margin-bottom:20px">
+    <thead>
+      <tr>
+        <th>Tier</th>
+        <th class="num">Disc/plant</th>
+        <th class="num">Avg plants/order</th>
+        <th class="num">Current orders</th>
+        <th class="num">Savings/order (cur)</th>
+        <th class="num" style="color:var(--accent)">Current total savings</th>
+        <th class="num">Projected orders</th>
+        <th class="num">Savings/order (proj)</th>
+        <th class="num" style="color:var(--accent2)">Projected total savings</th>
+        <th class="num">Δ vs current</th>
+      </tr>
+    </thead><tbody>`;
+
+  for (const tier of ['1', '2–3', '4–7', '8+']) {
+    const ts       = _vdTierStats[tier];
+    const disc     = discs[tier];
+    const savPerOrd = Math.round(disc * ts.avgPlants * 100) / 100;
+    const curTot   = Math.round(savPerOrd * ts.currentOrders * 100) / 100;
+    const projTot  = Math.round(savPerOrd * projVols[tier]   * 100) / 100;
+    const delta    = projTot - curTot;
+    curSavings  += curTot;
+    projSavings += projTot;
+
+    const volChanged = projVols[tier] !== ts.currentOrders;
+    html += `<tr>
+      <td style="font-weight:700">${tier} plant${tier==='1'?'':'s'}</td>
+      <td class="num">${disc > 0 ? '-$'+disc.toFixed(2) : '—'}</td>
+      <td class="num">${ts.avgPlants.toFixed(1)}</td>
+      <td class="num">${ts.currentOrders}</td>
+      <td class="num" style="color:var(--green)">${disc > 0 ? '+'+fmt(savPerOrd) : '—'}</td>
+      <td class="num" style="color:var(--accent);font-weight:700">${disc > 0 ? '+'+fmt(curTot) : '—'}</td>
+      <td class="num" style="color:${volChanged?'var(--text)':'var(--muted)'};font-weight:${volChanged?'700':'400'}">${projVols[tier]}${volChanged?' ▲':''}</td>
+      <td class="num" style="color:var(--green)">${disc > 0 ? '+'+fmt(savPerOrd) : '—'}</td>
+      <td class="num" style="color:var(--accent2);font-weight:700">${disc > 0 ? '+'+fmt(projTot) : '—'}</td>
+      <td class="num" style="color:${gClr(delta)}">${delta !== 0 ? (delta>0?'+':'')+fmt(delta) : '—'}</td>
+    </tr>`;
+  }
+
+  const totalDelta = projSavings - curSavings;
+  html += `<tr class="tfoot-total">
+    <td colspan="5"><strong>Total</strong></td>
+    <td class="num" style="color:var(--accent);font-weight:700">+${fmt(curSavings)}</td>
+    <td></td><td></td>
+    <td class="num" style="color:var(--accent2);font-weight:700">+${fmt(projSavings)}</td>
+    <td class="num" style="color:${gClr(totalDelta)}">${totalDelta!==0?(totalDelta>0?'+':'')+fmt(totalDelta):'—'}</td>
+  </tr></tbody></table>`;
+
+  // Summary cards: current vs projected
+  const newGpCur  = totNetGp + curSavings;
+  const newGpProj = totNetGp + projSavings;
+  const curGpNew  = totRev > 0 ? newGpCur  / totRev * 100 : null;
+  const projGpNew = totRev > 0 ? newGpProj / totRev * 100 : null;
+  const dCur  = curGpNew  !== null && totGpPct !== null ? curGpNew  - totGpPct : null;
+  const dProj = projGpNew !== null && totGpPct !== null ? projGpNew - totGpPct : null;
+
+  html = `<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px">
+    <div class="card">
+      <div class="label">Baseline GP% (all orders)</div>
+      <div class="value">${totGpPct !== null ? totGpPct.toFixed(1)+'%' : '—'}</div>
+      <div class="sub">${fmt(totNetGp)} / ${fmt(totRev)}</div>
+    </div>
+    <div class="card" style="border-color:var(--accent)">
+      <div class="label">Current volume savings</div>
+      <div class="value" style="color:var(--accent)">+${fmt(curSavings)}</div>
+      <div class="sub">New GP%: ${curGpNew!==null?curGpNew.toFixed(1)+'%':'—'} (${dCur!==null?(dCur>=0?'+':'')+dCur.toFixed(2)+'%':'—'} pts)</div>
+    </div>
+    <div class="card" style="border-color:var(--accent2)">
+      <div class="label">Projected volume savings</div>
+      <div class="value" style="color:var(--accent2)">+${fmt(projSavings)}</div>
+      <div class="sub">New GP%: ${projGpNew!==null?projGpNew.toFixed(1)+'%':'—'} (${dProj!==null?(dProj>=0?'+':'')+dProj.toFixed(2)+'%':'—'} pts)</div>
+    </div>
+    <div class="card" style="border-color:${gClr(totalDelta)}">
+      <div class="label">Additional savings (proj vs cur)</div>
+      <div class="value" style="color:${gClr(totalDelta)}">${totalDelta!==0?(totalDelta>0?'+':'')+fmt(totalDelta):'$0.00'}</div>
+      <div class="sub">from volume changes</div>
+    </div>
+  </div>` + html;
+
+  html += `<div style="font-size:.72rem;color:var(--muted)">
+    Savings/order = disc × avg plants/order for that tier · Edit projected orders to model volume growth · Re-click Calculate to update
+  </div>`;
+
+  resultEl.innerHTML = html;
 };
 
 // ─── Item Count Free Shipping ────────────────────────────────────
