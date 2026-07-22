@@ -2157,9 +2157,21 @@ let lmSortKey = 'netGpPct', lmSortAsc = true, lmPage = 1, lmRows = [];
 let lmLinesByOrder = new Map();   // orderNum → [lineItems]
 let lmExpanded = new Set();       // open order rows
 
+function _sortLmRows() {
+  lmRows.sort((a, b) => {
+    let va = a[lmSortKey], vb = b[lmSortKey];
+    if (va === null || va === undefined) va = lmSortAsc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = lmSortAsc ? Infinity : -Infinity;
+    if (typeof va === 'string') return lmSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return lmSortAsc ? va - vb : vb - va;
+  });
+}
+
 window.sortLMBy = key => {
   if (lmSortKey === key) lmSortAsc = !lmSortAsc; else { lmSortKey = key; lmSortAsc = true; }
-  lmPage = 1; renderLMPage();
+  lmPage = 1;
+  _sortLmRows();
+  renderLMPage();
 };
 window.changeLMPage = dir => {
   const max = Math.ceil(lmRows.length / LM_PAGE_SIZE);
@@ -2186,14 +2198,7 @@ window.renderLowMarginView = function() {
   // Compute order-level rows for all filteredLines, then filter to threshold
   const allOrderRows = computeOrderRows(filteredLines);
   lmRows = allOrderRows.filter(o => o.netGpPct !== null && o.netGpPct < threshold);
-
-  lmRows.sort((a, b) => {
-    let va = a[lmSortKey], vb = b[lmSortKey];
-    if (va === null || va === undefined) va = lmSortAsc ? Infinity : -Infinity;
-    if (vb === null || vb === undefined) vb = lmSortAsc ? Infinity : -Infinity;
-    if (typeof va === 'string') return lmSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
-    return lmSortAsc ? va - vb : vb - va;
-  });
+  _sortLmRows();
 
   const totalLoss = lmRows.reduce((s, o) => s + (o.netGp || 0), 0);
   document.getElementById('lm-summary').textContent =
