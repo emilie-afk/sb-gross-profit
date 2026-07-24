@@ -5,6 +5,14 @@
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+// Volume discount per plant based on total MCG plant units in the order
+// (confirmed fulfillment cost reduction from MCG)
+const MCG_VOL_DISC_TIERS = [
+  { min: 8, disc: 0.65 },
+  { min: 4, disc: 0.55 },
+  { min: 2, disc: 0.25 },
+];
+
 const MCG_TIER = {
   '2inch':      4.00,  // Succulents 2"
   '2inch_pot':  5.00,  // Succulents 2" Pot Upgrade
@@ -108,6 +116,41 @@ function normalizeProductName(s) {
 function isMcgSku(sku) {
   const s = sku.toUpperCase();
   return MCG_PREFIXES.some(p => s.startsWith(p.toUpperCase()));
+}
+
+// Returns the discount per plant for a given total plant count in the order
+function getMcgVolumeDisc(plantCount) {
+  for (const t of MCG_VOL_DISC_TIERS) {
+    if (plantCount >= t.min) return t.disc;
+  }
+  return 0;
+}
+
+// Returns number of MCG plant units for sku×qty.
+// Pots, Faire wholesale, and non-MCG SKUs return 0.
+function mcgPlantUnits(sku, qty) {
+  const s = (sku || '').toUpperCase();
+  if (!isMcgSku(sku)) return 0;
+  // Pots — not plants
+  if (s.startsWith('EEZZ') || s.startsWith('EBZZ') || s.startsWith('EEVZ') ||
+      s.startsWith('MODERNPOT')) return 0;
+  // Faire wholesale — different pricing model, exclude from volume discount
+  if (s.startsWith('BD-') || s.startsWith('4X-')) return 0;
+  // Rack/Pack SKUs: count encoded in last dash segment (e.g. RAKN2918-6 → 6 plants)
+  if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ') || s.startsWith('RAJN') ||
+      s.startsWith('TAKM') || s.startsWith('XAZZ')) {
+    const parts = s.split('-');
+    const count = parseInt(parts[parts.length - 1], 10);
+    return (count >= 6 && count <= 500) ? count * qty : 0;
+  }
+  // Subscription: plants/mo encoded in SKU (e.g. GSUB7-2-6 → 2 plants/mo)
+  if (s.startsWith('SUB') || s.startsWith('GSUB')) {
+    const nums = s.split('-').map(p => parseInt(p, 10)).filter(n => n > 0 && n <= 50);
+    const plants = nums.length >= 2 ? nums[nums.length - 2] : (nums[0] || 1);
+    return plants * qty;
+  }
+  // Default: 1 plant per unit
+  return qty;
 }
 
 function mcgTierCost(sku, mcgCosts) {
@@ -515,6 +558,17 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     if (ship !== null) orderShipping.set(name, ship);
   }
 
+  // ── Pre-pass 2: count MCG plant units per order (for volume discount) ──
+  const orderMcgPlants = new Map(); // orderNum → total plant units
+  for (const row of orderRows) {
+    const name = (row['Name'] || '').trim();
+    const sku  = (row['Lineitem sku'] || '').trim();
+    const qty  = parseInt(row['Lineitem quantity'] || '1') || 1;
+    if (!name || !sku || sku.toLowerCase() === 'nan') continue;
+    const units = mcgPlantUnits(sku, qty);
+    if (units > 0) orderMcgPlants.set(name, (orderMcgPlants.get(name) || 0) + units);
+  }
+
   // ── Detect influencer/sample orders (TikTok free samples gifted to creators) ──
   const influencerOrders = new Set();
   for (const row of orderRows) {
@@ -594,10 +648,25 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
     let [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias);
     // Route insurance — pass-through: cost = what customer paid, GP = $0
-    if (/^ROUTEINS/i.test(sku) ||
-        (product || '').toUpperCase().includes('SHIPPING PROTECTION BY ROUTE')) {
+    const isRoute = /^ROUTEINS/i.test(sku) ||
+        (product || '').toUpperCase().includes('SHIPPING PROTECTION BY ROUTE');
+    if (isRoute) {
       unitCost   = unitPrice;
       costSource = 'Route (pass-through)';
+    }
+    // MCG volume discount — reduces per-plant fulfillment cost based on plants/order
+    let mcgVolDisc = 0;
+    if (unitCost !== null && !isRoute) {
+      const orderPlantTotal = orderMcgPlants.get(orderNum) || 0;
+      const discPerPlant    = getMcgVolumeDisc(orderPlantTotal);
+      if (discPerPlant > 0) {
+        const plantsPerUnit = mcgPlantUnits(sku, 1); // plants in 1 unit of this SKU
+        if (plantsPerUnit > 0) {
+          mcgVolDisc = Math.round(discPerPlant * plantsPerUnit * qty * 100) / 100;
+          unitCost   = Math.round((unitCost - discPerPlant * plantsPerUnit) * 100) / 100;
+          costSource += ` (−$${discPerPlant}/plant vol disc, ${orderPlantTotal} plants)`;
+        }
+      }
     }
     // getCost() returns per-delivery cost for SUB/GSUB ($3/plant/mo).
     // Use first delivery only — future months have no matching revenue in this view.
@@ -681,7 +750,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
       lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
-      isInfluencerSample, subMonths,
+      isInfluencerSample, subMonths, mcgVolDisc,
     });
 
     orderSeen.add(orderNum);
