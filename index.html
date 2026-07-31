@@ -535,22 +535,24 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     <div id="view-subpl" style="display:none">
     <div style="display:flex;align-items:center;padding:8px 16px 6px;gap:12px">
       <span style="font-size:.85rem;font-weight:600">📊 Subscription P&amp;L — Monthly Revenue vs Actual Cost</span>
-      <span style="font-size:.75rem;color:var(--muted)">Revenue = deliveries × avg monthly price for that type · SS cost = actual per-shipment charge</span>
+      <span style="font-size:.75rem;color:var(--muted)">Per-unit averages by subscription type — avg price from paid orders, avg COGS/SS cost from all deliveries</span>
       <button class="logout-btn" onclick="downloadSubPLCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
     </div>
     <div style="overflow-x:auto;padding:0 8px 16px">
       <table id="subpl-table" style="width:100%;border-collapse:collapse;font-size:.8rem">
         <thead>
           <tr style="color:var(--muted);text-align:right;border-bottom:2px solid var(--border)">
-            <th style="text-align:left;padding:5px 12px;white-space:nowrap">Month</th>
             <th style="text-align:left;padding:5px 12px;white-space:nowrap">Subscription Type</th>
-            <th style="padding:5px 12px;white-space:nowrap">Deliveries</th>
-            <th style="padding:5px 12px;white-space:nowrap">Revenue/mo (avg price × deliveries)</th>
-            <th style="padding:5px 12px;white-space:nowrap">Fulfillment Cost</th>
-            <th style="padding:5px 12px;white-space:nowrap">SS Ship Cost</th>
-            <th style="padding:5px 12px;white-space:nowrap">Total Cost</th>
-            <th style="padding:5px 12px;white-space:nowrap">Gross Profit</th>
+            <th style="padding:5px 12px;white-space:nowrap"># Deliveries</th>
+            <th style="padding:5px 12px;white-space:nowrap">Avg Price/mo</th>
+            <th style="padding:5px 12px;white-space:nowrap">Avg COGS/mo</th>
+            <th style="padding:5px 12px;white-space:nowrap">Avg SS Cost/mo</th>
+            <th style="padding:5px 12px;white-space:nowrap">Avg Total Cost/mo</th>
+            <th style="padding:5px 12px;white-space:nowrap">Avg GP/mo</th>
             <th style="padding:5px 12px;white-space:nowrap">GP%</th>
+            <th style="padding:5px 12px;white-space:nowrap">Avg Ship Coll/mo</th>
+            <th style="padding:5px 12px;white-space:nowrap">Net GP/mo</th>
+            <th style="padding:5px 12px;white-space:nowrap">Net GP%</th>
           </tr>
         </thead>
         <tbody id="subpl-body"></tbody>
@@ -2207,175 +2209,114 @@ window.changeSubPage = dir => {
 function renderSubPLView() {
   const subLines = filteredLines.filter(l => /^(SUB|GSUB)/i.test(l.sku || ''));
 
-  // Pass 1: compute avg monthly price per type from paid orders only
-  // (lineRevenue / subMonths where lineRevenue > 0)
-  const typePriceSum = {}, typePriceCount = {};
-  for (const l of subLines) {
-    if ((l.lineRevenue || 0) <= 0 || !l.subMonths) continue;
-    const type = getSubTypeName(l.sku);
-    typePriceSum[type]   = (typePriceSum[type]   || 0) + l.lineRevenue / l.subMonths;
-    typePriceCount[type] = (typePriceCount[type] || 0) + 1;
-  }
-  const avgMonthlyPrice = {}; // type → avg monthly price
-  for (const type of Object.keys(typePriceSum)) {
-    avgMonthlyPrice[type] = Math.round(typePriceSum[type] / typePriceCount[type] * 100) / 100;
-  }
+  // One row per subscription TYPE — per-delivery unit economics
+  // Revenue: avg monthly price from paid orders (lineRevenue / subMonths where lineRevenue > 0)
+  // COGS:    avg across ALL deliveries (we fulfill every month)
+  // SS cost: avg per-delivery SS cost across all deliveries with SS data
+  // Ship collected: avg subShipMo from paid orders only
+  const types = {};
 
-  // Pass 2: group by YYYY-MM × type — count ALL deliveries, sum actual costs
-  // Revenue = deliveries × avgMonthlyPrice (imputed, so $0 months get their fair value)
-  const groups = {};
   for (const l of subLines) {
-    const month = (l.date || '').slice(0, 7);
-    if (!month) continue;
     const type = getSubTypeName(l.sku);
-    const key  = `${month}||${type}`;
-    if (!groups[key]) groups[key] = { month, type, deliveries: 0, cogs: 0, ssCost: 0, ssKnown: false };
-    const g = groups[key];
+    if (!types[type]) types[type] = {
+      type,
+      deliveries: 0,
+      revSamples: [], cogsSamples: [], ssSamples: [], shipCollSamples: []
+    };
+    const g = types[type];
     g.deliveries++;
-    g.cogs += l.lineCogs || 0;
-    if (l.subSSCostMo !== null) {
-      g.ssCost  += Math.round(l.subSSCostMo * (l.subMonths || 1) * 100) / 100;
-      g.ssKnown  = true;
+    g.cogsSamples.push(l.lineCogs || 0);
+    if (l.subSSCostMo !== null) g.ssSamples.push(l.subSSCostMo);
+
+    // Revenue and ship collected only from paid deliveries
+    if ((l.lineRevenue || 0) > 0 && l.subMonths) {
+      g.revSamples.push(l.lineRevenue / l.subMonths);
+      if (l.subShipMo !== null) g.shipCollSamples.push(l.subShipMo);
     }
   }
 
-  // Attach imputed revenue = deliveries × avg monthly price
-  for (const g of Object.values(groups)) {
-    const price = avgMonthlyPrice[g.type] || 0;
-    g.revenue = Math.round(price * g.deliveries * 100) / 100;
-  }
-
-  // Sort: month desc, type asc
-  const rows = Object.values(groups).sort((a, b) => {
-    if (a.month !== b.month) return b.month.localeCompare(a.month);
-    return a.type.localeCompare(b.type);
-  });
-
-  // Build month subtotals
-  const monthTotals = {};
-  for (const r of rows) {
-    if (!monthTotals[r.month]) monthTotals[r.month] = { deliveries:0, revenue:0, cogs:0, ssCost:0, ssKnown:false };
-    const t = monthTotals[r.month];
-    t.deliveries += r.deliveries;
-    t.revenue    += r.revenue;
-    t.cogs       += r.cogs;
-    t.ssCost     += r.ssCost;
-    if (r.ssKnown) t.ssKnown = true;
-  }
-
-  const r2 = v => Math.round(v * 100) / 100;
-  const fmtGp = (gp, rev) => {
-    const cl = gp >= 0 ? 'color:var(--green)' : 'color:var(--red)';
-    const pct = rev ? Math.round(gp / rev * 1000) / 10 : null;
-    return `<span style="${cl}">${fmt(r2(gp))}</span>`;
+  const avg  = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
+  const r2   = v => v !== null ? Math.round(v * 100) / 100 : null;
+  const cell = (v, isGp = false) => {
+    if (v === null) return '<td style="padding:5px 12px;text-align:right;color:var(--muted)">—</td>';
+    const cl = isGp ? (v >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
+    return `<td style="padding:5px 12px;text-align:right;${cl}">${fmt(v)}</td>`;
   };
-  const fmtPct = (gp, rev) => {
-    if (!rev) return '—';
+  const pctCell = (gp, rev) => {
+    if (gp === null || !rev) return '<td style="padding:5px 12px;text-align:right;color:var(--muted)">—</td>';
     const pct = Math.round(gp / rev * 1000) / 10;
     const cl  = pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
-    return `<span style="${cl}">${pct.toFixed(1)}%</span>`;
+    return `<td style="padding:5px 12px;text-align:right;${cl}">${pct.toFixed(1)}%</td>`;
   };
 
-  let html = '';
-  let prevMonth = null;
+  const sorted = Object.values(types).sort((a, b) => a.type.localeCompare(b.type));
 
-  for (const r of rows) {
-    // Month subtotal row before new month
-    if (prevMonth && prevMonth !== r.month) {
-      const mt = monthTotals[prevMonth];
-      const gp = r2(mt.revenue - mt.cogs - mt.ssCost);
-      html += `<tr style="background:var(--surface2);font-weight:600;border-top:2px solid var(--border)">
-        <td style="padding:5px 12px">${prevMonth}</td>
-        <td style="padding:5px 12px;color:var(--muted);font-style:italic">Month Total</td>
-        <td style="padding:5px 12px;text-align:right">${mt.deliveries}</td>
-        <td style="padding:5px 12px;text-align:right">${fmt(r2(mt.revenue))}</td>
-        <td style="padding:5px 12px;text-align:right">${fmt(r2(mt.cogs))}</td>
-        <td style="padding:5px 12px;text-align:right">${mt.ssKnown ? fmt(r2(mt.ssCost)) : '—'}</td>
-        <td style="padding:5px 12px;text-align:right">${mt.ssKnown ? fmt(r2(mt.cogs + mt.ssCost)) : fmt(r2(mt.cogs))}</td>
-        <td style="padding:5px 12px;text-align:right">${fmtGp(gp, mt.revenue)}</td>
-        <td style="padding:5px 12px;text-align:right">${fmtPct(gp, mt.revenue)}</td>
-      </tr><tr style="height:6px"><td colspan="9"></td></tr>`;
-    }
-
-    const ssDisplay = r.ssKnown ? fmt(r2(r.ssCost)) : '—';
-    const totalCost = r.ssKnown ? r2(r.cogs + r.ssCost) : r2(r.cogs);
-    const gp        = r.ssKnown ? r2(r.revenue - r.cogs - r.ssCost) : r2(r.revenue - r.cogs);
-    const revForPct = r.revenue;
-    html += `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:5px 12px;color:var(--muted);font-size:.75rem">${r.month}</td>
-      <td style="padding:5px 12px;white-space:nowrap">${r.type}</td>
-      <td style="padding:5px 12px;text-align:right;color:var(--muted)">${r.deliveries}</td>
-      <td style="padding:5px 12px;text-align:right">${fmt(r2(r.revenue))}</td>
-      <td style="padding:5px 12px;text-align:right">${fmt(r2(r.cogs))}</td>
-      <td style="padding:5px 12px;text-align:right">${ssDisplay}</td>
-      <td style="padding:5px 12px;text-align:right">${fmt(totalCost)}</td>
-      <td style="padding:5px 12px;text-align:right">${fmtGp(gp, revForPct)}</td>
-      <td style="padding:5px 12px;text-align:right">${fmtPct(gp, revForPct)}</td>
+  const html = sorted.map(g => {
+    const price     = r2(avg(g.revSamples));
+    const cogs      = r2(avg(g.cogsSamples));
+    const ss        = g.ssSamples.length ? r2(avg(g.ssSamples)) : null;
+    const shipColl  = g.shipCollSamples.length ? r2(avg(g.shipCollSamples)) : null;
+    const totalCost = (cogs !== null && ss !== null) ? r2(cogs + ss) : cogs;
+    const gp        = (price !== null && cogs !== null) ? r2(price - cogs) : null;
+    // Net GP = product GP - SS cost + ship collected
+    const netGp     = (gp !== null && ss !== null && shipColl !== null)
+                        ? r2(gp - ss + shipColl) : null;
+    const totalRevForNet = (price !== null && shipColl !== null) ? price + shipColl : price;
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:5px 12px;white-space:nowrap;font-weight:500">${g.type}</td>
+      <td style="padding:5px 12px;text-align:right;color:var(--muted)">${g.deliveries}</td>
+      ${cell(price)}
+      ${cell(cogs)}
+      ${cell(ss)}
+      ${cell(totalCost)}
+      ${cell(gp, true)}
+      ${pctCell(gp, price)}
+      ${cell(shipColl)}
+      ${cell(netGp, true)}
+      ${pctCell(netGp, totalRevForNet)}
     </tr>`;
-    prevMonth = r.month;
-  }
+  }).join('');
 
-  // Last month subtotal
-  if (prevMonth) {
-    const mt = monthTotals[prevMonth];
-    const gp = r2(mt.revenue - mt.cogs - mt.ssCost);
-    html += `<tr style="background:var(--surface2);font-weight:600;border-top:2px solid var(--border)">
-      <td style="padding:5px 12px">${prevMonth}</td>
-      <td style="padding:5px 12px;color:var(--muted);font-style:italic">Month Total</td>
-      <td style="padding:5px 12px;text-align:right">${mt.deliveries}</td>
-      <td style="padding:5px 12px;text-align:right">${fmt(r2(mt.revenue))}</td>
-      <td style="padding:5px 12px;text-align:right">${fmt(r2(mt.cogs))}</td>
-      <td style="padding:5px 12px;text-align:right">${mt.ssKnown ? fmt(r2(mt.ssCost)) : '—'}</td>
-      <td style="padding:5px 12px;text-align:right">${mt.ssKnown ? fmt(r2(mt.cogs + mt.ssCost)) : fmt(r2(mt.cogs))}</td>
-      <td style="padding:5px 12px;text-align:right">${fmtGp(gp, mt.revenue)}</td>
-      <td style="padding:5px 12px;text-align:right">${fmtPct(gp, mt.revenue)}</td>
-    </tr>`;
-  }
-
-  if (!html) html = `<tr><td colspan="9" style="padding:24px;text-align:center;color:var(--muted)">No subscription data in current date range.</td></tr>`;
-  document.getElementById('subpl-body').innerHTML = html;
+  document.getElementById('subpl-body').innerHTML = html ||
+    `<tr><td colspan="11" style="padding:24px;text-align:center;color:var(--muted)">No subscription data in current date range.</td></tr>`;
 }
 
 window.downloadSubPLCSV = () => {
   const subLines = filteredLines.filter(l => /^(SUB|GSUB)/i.test(l.sku || ''));
-  const priceSum = {}, priceCount = {};
+  const types = {};
   for (const l of subLines) {
-    if ((l.lineRevenue || 0) <= 0 || !l.subMonths) continue;
     const type = getSubTypeName(l.sku);
-    priceSum[type]   = (priceSum[type]   || 0) + l.lineRevenue / l.subMonths;
-    priceCount[type] = (priceCount[type] || 0) + 1;
-  }
-  const avgPrice = {};
-  for (const t of Object.keys(priceSum)) avgPrice[t] = Math.round(priceSum[t] / priceCount[t] * 100) / 100;
-
-  const groups = {};
-  for (const l of subLines) {
-    const month = (l.date || '').slice(0, 7);
-    if (!month) continue;
-    const type = getSubTypeName(l.sku);
-    const key  = `${month}||${type}`;
-    if (!groups[key]) groups[key] = { month, type, deliveries:0, cogs:0, ssCost:0, ssKnown:false };
-    const g = groups[key];
+    if (!types[type]) types[type] = { type, deliveries:0, revSamples:[], cogsSamples:[], ssSamples:[], shipCollSamples:[] };
+    const g = types[type];
     g.deliveries++;
-    g.cogs += l.lineCogs || 0;
-    if (l.subSSCostMo !== null) { g.ssCost += l.subSSCostMo * (l.subMonths || 1); g.ssKnown = true; }
+    g.cogsSamples.push(l.lineCogs || 0);
+    if (l.subSSCostMo !== null) g.ssSamples.push(l.subSSCostMo);
+    if ((l.lineRevenue || 0) > 0 && l.subMonths) {
+      g.revSamples.push(l.lineRevenue / l.subMonths);
+      if (l.subShipMo !== null) g.shipCollSamples.push(l.subShipMo);
+    }
   }
-  for (const g of Object.values(groups)) g.revenue = Math.round((avgPrice[g.type] || 0) * g.deliveries * 100) / 100;
-
-  const rows = Object.values(groups).sort((a,b) => b.month.localeCompare(a.month) || a.type.localeCompare(b.type));
-  const r2 = v => Math.round(v * 100) / 100;
-  const headers = ['Month','Type','Deliveries','Avg Monthly Price','Revenue (imputed)','Fulfillment Cost','SS Ship Cost','Total Cost','Gross Profit','GP%'];
-  const csvRows = [headers, ...rows.map(r => {
-    const gp  = r2(r.revenue - r.cogs - (r.ssKnown ? r.ssCost : 0));
-    const rev = r2(r.revenue);
-    const gpp = rev ? (Math.round(gp / rev * 1000) / 10) + '%' : '';
-    return [r.month, r.type, r.deliveries, avgPrice[r.type] || '', rev, r2(r.cogs),
-            r.ssKnown ? r2(r.ssCost) : '', r2(r.cogs + (r.ssKnown ? r.ssCost : 0)), gp, gpp];
+  const avg  = arr => arr.length ? arr.reduce((s,v) => s+v, 0) / arr.length : null;
+  const r2   = v => v !== null ? Math.round(v * 100) / 100 : null;
+  const sorted = Object.values(types).sort((a,b) => a.type.localeCompare(b.type));
+  const headers = ['Subscription Type','# Deliveries','Avg Price/mo','Avg COGS/mo','Avg SS Cost/mo','Avg Total Cost/mo','Avg GP/mo','GP%','Avg Ship Coll/mo','Net GP/mo','Net GP%'];
+  const csvRows = [headers, ...sorted.map(g => {
+    const price    = r2(avg(g.revSamples));
+    const cogs     = r2(avg(g.cogsSamples));
+    const ss       = g.ssSamples.length ? r2(avg(g.ssSamples)) : null;
+    const shipColl = g.shipCollSamples.length ? r2(avg(g.shipCollSamples)) : null;
+    const totalCost = (cogs !== null && ss !== null) ? r2(cogs + ss) : cogs;
+    const gp       = (price !== null && cogs !== null) ? r2(price - cogs) : null;
+    const gpPct    = (gp !== null && price) ? (Math.round(gp/price*1000)/10)+'%' : '';
+    const netGp    = (gp !== null && ss !== null && shipColl !== null) ? r2(gp - ss + shipColl) : null;
+    const rev4net  = (price !== null && shipColl !== null) ? price + shipColl : price;
+    const netPct   = (netGp !== null && rev4net) ? (Math.round(netGp/rev4net*1000)/10)+'%' : '';
+    return [g.type, g.deliveries, price??'', cogs??'', ss??'', totalCost??'', gp??'', gpPct, shipColl??'', netGp??'', netPct];
   })];
   const csv = csvRows.map(row => row.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-  a.download = `sub_pl_by_month.csv`;
+  a.download = `sub_pl_by_type.csv`;
   a.click();
 };
 
