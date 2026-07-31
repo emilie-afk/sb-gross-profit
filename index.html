@@ -879,7 +879,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <tr>
             <td style="padding:4px 12px 4px 0;color:var(--text)">2–3 plants</td>
             <td style="padding:4px 12px;text-align:center">
-              <input type="number" id="vd-disc-2" value="0.20" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
+              <input type="number" id="vd-disc-2" value="0.25" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
             </td>
             <td style="padding:4px 12px;text-align:center;color:var(--muted)" id="vd-cur-2">—</td>
             <td style="padding:4px 12px;text-align:center">
@@ -889,7 +889,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <tr>
             <td style="padding:4px 12px 4px 0;color:var(--text)">4–7 plants</td>
             <td style="padding:4px 12px;text-align:center">
-              <input type="number" id="vd-disc-3" value="0.50" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
+              <input type="number" id="vd-disc-3" value="0.55" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
             </td>
             <td style="padding:4px 12px;text-align:center;color:var(--muted)" id="vd-cur-3">—</td>
             <td style="padding:4px 12px;text-align:center">
@@ -899,7 +899,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <tr>
             <td style="padding:4px 12px 4px 0;color:var(--text)">8+ plants</td>
             <td style="padding:4px 12px;text-align:center">
-              <input type="number" id="vd-disc-4" value="0.60" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
+              <input type="number" id="vd-disc-4" value="0.65" min="0" step="0.05" class="search-input" style="width:70px;text-align:center">
             </td>
             <td style="padding:4px 12px;text-align:center;color:var(--muted)" id="vd-cur-4">—</td>
             <td style="padding:4px 12px;text-align:center">
@@ -2138,7 +2138,7 @@ function renderSubPage() {
       <td class="num ${missing ? 'missing' : ''}">${missing ? '?' : fmt(li.lineCogs)}</td>
       <td class="num ${gpClass(li.lineGp)}">${fmt(li.lineGp)}</td>
       <td class="num ${gpClass(li.lineGpPct)}">${li.lineGpPct !== null ? li.lineGpPct.toFixed(1)+'%' : '—'}</td>
-      <td class="num">${li.shipCollected !== null ? fmt(li.shipCollected) : ''}</td>
+      <td class="num">${li.subShipMo !== null ? fmt(li.subShipMo) : (li.shipCollected !== null ? fmt(li.shipCollected) : '')}</td>
       <td class="num ${deltaClass(li.shipDelta)}">${li.shipDelta !== null ? fmt(li.shipDelta) : ''}</td>
       <td class="num ${gpClass(li.lineNetGp)}">${li.lineNetGp !== null ? fmt(li.lineNetGp) : '—'}</td>
       <td class="num ${gpClass(li.lineNetGpPct)}">${li.lineNetGpPct !== null ? li.lineNetGpPct.toFixed(1)+'%' : '—'}</td>

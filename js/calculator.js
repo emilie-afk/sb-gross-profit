@@ -136,18 +136,14 @@ function mcgPlantUnits(sku, qty) {
       s.startsWith('MODERNPOT')) return 0;
   // Faire wholesale — different pricing model, exclude from volume discount
   if (s.startsWith('BD-') || s.startsWith('4X-')) return 0;
+  // Subscriptions — excluded from volume discount
+  if (s.startsWith('SUB') || s.startsWith('GSUB')) return 0;
   // Rack/Pack SKUs: count encoded in last dash segment (e.g. RAKN2918-6 → 6 plants)
   if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ') || s.startsWith('RAJN') ||
       s.startsWith('TAKM') || s.startsWith('XAZZ')) {
     const parts = s.split('-');
     const count = parseInt(parts[parts.length - 1], 10);
     return (count >= 6 && count <= 500) ? count * qty : 0;
-  }
-  // Subscription: plants/mo encoded in SKU (e.g. GSUB7-2-6 → 2 plants/mo)
-  if (s.startsWith('SUB') || s.startsWith('GSUB')) {
-    const nums = s.split('-').map(p => parseInt(p, 10)).filter(n => n > 0 && n <= 50);
-    const plants = nums.length >= 2 ? nums[nums.length - 2] : (nums[0] || 1);
-    return plants * qty;
   }
   // Default: 1 plant per unit
   return qty;
@@ -558,7 +554,20 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     if (ship !== null) orderShipping.set(name, ship);
   }
 
-  // ── Pre-pass 2: count MCG plant units per order (for volume discount) ──
+  // ── Pre-pass 2: total line revenue per order (for shipping proration in mixed orders) ──
+  const orderRevTotals = new Map(); // orderNum → sum of all line revenues
+  for (const row of orderRows) {
+    const name = (row['Name'] || '').trim();
+    const sku  = (row['Lineitem sku'] || '').trim();
+    if (!name || !sku || sku.toLowerCase() === 'nan') continue;
+    const unitPrice = cleanMoney(row['Lineitem price']) || 0;
+    const lineDisc  = cleanMoney(row['Lineitem discount']) || 0;
+    const qty       = parseInt(row['Lineitem quantity'] || '1') || 1;
+    const lineRev   = Math.max(0, Math.round((unitPrice * qty - lineDisc) * 100) / 100);
+    orderRevTotals.set(name, (orderRevTotals.get(name) || 0) + lineRev);
+  }
+
+  // ── Pre-pass 3: count MCG plant units per order (for volume discount) ──
   const orderMcgPlants = new Map(); // orderNum → total plant units
   for (const row of orderRows) {
     const name = (row['Name'] || '').trim();
@@ -636,6 +645,21 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const isFirstRow    = !orderSeen.has(orderNum);
     const orderNumClean = orderNum.replace(/^#/, '');
     const ssRate        = shipStationCosts.get(orderNumClean) || null;
+
+    // For subscription SKUs: compute per-month shipping allocated to this line,
+    // prorated by this line's revenue share of the order total.
+    // This correctly handles mixed orders (sub + regular items) where the full
+    // order shipping would otherwise be mis-attributed to the subscription.
+    const isSubSku = /^(SUB|GSUB)/i.test(sku);
+    let subShipMo = null;
+    if (isSubSku) {
+      const rawOrderShip  = cleanMoney(row['Shipping']) || 0;
+      const orderRevTotal = orderRevTotals.get(orderNum) || 1;
+      const thisLineRev   = Math.max(0, Math.round(((cleanMoney(row['Lineitem price']) || 0) * qty
+                              - (cleanMoney(row['Lineitem discount']) || 0)) * 100) / 100);
+      const revShare      = orderRevTotal > 0 ? Math.min(thisLineRev / orderRevTotal, 1) : 1;
+      subShipMo = Math.round(rawOrderShip * revShare / subMonths * 100) / 100;
+    }
 
     // Order total = Shopify Total minus taxes (taxes are pass-through, not revenue)
     const orderTax    = isFirstRow ? (cleanMoney(row['Taxes']) || 0) : 0;
@@ -750,7 +774,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
       lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
-      isInfluencerSample, subMonths, mcgVolDisc,
+      isInfluencerSample, subMonths, mcgVolDisc, subShipMo,
     });
 
     orderSeen.add(orderNum);
