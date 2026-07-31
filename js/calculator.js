@@ -646,19 +646,35 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const orderNumClean = orderNum.replace(/^#/, '');
     const ssRate        = shipStationCosts.get(orderNumClean) || null;
 
+    // Expected monthly shipping fee for subscription SKUs (rates effective until Jul 2026)
+    const SUB_SHIP_NORMAL = 6.99;
+    const SUB_SHIP_POT    = 7.99;
+
     // For subscription SKUs: compute per-month shipping allocated to this line,
     // prorated by this line's revenue share of the order total.
     // This correctly handles mixed orders (sub + regular items) where the full
     // order shipping would otherwise be mis-attributed to the subscription.
     const isSubSku = /^(SUB|GSUB)/i.test(sku);
-    let subShipMo = null;
+    let subShipMo = null, expSubShipMo = null, subSSCostMo = null, subShipLoss = null;
     if (isSubSku) {
       const rawOrderShip  = cleanMoney(row['Shipping']) || 0;
       const orderRevTotal = orderRevTotals.get(orderNum) || 1;
       const thisLineRev   = Math.max(0, Math.round(((cleanMoney(row['Lineitem price']) || 0) * qty
                               - (cleanMoney(row['Lineitem discount']) || 0)) * 100) / 100);
       const revShare      = orderRevTotal > 0 ? Math.min(thisLineRev / orderRevTotal, 1) : 1;
-      subShipMo = Math.round(rawOrderShip * revShare / subMonths * 100) / 100;
+      subShipMo           = Math.round(rawOrderShip * revShare / subMonths * 100) / 100;
+
+      // Expected rate: $7.99 if clay pot upgrade, $6.99 for normal
+      const skuUp  = sku.toUpperCase();
+      expSubShipMo = (skuUp.includes('POT') || skuUp.includes('UPGRADE'))
+                       ? SUB_SHIP_POT : SUB_SHIP_NORMAL;
+
+      // Actual ShipStation cost per month (prorated for mixed orders)
+      if (ssRate !== null) {
+        subSSCostMo = Math.round(ssRate * revShare / subMonths * 100) / 100;
+        // Ship loss = SS cost/mo − collected/mo (positive → paying more than collecting)
+        subShipLoss = Math.round((subSSCostMo - subShipMo) * 100) / 100;
+      }
     }
 
     // Order total = Shopify Total minus taxes (taxes are pass-through, not revenue)
@@ -774,7 +790,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
       lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
-      isInfluencerSample, subMonths, mcgVolDisc, subShipMo,
+      isInfluencerSample, subMonths, mcgVolDisc, subShipMo, expSubShipMo, subSSCostMo, subShipLoss,
     });
 
     orderSeen.add(orderNum);

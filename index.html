@@ -480,7 +480,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <th onclick="sortSubBy('lineCogs')" class="num">COGS <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineGp')" class="num">GP $ <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineGpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
-            <th class="num">Ship Coll/mo</th>
+            <th onclick="sortSubBy('subShipMo')" class="num">Ship Coll/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('expSubShipMo')" class="num">Exp Ship/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('subSSCostMo')" class="num">SS Cost/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('subShipLoss')" class="num">Ship Loss/mo <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('shipDelta')" class="num">Ship Δ/mo <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineNetGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineNetGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
@@ -1868,9 +1871,10 @@ function updateSubTotals() {
   const rows = subRows;
   if (!rows.length) { document.getElementById('sub-tfoot').innerHTML = ''; return; }
   const { t, hasMissCogs, hasMissNetGp } = sumFields(rows,
-    ['lineRevenue','lineCogs','lineGp','shipCollected','shipDelta','lineNetGp']);
+    ['lineRevenue','lineCogs','lineGp','subShipMo','expSubShipMo','subSSCostMo','subShipLoss','shipDelta','lineNetGp']);
   const gpPct    = t.lineRevenue ? Math.round(t.lineGp    / t.lineRevenue * 1000) / 10 : null;
   const netGpPct = (!hasMissNetGp && t.lineRevenue) ? Math.round(t.lineNetGp / t.lineRevenue * 1000) / 10 : null;
+  const lossClass = t.subShipLoss > 0 ? 'neg' : t.subShipLoss < 0 ? 'pos' : '';
   document.getElementById('sub-tfoot').innerHTML = `<tr class="totals-row">
     <td colspan="5">Total (${rows.length.toLocaleString()} lines)</td>
     <td></td>
@@ -1878,7 +1882,10 @@ function updateSubTotals() {
     <td class="num ${hasMissCogs?'missing':''}">${hasMissCogs?'~':''}${fmt(t.lineCogs)}</td>
     <td class="num ${gpClass(t.lineGp)}">${fmt(t.lineGp)}</td>
     <td class="num ${gpClass(gpPct)}">${gpPct!==null?gpPct.toFixed(1)+'%':'—'}</td>
-    <td class="num">${fmt(t.shipCollected)}</td>
+    <td class="num">${fmt(t.subShipMo)}</td>
+    <td class="num">${fmt(t.expSubShipMo)}</td>
+    <td class="num">${fmt(t.subSSCostMo)}</td>
+    <td class="num ${lossClass}">${fmt(t.subShipLoss)}</td>
     <td class="num ${deltaClass(t.shipDelta)}">${fmt(t.shipDelta)}</td>
     <td class="num ${gpClass(t.lineNetGp)}">${hasMissNetGp?'~':''}${fmt(t.lineNetGp)}</td>
     <td class="num ${gpClass(netGpPct)}">${netGpPct!==null?netGpPct.toFixed(1)+'%':'—'}</td>
@@ -2139,6 +2146,9 @@ function renderSubPage() {
       <td class="num ${gpClass(li.lineGp)}">${fmt(li.lineGp)}</td>
       <td class="num ${gpClass(li.lineGpPct)}">${li.lineGpPct !== null ? li.lineGpPct.toFixed(1)+'%' : '—'}</td>
       <td class="num">${li.subShipMo !== null ? fmt(li.subShipMo) : (li.shipCollected !== null ? fmt(li.shipCollected) : '')}</td>
+      <td class="num">${li.expSubShipMo !== null ? fmt(li.expSubShipMo) : ''}</td>
+      <td class="num">${li.subSSCostMo !== null ? fmt(li.subSSCostMo) : '—'}</td>
+      <td class="num ${li.subShipLoss > 0 ? 'neg' : li.subShipLoss < 0 ? 'pos' : ''}">${li.subShipLoss !== null ? fmt(li.subShipLoss) : '—'}</td>
       <td class="num ${deltaClass(li.shipDelta)}">${li.shipDelta !== null ? fmt(li.shipDelta) : ''}</td>
       <td class="num ${gpClass(li.lineNetGp)}">${li.lineNetGp !== null ? fmt(li.lineNetGp) : '—'}</td>
       <td class="num ${gpClass(li.lineNetGpPct)}">${li.lineNetGpPct !== null ? li.lineNetGpPct.toFixed(1)+'%' : '—'}</td>
