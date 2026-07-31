@@ -671,7 +671,8 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
 
       // Actual ShipStation cost per month (prorated for mixed orders)
       if (ssRate !== null) {
-        subSSCostMo = Math.round(ssRate * revShare / subMonths * 100) / 100;
+        // ssRate is per shipment (SS charges per box shipped), so no /subMonths
+        subSSCostMo = Math.round(ssRate * revShare * 100) / 100;
         // Ship loss = SS cost/mo − collected/mo (positive → paying more than collecting)
         subShipLoss = Math.round((subSSCostMo - subShipMo) * 100) / 100;
       }
