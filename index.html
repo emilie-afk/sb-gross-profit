@@ -475,18 +475,18 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <table id="sub-type-table" style="width:100%;border-collapse:collapse;font-size:.78rem">
         <thead>
           <tr style="border-bottom:1px solid var(--border);color:var(--muted);text-align:right">
-            <th style="text-align:left;padding:4px 10px;white-space:nowrap">Type</th>
-            <th style="padding:4px 10px;white-space:nowrap"># Orders</th>
-            <th style="padding:4px 10px;white-space:nowrap">Rev/mo</th>
-            <th style="padding:4px 10px;white-space:nowrap">COGS/mo</th>
-            <th style="padding:4px 10px;white-space:nowrap">GP$/mo</th>
-            <th style="padding:4px 10px;white-space:nowrap">GP%</th>
-            <th style="padding:4px 10px;white-space:nowrap">Ship Coll/mo</th>
-            <th style="padding:4px 10px;white-space:nowrap">Exp Ship/mo</th>
-            <th style="padding:4px 10px;white-space:nowrap">SS Cost/mo</th>
-            <th style="padding:4px 10px;white-space:nowrap">Ship Loss/mo</th>
-            <th style="padding:4px 10px;white-space:nowrap">Net GP$/mo</th>
-            <th style="padding:4px 10px;white-space:nowrap">Net GP%</th>
+            <th style="text-align:left;padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('type')">Type <span id="sth-type"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('orders')"># Orders <span id="sth-orders"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('revMo')">Rev/mo <span id="sth-revMo"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('cogsMo')">COGS/mo <span id="sth-cogsMo"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('gpMo')">GP$/mo <span id="sth-gpMo"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('gpPct')">GP% <span id="sth-gpPct"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('shipColl')">Ship Coll/mo <span id="sth-shipColl"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('expShip')">Exp Ship/mo <span id="sth-expShip"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('ssCost')">SS Cost/mo <span id="sth-ssCost"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('shipLoss')">Ship Loss/mo <span id="sth-shipLoss"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('netGpMo')">Net GP$/mo <span id="sth-netGpMo"></span></th>
+            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('netGpPct')">Net GP% <span id="sth-netGpPct"></span></th>
           </tr>
         </thead>
         <tbody id="sub-type-body"></tbody>
@@ -542,17 +542,17 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <table id="subpl-table" style="width:100%;border-collapse:collapse;font-size:.8rem">
         <thead>
           <tr style="color:var(--muted);text-align:right;border-bottom:2px solid var(--border)">
-            <th style="text-align:left;padding:5px 12px;white-space:nowrap">Subscription Type</th>
-            <th style="padding:5px 12px;white-space:nowrap"># Deliveries</th>
-            <th style="padding:5px 12px;white-space:nowrap">Avg Price/mo</th>
-            <th style="padding:5px 12px;white-space:nowrap">Avg COGS/mo</th>
-            <th style="padding:5px 12px;white-space:nowrap">Avg SS Cost/mo</th>
-            <th style="padding:5px 12px;white-space:nowrap">Avg Total Cost/mo</th>
-            <th style="padding:5px 12px;white-space:nowrap">Avg GP/mo</th>
-            <th style="padding:5px 12px;white-space:nowrap">GP%</th>
-            <th style="padding:5px 12px;white-space:nowrap">Avg Ship Coll/mo</th>
-            <th style="padding:5px 12px;white-space:nowrap">Net GP/mo</th>
-            <th style="padding:5px 12px;white-space:nowrap">Net GP%</th>
+            <th style="text-align:left;padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('type')">Subscription Type <span id="splh-type"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('deliveries')"># Deliveries <span id="splh-deliveries"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('price')">Avg Price/mo <span id="splh-price"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('cogs')">Avg COGS/mo <span id="splh-cogs"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('ss')">Avg SS Cost/mo <span id="splh-ss"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('totalCost')">Avg Total Cost/mo <span id="splh-totalCost"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('gp')">Avg GP/mo <span id="splh-gp"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('gpPct')">GP% <span id="splh-gpPct"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('shipColl')">Avg Ship Coll/mo <span id="splh-shipColl"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('netGp')">Net GP/mo <span id="splh-netGp"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('netGpPct')">Net GP% <span id="splh-netGpPct"></span></th>
           </tr>
         </thead>
         <tbody id="subpl-body"></tbody>
@@ -2193,6 +2193,13 @@ window.clearDates = () => {
 // ─── Subscription View ────────────────────────────────────────────
 const SUB_PAGE_SIZE = 100;
 let subSortKey = 'date', subSortAsc = false, subPage = 1, subRows = [];
+let subTypeSortKey = 'type', subTypeSortAsc = true;
+
+window.sortSubType = key => {
+  if (subTypeSortKey === key) subTypeSortAsc = !subTypeSortAsc;
+  else { subTypeSortKey = key; subTypeSortAsc = key === 'type'; }
+  renderSubTypeSummary();
+};
 
 window.sortSubBy = key => {
   if (subSortKey === key) subSortAsc = !subSortAsc; else { subSortKey = key; subSortAsc = false; }
@@ -2205,6 +2212,13 @@ window.changeSubPage = dir => {
 };
 
 // ─── Subscription P&L View ────────────────────────────────────────────────────
+
+let subPLSortKey = 'type', subPLSortAsc = true;
+window.sortSubPL = key => {
+  if (subPLSortKey === key) subPLSortAsc = !subPLSortAsc;
+  else { subPLSortKey = key; subPLSortAsc = key === 'type'; }
+  renderSubPLView();
+};
 
 function renderSubPLView() {
   const subLines = filteredLines.filter(l => /^(SUB|GSUB)/i.test(l.sku || ''));
@@ -2237,45 +2251,64 @@ function renderSubPLView() {
 
   const avg  = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
   const r2   = v => v !== null ? Math.round(v * 100) / 100 : null;
-  const cell = (v, isGp = false) => {
-    if (v === null) return '<td style="padding:5px 12px;text-align:right;color:var(--muted)">—</td>';
-    const cl = isGp ? (v >= 0 ? 'color:var(--green)' : 'color:var(--red)') : '';
-    return `<td style="padding:5px 12px;text-align:right;${cl}">${fmt(v)}</td>`;
-  };
-  const pctCell = (gp, rev) => {
-    if (gp === null || !rev) return '<td style="padding:5px 12px;text-align:right;color:var(--muted)">—</td>';
-    const pct = Math.round(gp / rev * 1000) / 10;
-    const cl  = pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
-    return `<td style="padding:5px 12px;text-align:right;${cl}">${pct.toFixed(1)}%</td>`;
-  };
 
-  const sorted = Object.values(types).sort((a, b) => a.type.localeCompare(b.type));
-
-  const html = sorted.map(g => {
+  // Compute all values first so we can sort
+  const rows = Object.values(types).map(g => {
     const price     = r2(avg(g.revSamples));
     const cogs      = r2(avg(g.cogsSamples));
     const ss        = g.ssSamples.length ? r2(avg(g.ssSamples)) : null;
     const shipColl  = g.shipCollSamples.length ? r2(avg(g.shipCollSamples)) : null;
     const totalCost = (cogs !== null && ss !== null) ? r2(cogs + ss) : cogs;
     const gp        = (price !== null && cogs !== null) ? r2(price - cogs) : null;
-    // Net GP = product GP - SS cost + ship collected
-    const netGp     = (gp !== null && ss !== null && shipColl !== null)
-                        ? r2(gp - ss + shipColl) : null;
+    const gpPct     = (gp !== null && price) ? Math.round(gp / price * 1000) / 10 : null;
+    const netGp     = (gp !== null && ss !== null && shipColl !== null) ? r2(gp - ss + shipColl) : null;
     const totalRevForNet = (price !== null && shipColl !== null) ? price + shipColl : price;
-    return `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:5px 12px;white-space:nowrap;font-weight:500">${g.type}</td>
-      <td style="padding:5px 12px;text-align:right;color:var(--muted)">${g.deliveries}</td>
-      ${cell(price)}
-      ${cell(cogs)}
-      ${cell(ss)}
-      ${cell(totalCost)}
-      ${cell(gp, true)}
-      ${pctCell(gp, price)}
-      ${cell(shipColl)}
-      ${cell(netGp, true)}
-      ${pctCell(netGp, totalRevForNet)}
-    </tr>`;
-  }).join('');
+    const netGpPct  = (netGp !== null && totalRevForNet) ? Math.round(netGp / totalRevForNet * 1000) / 10 : null;
+    return { type: g.type, deliveries: g.deliveries, price, cogs, ss, totalCost, gp, gpPct, shipColl, netGp, netGpPct, totalRevForNet };
+  });
+
+  // Sort
+  const k = subPLSortKey, asc = subPLSortAsc;
+  rows.sort((a, b) => {
+    let va = a[k], vb = b[k];
+    if (va === null || va === undefined) va = asc ?  Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = asc ?  Infinity : -Infinity;
+    if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return asc ? va - vb : vb - va;
+  });
+
+  // Update header indicators
+  ['type','deliveries','price','cogs','ss','totalCost','gp','gpPct','shipColl','netGp','netGpPct']
+    .forEach(col => {
+      const el = document.getElementById(`splh-${col}`);
+      if (el) el.textContent = col === k ? (asc ? ' ▲' : ' ▼') : '';
+    });
+
+  const cell = (v, posGood = true) => {
+    if (v === null) return '<td style="padding:5px 12px;text-align:right;color:var(--muted)">—</td>';
+    const cl = v > 0 ? (posGood ? 'color:var(--green)' : 'color:var(--red)')
+             : v < 0 ? (posGood ? 'color:var(--red)'   : 'color:var(--green)') : '';
+    return `<td style="padding:5px 12px;text-align:right;${cl}">${fmt(v)}</td>`;
+  };
+  const pctCell = (pct) => {
+    if (pct === null) return '<td style="padding:5px 12px;text-align:right;color:var(--muted)">—</td>';
+    const cl = pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
+    return `<td style="padding:5px 12px;text-align:right;${cl}">${pct.toFixed(1)}%</td>`;
+  };
+
+  const html = rows.map(r => `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:5px 12px;white-space:nowrap;font-weight:500">${r.type}</td>
+      <td style="padding:5px 12px;text-align:right;color:var(--muted)">${r.deliveries}</td>
+      ${cell(r.price, false)}
+      ${cell(r.cogs, false)}
+      ${cell(r.ss, false)}
+      ${cell(r.totalCost, false)}
+      ${cell(r.gp)}
+      ${pctCell(r.gpPct)}
+      ${cell(r.shipColl, false)}
+      ${cell(r.netGp)}
+      ${pctCell(r.netGpPct)}
+    </tr>`).join('');
 
   document.getElementById('subpl-body').innerHTML = html ||
     `<tr><td colspan="11" style="padding:24px;text-align:center;color:var(--muted)">No subscription data in current date range.</td></tr>`;
@@ -2366,45 +2399,62 @@ function renderSubTypeSummary() {
   const avg = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
   const r2  = v => v !== null ? Math.round(v * 100) / 100 : null;
 
-  const typeOrder = Object.keys(groups).sort((a, b) => {
-    const pA = parseInt(a), pB = parseInt(b);
-    if (pA !== pB) return pA - pB;
-    return a.localeCompare(b);
-  });
-
-  document.getElementById('sub-type-body').innerHTML = typeOrder.map(type => {
-    const g       = groups[type];
-    const revMo   = r2(avg(g.revMo));
-    const cogsMo  = r2(avg(g.cogs));
-    const gpMo    = revMo !== null && cogsMo !== null ? r2(revMo - cogsMo) : null;
-    const gpPct   = gpMo !== null && revMo ? Math.round(gpMo / revMo * 1000) / 10 : null;
+  // Build computed rows first so we can sort them
+  const rows = Object.keys(groups).map(type => {
+    const g        = groups[type];
+    const revMo    = r2(avg(g.revMo));
+    const cogsMo   = r2(avg(g.cogs));
+    const gpMo     = revMo !== null && cogsMo !== null ? r2(revMo - cogsMo) : null;
+    const gpPct    = gpMo !== null && revMo ? Math.round(gpMo / revMo * 1000) / 10 : null;
     const shipColl = r2(avg(g.shipColl));
     const ssCost   = r2(avg(g.ssCost));
-    // Ship loss per delivery: SS cost − what customer paid for shipping
     const shipLoss = ssCost !== null && shipColl !== null ? r2(ssCost - shipColl) : null;
-    // Net GP/mo = product GP + ship collected − SS cost
     const netGpMo  = gpMo !== null && shipColl !== null && ssCost !== null
                        ? r2(gpMo + shipColl - ssCost) : null;
     const totalRevNet = revMo !== null && shipColl !== null ? revMo + shipColl : null;
     const netGpPct = netGpMo !== null && totalRevNet ? Math.round(netGpMo / totalRevNet * 1000) / 10 : null;
+    return { type, orders: g.orders.size, revMo, cogsMo, gpMo, gpPct,
+             shipColl, expShip: g.expShip, ssCost, shipLoss, netGpMo, netGpPct };
+  });
 
-    const lossClass = shipLoss > 0 ? 'color:var(--red)' : shipLoss < 0 ? 'color:var(--green)' : '';
-    const netClass  = netGpMo > 0  ? 'color:var(--green)' : netGpMo < 0 ? 'color:var(--red)' : '';
-    return `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:5px 10px;white-space:nowrap;font-weight:500">${type}</td>
-      <td style="padding:5px 10px;text-align:right;color:var(--muted)">${g.orders.size}</td>
-      <td style="padding:5px 10px;text-align:right">${fmt(revMo)}</td>
-      <td style="padding:5px 10px;text-align:right">${fmt(cogsMo)}</td>
-      <td style="padding:5px 10px;text-align:right;${gpMo>=0?'color:var(--green)':'color:var(--red)'}">${fmt(gpMo)}</td>
-      <td style="padding:5px 10px;text-align:right;${gpMo>=0?'color:var(--green)':'color:var(--red)'}">${gpPct!==null?gpPct.toFixed(1)+'%':'—'}</td>
-      <td style="padding:5px 10px;text-align:right">${shipColl !== null ? fmt(shipColl) : '—'}</td>
-      <td style="padding:5px 10px;text-align:right">${g.expShip !== null ? fmt(g.expShip) : '—'}</td>
-      <td style="padding:5px 10px;text-align:right">${ssCost !== null ? fmt(ssCost) : '—'}</td>
-      <td style="padding:5px 10px;text-align:right;${lossClass}">${shipLoss !== null ? fmt(shipLoss) : '—'}</td>
-      <td style="padding:5px 10px;text-align:right;${netClass}">${fmt(netGpMo)}</td>
-      <td style="padding:5px 10px;text-align:right;${netClass}">${netGpPct!==null?netGpPct.toFixed(1)+'%':'—'}</td>
-    </tr>`;
-  }).join('');
+  // Sort
+  const k = subTypeSortKey, asc = subTypeSortAsc;
+  rows.sort((a, b) => {
+    let va = a[k], vb = b[k];
+    if (va === null || va === undefined) va = asc ?  Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = asc ?  Infinity : -Infinity;
+    if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+    return asc ? va - vb : vb - va;
+  });
+
+  // Update header sort indicators
+  ['type','orders','revMo','cogsMo','gpMo','gpPct','shipColl','expShip','ssCost','shipLoss','netGpMo','netGpPct']
+    .forEach(col => {
+      const el = document.getElementById(`sth-${col}`);
+      if (el) el.textContent = col === k ? (asc ? ' ▲' : ' ▼') : '';
+    });
+
+  const cl = (v, posGood = true) => {
+    if (v === null || v === undefined) return '';
+    if (v > 0) return posGood ? 'color:var(--green)' : 'color:var(--red)';
+    if (v < 0) return posGood ? 'color:var(--red)'   : 'color:var(--green)';
+    return '';
+  };
+
+  document.getElementById('sub-type-body').innerHTML = rows.map(r => `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:5px 10px;white-space:nowrap;font-weight:500">${r.type}</td>
+      <td style="padding:5px 10px;text-align:right;color:var(--muted)">${r.orders}</td>
+      <td style="padding:5px 10px;text-align:right">${fmt(r.revMo)}</td>
+      <td style="padding:5px 10px;text-align:right">${fmt(r.cogsMo)}</td>
+      <td style="padding:5px 10px;text-align:right;${cl(r.gpMo)}">${fmt(r.gpMo)}</td>
+      <td style="padding:5px 10px;text-align:right;${cl(r.gpPct)}">${r.gpPct!==null?r.gpPct.toFixed(1)+'%':'—'}</td>
+      <td style="padding:5px 10px;text-align:right">${r.shipColl!==null?fmt(r.shipColl):'—'}</td>
+      <td style="padding:5px 10px;text-align:right">${r.expShip!==null?fmt(r.expShip):'—'}</td>
+      <td style="padding:5px 10px;text-align:right">${r.ssCost!==null?fmt(r.ssCost):'—'}</td>
+      <td style="padding:5px 10px;text-align:right;${cl(r.shipLoss, false)}">${r.shipLoss!==null?fmt(r.shipLoss):'—'}</td>
+      <td style="padding:5px 10px;text-align:right;${cl(r.netGpMo)}">${fmt(r.netGpMo)}</td>
+      <td style="padding:5px 10px;text-align:right;${cl(r.netGpPct)}">${r.netGpPct!==null?r.netGpPct.toFixed(1)+'%':'—'}</td>
+    </tr>`).join('');
 }
 
 function renderSubView() {
