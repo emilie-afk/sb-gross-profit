@@ -2149,6 +2149,7 @@ window.applyOrdFilters = () => {
     return true;
   });
   orderPage = 1;
+  ordExpanded.clear();
   _renderOrderViewFromLines();
 };
 
@@ -2254,13 +2255,66 @@ function _renderOrderViewFromLines() {
   renderOrderPage();
 }
 
+const ordExpanded = new Set();
+window.toggleOrdExpand = orderNum => {
+  if (ordExpanded.has(orderNum)) ordExpanded.delete(orderNum);
+  else ordExpanded.add(orderNum);
+  renderOrderPage();
+};
+
 function renderOrderPage() {
   const start = (orderPage - 1) * ORDER_PAGE_SIZE;
   const page  = orderRows.slice(start, start + ORDER_PAGE_SIZE);
   updateOrderTotals(orderRows, 'order-tfoot');
+
+  // Build line-items lookup for this page
+  const linesByOrder = new Map();
+  for (const li of ordFilteredLines) {
+    if (!linesByOrder.has(li.orderNum)) linesByOrder.set(li.orderNum, []);
+    linesByOrder.get(li.orderNum).push(li);
+  }
+
   document.getElementById('order-table-body').innerHTML = page.map(o => {
-    const rowCls = o.missingCost ? 'style="background:rgba(248,113,113,.06)"' : '';
-    return `<tr ${rowCls}>
+    const isOpen = ordExpanded.has(o.orderNum);
+    const safe   = o.orderNum.replace(/[^a-zA-Z0-9]/g, '_');
+    const rowCls = `lm-order-row${isOpen ? ' open' : ''}${o.missingCost ? ' missing-row' : ''}`;
+    const bgStyle = o.missingCost ? ' style="background:rgba(248,113,113,.06)"' : '';
+    const lines  = linesByOrder.get(o.orderNum) || [];
+
+    const detailHtml = isOpen ? `
+      <tr id="ord-detail-${safe}" class="lm-detail-row">
+        <td colspan="15" style="padding:8px 12px!important">
+          <table class="detail-subtable">
+            <thead><tr>
+              <th>SKU</th><th>Product</th>
+              <th class="num" style="text-align:right">Qty</th>
+              <th class="num" style="text-align:right">Revenue</th>
+              <th class="num" style="text-align:right">COGS</th>
+              <th class="num" style="text-align:right">GP $</th>
+              <th class="num" style="text-align:right">GP%</th>
+              <th>Cost source</th>
+            </tr></thead>
+            <tbody>
+              ${lines.map(li => {
+                const miss = li.costSource === 'COST MISSING';
+                return `<tr>
+                  <td style="font-size:.75rem">${li.sku}</td>
+                  <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.75rem"
+                      title="${li.product}">${li.product}</td>
+                  <td class="num" style="text-align:right">${li.qty}</td>
+                  <td class="num" style="text-align:right">${fmt(li.lineRevenue)}</td>
+                  <td class="num ${miss?'missing':''}" style="text-align:right">${miss?'?':fmt(li.lineCogs)}</td>
+                  <td class="num ${gpClass(li.lineGp)}" style="text-align:right">${fmt(li.lineGp)}</td>
+                  <td class="num ${gpClass(li.lineGpPct)}" style="text-align:right">${li.lineGpPct!==null?li.lineGpPct.toFixed(1)+'%':'—'}</td>
+                  <td style="font-size:.72rem;color:var(--muted)">${li.costSource||''}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </td>
+      </tr>` : '';
+
+    return `<tr class="${rowCls}"${bgStyle} onclick="toggleOrdExpand('${o.orderNum.replace(/'/g,"\\'")}')">
       <td>${o.orderNum}</td>
       <td>${o.date || ''}</td>
       <td>${o.source}</td>
@@ -2281,7 +2335,7 @@ function renderOrderPage() {
         ${o.missingCost ? '<span class="badge badge-missing">No cost</span> ' : ''}
         ${o.shipNote ? `<span style="font-size:.72rem">${o.shipNote}</span>` : ''}
       </td>
-    </tr>`;
+    </tr>${detailHtml}`;
   }).join('');
   const max = Math.ceil(orderRows.length / ORDER_PAGE_SIZE);
   document.getElementById('page-info-ord').textContent = `${orderRows.length} orders · page ${orderPage}/${Math.max(1,max)}`;
