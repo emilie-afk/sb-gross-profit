@@ -249,7 +249,11 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   }
 
   // 1. MCG Total sheet has the exact cost — always wins
-  if (mcgCosts[key] !== undefined)     return [mcgCosts[key],     'MCG Total sheet'];
+  // Exception: Rack/Pack SKUs always use the per-plant tier formula regardless of MCG sheet
+  const isRackSku = key.startsWith('RAKN') || key.startsWith('RAKZ') ||
+                    key.startsWith('RAJZ') || key.startsWith('RAJN') ||
+                    key.startsWith('TAKM') || key.startsWith('XAZZ');
+  if (!isRackSku && mcgCosts[key] !== undefined) return [mcgCosts[key], 'MCG Total sheet'];
   // 1b. Pot SKU dot-variant suffix (e.g. EEZZ7650.WH → try base EEZZ7650)
   //     Single-unit costs like EEZZ7620.BR-1 are stored directly in mcgCosts (step 1 above)
   if (key.includes('.')) {
