@@ -240,6 +240,19 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     return [Math.round(total * 100) / 100, 'Bundle (' + labels.join(' + ') + ')'];
   }
 
+  // Rack/Pack SKUs (MCG only): must be resolved first — before any name-based overrides.
+  // Product names like "Assorted Succulent Pack" would otherwise trigger the $2 flat override.
+  // Guard with isMcgSku so HP dropship or other vendors are unaffected.
+  const isRackSku = isMcgSku(sku) && (
+                    key.startsWith('RAKN') || key.startsWith('RAKZ') ||
+                    key.startsWith('RAJZ') || key.startsWith('RAJN') ||
+                    key.startsWith('TAKM') || key.startsWith('XAZZ'));
+  if (isRackSku) {
+    const [cost, label] = mcgTierCost(sku, mcgCosts);
+    if (cost !== null) return [cost, label];
+    return [null, 'COST MISSING'];
+  }
+
   // 0. Hard overrides — these take priority over the MCG Total sheet
   // Gift cards — no physical cost
   if (/^GC\d/i.test(key)) return [0.00, 'Gift Card (no COGS)'];
@@ -255,6 +268,7 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   if (/^JN\d/i.test(key)) return [2.00, 'MCG tier (Random 2" $2)'];
   // Random succulents / succulent packs — $2/plant regardless of species
   // Matches: SKU contains RANDOM, or product name contains "random" or "succulent pack"
+  // NOTE: rack/pack SKUs (TAKM/RAKN etc.) are already handled above and never reach here
   {
     const nameU = (productName || '').toUpperCase();
     if (key.includes('RANDOM') ||
@@ -262,18 +276,6 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
         nameU.includes('SUCCULENT PACK')) {
       return [2.00, 'Random/Pack succulent ($2)'];
     }
-  }
-
-  // Rack/Pack SKUs (MCG only): always compute from tier formula — skip ALL lookup tables.
-  // Guard with isMcgSku so HP dropship or other vendors with similar prefixes are unaffected.
-  const isRackSku = isMcgSku(sku) && (
-                    key.startsWith('RAKN') || key.startsWith('RAKZ') ||
-                    key.startsWith('RAJZ') || key.startsWith('RAJN') ||
-                    key.startsWith('TAKM') || key.startsWith('XAZZ'));
-  if (isRackSku) {
-    const [cost, label] = mcgTierCost(sku, mcgCosts);
-    if (cost !== null) return [cost, label];
-    return [null, 'COST MISSING'];
   }
 
   // 1. MCG Total sheet has the exact cost — always wins
