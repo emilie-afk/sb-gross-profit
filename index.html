@@ -2116,7 +2116,7 @@ let ordFilteredLines = [];  // filteredLines after order-view-local filters
 
 window.applyOrdFilters = () => {
   const store = document.getElementById('ord-filter-store').value;
-  const isMcg = store === '17381';
+  const isMcg = store.includes('17381');
   document.getElementById('ord-sub-toggle').style.display = isMcg ? 'flex' : 'none';
   const subMode = isMcg
     ? (document.querySelector('input[name="ord-sub-radio"]:checked') || {}).value || 'all'
