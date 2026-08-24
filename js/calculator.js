@@ -219,7 +219,7 @@ function mcgTierCost(sku, mcgCosts) {
   return [null, null];
 }
 
-function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, skuAlias = {}) {
+function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, skuAlias = {}, mcgExtra = {}) {
   const key = (sku || '').toUpperCase().trim();
 
   // Composite SKU: "S3KY2997+EEZZ7650" = two products bundled — sum both costs
@@ -295,10 +295,13 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   if (productCosts[key] !== undefined) return [productCosts[key], 'Products export'];
   // 3. Manually uploaded costs CSV
   if (additionalCosts && additionalCosts[key] !== undefined) return [additionalCosts[key], 'Manual costs'];
-  // 4. MCG tier fallback — only for SKUs that look like MCG but aren't in Total sheet yet
+  // 4. MCG extra costs — SKUs not in mcg_total.json but with a known Cost Per Item (col F).
+  //    Use the full value directly; tier is skipped. Volume discount applies to this total.
+  if (mcgExtra && mcgExtra[key] !== undefined) return [mcgExtra[key], 'MCG extra'];
+  // 5. MCG tier fallback — last resort for MCG SKUs with no cost data at all
   if (isMcgSku(sku)) {
-    const [cost, label] = mcgTierCost(sku, mcgCosts);
-    if (cost !== null) return [cost, label];
+    const [tierCost, tierLabel] = mcgTierCost(sku, mcgCosts);
+    if (tierCost !== null) return [tierCost, tierLabel];
   }
   // 5. HP name-based fallback — for orders where SKU is a Shopify variant ID (all digits)
   //    Match normalized product title against hp_by_name built from product export
@@ -554,7 +557,7 @@ function _parseRfc4180(text) {
 
 // ─── Main calculation ─────────────────────────────────────────────────────────
 
-export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}, hpdShipCosts = null) {
+export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}, hpdShipCosts = null, mcgExtra = {}) {
   // ── Pre-pass: order store composition + HP weight ──
   const orderStores  = new Map(); // orderNum → Set of stores
   const orderShipping = new Map(); // orderNum → customer paid shipping
@@ -716,7 +719,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const lineRevenue = isInfluencerSample
       ? 0
       : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
-    let [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias);
+    let [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias, mcgExtra);
     const productUp = (product || '').toUpperCase();
     const isDigital = costSource === 'Printable (no COGS)' ||
                       productUp.includes('PRINTABLE') ||

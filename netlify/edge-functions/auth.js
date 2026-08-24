@@ -176,12 +176,63 @@ export default async function handler(req, context) {
   const cookieVal   = getCookie(req, COOKIE_NAME);
   const expectedVal = await sha256(sitePassword);
 
-  if (cookieVal === expectedVal) {
-    return context.next(); // Authenticated — serve the file
+  if (cookieVal !== expectedVal) {
+    // Not authenticated — return login page (nothing else leaks)
+    return loginPage();
   }
 
-  // Not authenticated — return login page (nothing else leaks)
-  return loginPage();
+  // ── Authenticated ──────────────────────────────────────────────
+
+  // Proxy: /api/mcg-extra  →  fetch Google Sheet CSV from MCG_EXTRA_SHEET_URL env var
+  // The sheet URL never reaches the client; only the parsed JSON is returned.
+  if (url.pathname === '/api/mcg-extra') {
+    const sheetUrl = Deno.env.get('MCG_EXTRA_SHEET_URL');
+    if (!sheetUrl) {
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    try {
+      const resp = await fetch(sheetUrl);
+      if (!resp.ok) return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      const csv  = await resp.text();
+      // Parse CSV: first row = headers, find SKU and "Cost Per Item" columns
+      const lines  = csv.split('\n').filter(l => l.trim());
+      const headers = parseCSVLine(lines[0]);
+      const skuIdx  = headers.findIndex(h => h.trim().toUpperCase() === 'SKU');
+      const costIdx = headers.findIndex(h => h.trim().toUpperCase() === 'COST PER ITEM');
+      if (skuIdx === -1 || costIdx === -1) {
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      const result = {};
+      for (let i = 1; i < lines.length; i++) {
+        const cols = parseCSVLine(lines[i]);
+        const sku  = (cols[skuIdx] || '').trim().toUpperCase();
+        const cost = parseFloat(cols[costIdx] || '');
+        if (sku && !isNaN(cost) && cost > 0) result[sku] = cost;
+      }
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+      });
+    } catch (e) {
+      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+  }
+
+  return context.next(); // Authenticated — serve the file
+}
+
+// Minimal CSV line parser (handles quoted fields)
+function parseCSVLine(line) {
+  const result = [];
+  let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') { inQ = !inQ; }
+    else if (c === ',' && !inQ) { result.push(cur); cur = ''; }
+    else { cur += c; }
+  }
+  result.push(cur);
+  return result;
 }
 
 export const config = { path: '/*' };

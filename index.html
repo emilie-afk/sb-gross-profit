@@ -1147,6 +1147,19 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 <script type="module">
 import { parseCSV, parseShipStation, parseAdditionalCosts, parseHpdLog, calculate, summarize } from './js/calculator.js';
 
+// ─── MCG Extra Costs — proxied via server-side edge function ──────
+// Sheet URL lives in MCG_EXTRA_SHEET_URL env var (Netlify dashboard only).
+async function fetchMcgExtraCosts() {
+  try {
+    const resp = await fetch('/api/mcg-extra');
+    if (!resp.ok) return {};
+    return await resp.json();
+  } catch (e) {
+    console.warn('MCG extra costs fetch failed:', e);
+    return {};
+  }
+}
+
 // ─── State ────────────────────────────────────────────────────────
 let ordersFiles = [], shipFile = null, costsFile = null, hpdFile = null;
 let savedOrdersTexts = null, savedShipText = null, savedCostsText = null, savedHpdText = null;
@@ -1517,7 +1530,7 @@ window.runCalc = async () => {
   errEl.style.display = 'none';
   showLoading('Loading cost tables…');
   try {
-    const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp, hpByName, skuAlias] = await Promise.all([
+    const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp, hpByName, skuAlias, mcgExtra] = await Promise.all([
       fetch('./data/mcg_total.json').then(r => r.json()),
       fetch('./data/product_costs.json').then(r => r.json()),
       fetch('./data/sku_weights.json').then(r => r.json()),
@@ -1525,6 +1538,7 @@ window.runCalc = async () => {
       fetch('./data/hp_supplement.json').then(r => r.json()).catch(() => ({})),
       fetch('./data/hp_by_name.json').then(r => r.json()).catch(() => ({})),
       fetch('./data/sku_alias.json').then(r => r.json()).catch(() => ({})),
+      fetchMcgExtraCosts(),
     ]);
 
     // Build additionalCosts: baked-in Shopify export costs + any user-uploaded overrides
@@ -1569,7 +1583,7 @@ window.runCalc = async () => {
 
     setLoadingMsg('Calculating gross profit…');
     await new Promise(r => setTimeout(r, 20));
-    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias, hpdData);
+    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias, hpdData, mcgExtra);
     renderDashboard(allLines);
 
     document.getElementById('upload-screen').style.display = 'none';
