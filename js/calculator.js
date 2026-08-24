@@ -692,6 +692,13 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       ? 0
       : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
     let [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias);
+    const productUp = (product || '').toUpperCase();
+    const isDigital = costSource === 'Printable (no COGS)' ||
+                      productUp.includes('PRINTABLE') ||
+                      productUp.includes('COLORING BOOK') ||
+                      productUp.includes('DIGITAL DOWNLOAD') ||
+                      productUp.includes('E-BOOK') ||
+                      /^(DIGITAL|PRINTABLE|EBOOK)/i.test(sku);
     // Route insurance — pass-through: cost = what customer paid, GP = $0
     const isRoute = /^ROUTEINS/i.test(sku) ||
         (product || '').toUpperCase().includes('SHIPPING PROTECTION BY ROUTE');
@@ -795,7 +802,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
       lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
-      isInfluencerSample, subMonths, mcgVolDisc, subShipMo, expSubShipMo, subSSCostMo, subShipLoss,
+      isInfluencerSample, isDigital, subMonths, mcgVolDisc, subShipMo, expSubShipMo, subSSCostMo, subShipLoss,
     });
 
     orderSeen.add(orderNum);
