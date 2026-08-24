@@ -66,12 +66,25 @@ mcg_url = os.environ.get('MCG_SHEET_URL')
 if mcg_url:
     rows = fetch_csv(mcg_url, 'MCG Total sheet')
     if rows:
+        import re as _re
         for row in rows:
             sku  = row.get('SKU', '').strip().upper()
             cost = clean_money(row.get('Cost Per Item', '') or row.get('Cost_Per_Item', ''))
             if sku and cost and cost > 0:
                 mcg_costs[sku] = cost
-        print(f"  → {len(mcg_costs)} MCG SKUs")
+                # Also index by normalized plant name for variant-SKU fallback.
+                # e.g. "S2KY2965 Frizzle Sizzle Albuca Spiralis - 2 inch" →
+                #   key "__n__frizzle sizzle albuca spiralis 2 inch" → same cost
+                # Variant SKUs not in the sheet (e.g. S2KY5477 / Dormant - Plastic Pot)
+                # are matched client-side by stripping the variant suffix.
+                desc = row.get('Description', '').strip()
+                desc_no_sku = _re.sub(r'^[A-Z0-9]{4,}\s+', '', desc, flags=_re.IGNORECASE)
+                name = desc_no_sku.split('/')[0]
+                name = _re.sub(r'[^a-z0-9\s]', ' ', name.lower())
+                name = _re.sub(r'\s+', ' ', name).strip()
+                if name:
+                    mcg_costs.setdefault('__n__' + name, cost)
+        print(f"  → {len(mcg_costs)} MCG SKUs (incl. name index)")
 else:
     print("  ✗ MCG_SHEET_URL not set — skipping")
 

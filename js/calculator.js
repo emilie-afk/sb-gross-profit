@@ -298,13 +298,19 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   // 4. MCG extra costs — SKUs not in mcg_total.json but with a known Cost Per Item (col F).
   //    Use the full value directly; tier is skipped. Volume discount applies to this total.
   if (mcgExtra && mcgExtra[key] !== undefined) return [mcgExtra[key], 'MCG extra'];
-  // 4b. MCG extra name match — for variant SKUs not in sheet, match by normalized plant name
+  // 4b. MCG extra name match — for variant SKUs not in sheet, match by normalized plant name.
+  //     Checks mcgExtra (runtime proxy) first, then mcgCosts (baked into mcg_total.json at
+  //     deploy time by build.py — now includes __n__ entries).
   //     e.g. "S2KY5477 / Dormant - Plastic Pot" → strip variant → match "frizzle sizzle albuca spiralis 2 inch"
-  if (mcgExtra && productName) {
+  if (productName) {
     const normName = productName.split('/')[0]
       .toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-    if (normName && mcgExtra['__n__' + normName] !== undefined)
-      return [mcgExtra['__n__' + normName], 'MCG extra (name match)'];
+    if (normName) {
+      if (mcgExtra && mcgExtra['__n__' + normName] !== undefined)
+        return [mcgExtra['__n__' + normName], 'MCG extra (name match)'];
+      if (mcgCosts && mcgCosts['__n__' + normName] !== undefined)
+        return [mcgCosts['__n__' + normName], 'MCG sheet (name match)'];
+    }
   }
   // 5. MCG tier fallback — last resort for MCG SKUs with no cost data at all
   if (isMcgSku(sku)) {
