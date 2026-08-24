@@ -371,6 +371,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <option value="noship">No ship cost</option>
         <option value="influencer">Influencer samples</option>
       </select>
+      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
+        <input type="checkbox" id="filter-exclude-nocost" onchange="filterTable()">
+        Exclude missing cost
+      </label>
     </div>
     <div class="table-controls" style="margin-top:8px">
       <label style="font-size:.8rem;color:var(--muted);white-space:nowrap">Date from</label>
@@ -1787,12 +1791,13 @@ function buildFilters(lines) {
 }
 
 window.filterTable = () => {
-  const q       = document.getElementById('search').value.toLowerCase();
-  const store   = document.getElementById('filter-store').value;
-  const chan     = document.getElementById('filter-channel').value;
-  const cost     = document.getElementById('filter-cost').value;
-  const dateFrom = document.getElementById('filter-date-from').value;
-  const dateTo   = document.getElementById('filter-date-to').value;
+  const q             = document.getElementById('search').value.toLowerCase();
+  const store         = document.getElementById('filter-store').value;
+  const chan          = document.getElementById('filter-channel').value;
+  const cost          = document.getElementById('filter-cost').value;
+  const excludeNoCost = document.getElementById('filter-exclude-nocost').checked;
+  const dateFrom      = document.getElementById('filter-date-from').value;
+  const dateTo        = document.getElementById('filter-date-to').value;
 
   filteredLines = allLines.filter(li => {
     if (store && li.store !== store) return false;
@@ -1802,6 +1807,7 @@ window.filterTable = () => {
     if (cost === 'noship'     && li.shipCollected === null)          return false;
     if (cost === 'noship'     && li.shipPaid !== null)               return false;
     if (cost === 'influencer' && !li.isInfluencerSample)            return false;
+    if (excludeNoCost         && li.costSource === 'COST MISSING')   return false;
     if (dateFrom && li.date && li.date < dateFrom) return false;
     if (dateTo   && li.date && li.date > dateTo)   return false;
     if (q && !`${li.orderNum} ${li.sku} ${li.product} ${li.store}`.toLowerCase().includes(q)) return false;
