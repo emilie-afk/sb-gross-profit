@@ -138,13 +138,9 @@ function mcgPlantUnits(sku, qty) {
   if (s.startsWith('BD-') || s.startsWith('4X-')) return 0;
   // Subscriptions — excluded from volume discount
   if (s.startsWith('SUB') || s.startsWith('GSUB')) return 0;
-  // Rack/Pack SKUs: count encoded in last dash segment (e.g. RAKN2918-6 → 6 plants)
+  // Rack/Pack SKUs — flat $2/plant pricing, no volume discount applies
   if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ') || s.startsWith('RAJN') ||
-      s.startsWith('TAKM') || s.startsWith('XAZZ')) {
-    const parts = s.split('-');
-    const count = parseInt(parts[parts.length - 1], 10);
-    return (count >= 6 && count <= 500) ? count * qty : 0;
-  }
+      s.startsWith('TAKM') || s.startsWith('XAZZ') || s.startsWith('AJN')) return 0;
   // xN suffix: multi-plant pack (e.g. S2JY1492x2 = 2 plants per unit)
   const xm = s.match(/X(\d+)$/);
   if (xm) return parseInt(xm[1], 10) * qty;
