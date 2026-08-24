@@ -145,6 +145,9 @@ function mcgPlantUnits(sku, qty) {
     const count = parseInt(parts[parts.length - 1], 10);
     return (count >= 6 && count <= 500) ? count * qty : 0;
   }
+  // xN suffix: multi-plant pack (e.g. S2JY1492x2 = 2 plants per unit)
+  const xm = s.match(/X(\d+)$/);
+  if (xm) return parseInt(xm[1], 10) * qty;
   // Default: 1 plant per unit
   return qty;
 }
@@ -186,6 +189,19 @@ function mcgTierCost(sku, mcgCosts) {
                                                             return [MCG_TIER['4inch_pot'],'MCG tier (4" Pot Upgrade)'];
   // Tillandsia airplants (PPJZ/PPKZ) — 2" plant tier (not in pot sheet)
   if (s.startsWith('PPJZ') || s.startsWith('PPKZ'))        return [MCG_TIER.airplant,   'MCG tier (airplant 2")'];
+  // xN suffix: multi-plant pack — multiply tier cost by pack size
+  {
+    const xm = s.match(/X(\d+)$/);
+    if (xm) {
+      const n = parseInt(xm[1], 10);
+      const base = s.slice(0, s.length - xm[0].length);
+      // Determine tier from base SKU prefix
+      let tierCost = null, tierLabel = null;
+      if (base.startsWith('S2')||base.startsWith('C2')) { tierCost = MCG_TIER['2inch']; tierLabel = '2"'; }
+      else if (['S3','C3','SX','CX','S1'].some(p=>base.startsWith(p))) { tierCost = MCG_TIER['4inch']; tierLabel = '4"'; }
+      if (tierCost !== null) return [Math.round(tierCost * n * 100) / 100, `MCG tier (${tierLabel} ×${n})`];
+    }
+  }
   // 2" base
   if (s.startsWith('S2')||s.startsWith('C2')||s.startsWith('E1031'))
                                                             return [MCG_TIER['2inch'],   'MCG tier (2")'];
