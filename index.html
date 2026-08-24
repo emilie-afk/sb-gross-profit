@@ -433,6 +433,27 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
     <!-- Order view -->
     <div id="view-order" style="display:none">
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;flex-wrap:wrap">
+      <select class="filter-select" id="ord-filter-store" onchange="applyOrdFilters()" style="min-width:130px">
+        <option value="">All stores</option>
+      </select>
+      <div id="ord-sub-toggle" style="display:none;align-items:center;gap:12px">
+        <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
+          <input type="radio" name="ord-sub-radio" id="ord-filter-sub-all" value="all" onchange="applyOrdFilters()" checked>
+          All
+        </label>
+        <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
+          <input type="radio" name="ord-sub-radio" id="ord-filter-sub-yes" value="sub" onchange="applyOrdFilters()">
+          Subscriptions only
+        </label>
+        <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
+          <input type="radio" name="ord-sub-radio" id="ord-filter-sub-no" value="nonsub" onchange="applyOrdFilters()">
+          Non-subscriptions only
+        </label>
+      </div>
+      <span id="ord-filter-count" style="font-size:.78rem;color:var(--muted);margin-left:4px"></span>
+      <button class="logout-btn" id="ord-download-btn" onclick="downloadOrderViewCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto;display:none">↓ Download CSV</button>
+    </div>
     <div class="table-wrap">
       <table id="order-table">
         <thead>
@@ -2000,6 +2021,36 @@ window.downloadMissingCosts = () => {
   a.click();
 };
 
+window.downloadOrderViewCSV = () => {
+  const store   = document.getElementById('ord-filter-store').value || 'all';
+  const subMode = (document.querySelector('input[name="ord-sub-radio"]:checked') || {}).value || 'all';
+  const from    = document.getElementById('filter-date-from').value || 'all';
+  const to      = document.getElementById('filter-date-to').value   || 'all';
+  const suffix  = [store !== 'all' ? store : '', subMode !== 'all' ? subMode : ''].filter(Boolean).join('_');
+  const headers = ['Order','Date','Channel','Store','SKU','Product','Qty',
+                   'Revenue','COGS','GP $','GP %','Cost Source',
+                   'Ship Collected','Ship Paid SS','Ship Paid HP','Ship Delta',
+                   'Net GP $','Net GP %','Ship Note'];
+  const rows = [headers];
+  for (const l of ordFilteredLines) {
+    rows.push([
+      l.orderNum, l.date, l.source || '', l.store || '', l.sku, l.product, l.qty,
+      l.lineRevenue ?? '', l.lineCogs ?? '', l.lineGp ?? '',
+      l.lineGpPct !== null && l.lineGpPct !== undefined ? l.lineGpPct + '%' : '',
+      l.costSource || '',
+      l.shipCollected ?? '', l.shipPaidSS ?? '', l.shipPaidHP ?? '',
+      l.shipDelta ?? '',
+      l.lineNetGp ?? '', l.lineNetGpPct !== null && l.lineNetGpPct !== undefined ? l.lineNetGpPct + '%' : '',
+      l.shipNote || ''
+    ]);
+  }
+  const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.download = `orders_${suffix ? suffix + '_' : ''}${from}_to_${to}.csv`;
+  a.click();
+};
+
 window.downloadDetailCSV = () => {
   const headers = ['Order','Date','Channel','Store','SKU','Product','Qty',
                    'Revenue','COGS','GP $','GP %','Cost Source',
@@ -2061,6 +2112,27 @@ window.downloadSubCSV = () => {
 let currentView = 'sku';
 let orderRows = [], orderSortKey = 'date', orderSortAsc = false, orderPage = 1;
 const ORDER_PAGE_SIZE = 100;
+let ordFilteredLines = [];  // filteredLines after order-view-local filters
+
+window.applyOrdFilters = () => {
+  const store = document.getElementById('ord-filter-store').value;
+  const isMcg = store === '17381';
+  document.getElementById('ord-sub-toggle').style.display = isMcg ? 'flex' : 'none';
+  const subMode = isMcg
+    ? (document.querySelector('input[name="ord-sub-radio"]:checked') || {}).value || 'all'
+    : 'all';
+  if (!isMcg) document.getElementById('ord-filter-sub-all').checked = true;
+  const isFiltered = !!(store || (isMcg && subMode !== 'all'));
+  document.getElementById('ord-download-btn').style.display = isFiltered ? '' : 'none';
+  ordFilteredLines = filteredLines.filter(li => {
+    if (store && li.store !== store) return false;
+    if (subMode === 'sub'    && !/^(SUB|GSUB)/i.test(li.sku || '')) return false;
+    if (subMode === 'nonsub' &&  /^(SUB|GSUB)/i.test(li.sku || '')) return false;
+    return true;
+  });
+  orderPage = 1;
+  _renderOrderViewFromLines();
+};
 
 window.switchView = view => {
   currentView = view;
@@ -2127,7 +2199,7 @@ window.sortOrderBy = key => {
   if (orderSortKey === key) orderSortAsc = !orderSortAsc;
   else { orderSortKey = key; orderSortAsc = false; }
   orderPage = 1;
-  renderOrderView();
+  _renderOrderViewFromLines();
 };
 
 window.changeOrderPage = dir => {
@@ -2137,7 +2209,21 @@ window.changeOrderPage = dir => {
 };
 
 function renderOrderView() {
-  orderRows = computeOrderRows(filteredLines);
+  // Rebuild store dropdown from current filteredLines
+  const storeEl = document.getElementById('ord-filter-store');
+  const prevStore = storeEl.value;
+  const stores = [...new Set(filteredLines.map(l => l.store).filter(Boolean))].sort();
+  storeEl.innerHTML = '<option value="">All stores</option>' +
+    stores.map(s => `<option value="${s}"${s === prevStore ? ' selected' : ''}>${s}</option>`).join('');
+  // Re-show MCG sub toggle if still on 17381
+  const isMcg = storeEl.value === '17381';
+  document.getElementById('ord-sub-toggle').style.display = isMcg ? 'flex' : 'none';
+  // Apply filters and render
+  applyOrdFilters();
+}
+
+function _renderOrderViewFromLines() {
+  orderRows = computeOrderRows(ordFilteredLines);
   orderRows.sort((a, b) => {
     let va = a[orderSortKey], vb = b[orderSortKey];
     if (va === null || va === undefined) va = orderSortAsc ? Infinity : -Infinity;
@@ -2145,7 +2231,8 @@ function renderOrderView() {
     if (typeof va === 'string') return orderSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
     return orderSortAsc ? va - vb : vb - va;
   });
-  orderPage = 1;
+  document.getElementById('ord-filter-count').textContent =
+    ordFilteredLines.length !== filteredLines.length ? `${orderRows.length} orders shown` : '';
   renderOrderPage();
 }
 
