@@ -240,17 +240,20 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     return [Math.round(total * 100) / 100, 'Bundle (' + labels.join(' + ') + ')'];
   }
 
-  // Rack/Pack SKUs (MCG only): must be resolved first — before any name-based overrides.
-  // Product names like "Assorted Succulent Pack" would otherwise trigger the $2 flat override.
-  // Guard with isMcgSku so HP dropship or other vendors are unaffected.
-  const isRackSku = isMcgSku(sku) && (
-                    key.startsWith('RAKN') || key.startsWith('RAKZ') ||
-                    key.startsWith('RAJZ') || key.startsWith('RAJN') ||
-                    key.startsWith('TAKM') || key.startsWith('XAZZ'));
+  // Rack/Pack SKUs (MCG only): detect by product name containing "PACK" + MCG vendor.
+  // Must be resolved first — before any name-based overrides — so the flat $2 override
+  // doesn't short-circuit us. We use the name to confirm it's a pack, then the dash-
+  // suffix to get the plant count (e.g. AJN1376-20 → 20 plants → $2×20 = $40).
+  const _prodUp = (productName || '').toUpperCase();
+  const _rackParts = key.split('-');
+  const _rackCount = parseInt(_rackParts[_rackParts.length - 1], 10);
+  const isRackSku = isMcgSku(sku) &&
+                    _prodUp.includes('PACK') &&
+                    _rackParts.length >= 2 &&
+                    !isNaN(_rackCount) && _rackCount >= 2;
   if (isRackSku) {
-    const [cost, label] = mcgTierCost(sku, mcgCosts);
-    if (cost !== null) return [cost, label];
-    return [null, 'COST MISSING'];
+    const total = Math.round(MCG_TIER.pack * _rackCount * 100) / 100;
+    return [total, `MCG tier (Pack ${_rackCount}×$${MCG_TIER.pack})`];
   }
 
   // 0. Hard overrides — these take priority over the MCG Total sheet

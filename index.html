@@ -379,6 +379,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <input type="checkbox" id="filter-exclude-digital" onchange="filterTable()">
         Exclude digital
       </label>
+      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
+        <input type="checkbox" id="filter-exclude-giftcard" onchange="filterTable()">
+        Exclude gift cards
+      </label>
     </div>
     <div class="table-controls" style="margin-top:8px">
       <label style="font-size:.8rem;color:var(--muted);white-space:nowrap">Date from</label>
@@ -1801,6 +1805,7 @@ window.filterTable = () => {
   const cost          = document.getElementById('filter-cost').value;
   const excludeNoCost    = document.getElementById('filter-exclude-nocost').checked;
   const excludeDigital   = document.getElementById('filter-exclude-digital').checked;
+  const excludeGiftCard  = document.getElementById('filter-exclude-giftcard').checked;
   const dateFrom      = document.getElementById('filter-date-from').value;
   const dateTo        = document.getElementById('filter-date-to').value;
 
@@ -1814,6 +1819,7 @@ window.filterTable = () => {
     if (cost === 'influencer' && !li.isInfluencerSample)            return false;
     if (excludeNoCost         && li.costSource === 'COST MISSING')   return false;
     if (excludeDigital        && li.isDigital)                       return false;
+    if (excludeGiftCard       && li.costSource === 'Gift Card (no COGS)') return false;
     if (dateFrom && li.date && li.date < dateFrom) return false;
     if (dateTo   && li.date && li.date > dateTo)   return false;
     if (q && !`${li.orderNum} ${li.sku} ${li.product} ${li.store}`.toLowerCase().includes(q)) return false;
