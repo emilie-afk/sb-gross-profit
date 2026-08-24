@@ -188,11 +188,11 @@ export default async function handler(req, context) {
   if (url.pathname === '/api/mcg-extra') {
     const sheetUrl = Deno.env.get('MCG_EXTRA_SHEET_URL');
     if (!sheetUrl) {
-      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({_debug:'no MCG_EXTRA_SHEET_URL env var'}), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
     try {
       const resp = await fetch(sheetUrl);
-      if (!resp.ok) return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      if (!resp.ok) return new Response(JSON.stringify({_debug:`fetch failed: ${resp.status} ${resp.statusText}`}), { status: 200, headers: { 'Content-Type': 'application/json' } });
       const csv  = await resp.text();
       // Parse CSV: first row = headers, find SKU and "Cost Per Item" columns
       const lines  = csv.split(/\r?\n/).filter(l => l.trim());
@@ -227,7 +227,7 @@ export default async function handler(req, context) {
         headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
       });
     } catch (e) {
-      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({_debug:`exception: ${e.message}`}), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }
   }
 
