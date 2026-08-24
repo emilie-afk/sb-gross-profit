@@ -195,19 +195,32 @@ export default async function handler(req, context) {
       if (!resp.ok) return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
       const csv  = await resp.text();
       // Parse CSV: first row = headers, find SKU and "Cost Per Item" columns
-      const lines  = csv.split('\n').filter(l => l.trim());
+      const lines  = csv.split(/\r?\n/).filter(l => l.trim());
       const headers = parseCSVLine(lines[0]);
       const skuIdx  = headers.findIndex(h => h.trim().toUpperCase() === 'SKU');
       const costIdx = headers.findIndex(h => h.trim().toUpperCase() === 'COST PER ITEM');
       if (skuIdx === -1 || costIdx === -1) {
         return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
+      const descIdx = headers.findIndex(h => h.trim().toUpperCase() === 'DESCRIPTION');
       const result = {};
       for (let i = 1; i < lines.length; i++) {
         const cols = parseCSVLine(lines[i]);
         const sku  = (cols[skuIdx] || '').trim().toUpperCase();
         const cost = parseFloat(cols[costIdx] || '');
-        if (sku && !isNaN(cost) && cost > 0) result[sku] = cost;
+        if (!sku || isNaN(cost) || cost <= 0) continue;
+        result[sku] = cost;
+        // Also index by normalized plant name (strip SKU prefix + variant suffix)
+        // so variant SKUs not in the sheet can still match by name
+        if (descIdx !== -1) {
+          const desc = (cols[descIdx] || '').replace(/^[A-Z0-9]{4,}\s+/i, ''); // strip leading SKU
+          const name = desc.split('/')[0]          // drop variant suffix
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (name) result['__n__' + name] = cost;
+        }
       }
       return new Response(JSON.stringify(result), {
         status: 200,

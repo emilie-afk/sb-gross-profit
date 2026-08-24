@@ -298,6 +298,14 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   // 4. MCG extra costs — SKUs not in mcg_total.json but with a known Cost Per Item (col F).
   //    Use the full value directly; tier is skipped. Volume discount applies to this total.
   if (mcgExtra && mcgExtra[key] !== undefined) return [mcgExtra[key], 'MCG extra'];
+  // 4b. MCG extra name match — for variant SKUs not in sheet, match by normalized plant name
+  //     e.g. "S2KY5477 / Dormant - Plastic Pot" → strip variant → match "frizzle sizzle albuca spiralis 2 inch"
+  if (mcgExtra && productName) {
+    const normName = productName.split('/')[0]
+      .toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (normName && mcgExtra['__n__' + normName] !== undefined)
+      return [mcgExtra['__n__' + normName], 'MCG extra (name match)'];
+  }
   // 5. MCG tier fallback — last resort for MCG SKUs with no cost data at all
   if (isMcgSku(sku)) {
     const [tierCost, tierLabel] = mcgTierCost(sku, mcgCosts);
