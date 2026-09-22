@@ -1038,18 +1038,50 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <th style="font-size:.72rem;color:var(--muted);font-weight:600;padding:6px 0 6px 14px;text-align:left">Shipping cost to absorb ($)</th>
           </tr>
         </thead>
+        <!-- Static rows. These were previously written as a JS template literal
+             (${[2,3,4,5].map(...)}) pasted straight into the markup, so the browser
+             rendered the placeholders literally and rejected the value attribute. -->
         <tbody id="ic-tiers-body">
-          ${[2,3,4,5].map(n => `
           <tr>
-            <td style="padding:5px 14px 5px 0;font-size:.84rem">${n} items</td>
+            <td style="padding:5px 14px 5px 0;font-size:.84rem">2 items</td>
             <td style="padding:5px 14px;text-align:center">
-              <input type="checkbox" id="ic-chk-${n}" checked style="accent-color:var(--accent);width:15px;height:15px">
+              <input type="checkbox" id="ic-chk-2" checked style="accent-color:var(--accent);width:15px;height:15px">
             </td>
             <td style="padding:5px 0 5px 14px">
-              <input type="number" id="ic-cost-${n}" value="${(4.99 + (n-2)*1).toFixed(2)}"
+              <input type="number" id="ic-cost-2" value="4.99"
                      min="0" step="0.01" class="proj-input" style="width:80px">
             </td>
-          </tr>`).join('')}
+          </tr>
+          <tr>
+            <td style="padding:5px 14px 5px 0;font-size:.84rem">3 items</td>
+            <td style="padding:5px 14px;text-align:center">
+              <input type="checkbox" id="ic-chk-3" checked style="accent-color:var(--accent);width:15px;height:15px">
+            </td>
+            <td style="padding:5px 0 5px 14px">
+              <input type="number" id="ic-cost-3" value="5.99"
+                     min="0" step="0.01" class="proj-input" style="width:80px">
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:5px 14px 5px 0;font-size:.84rem">4 items</td>
+            <td style="padding:5px 14px;text-align:center">
+              <input type="checkbox" id="ic-chk-4" checked style="accent-color:var(--accent);width:15px;height:15px">
+            </td>
+            <td style="padding:5px 0 5px 14px">
+              <input type="number" id="ic-cost-4" value="6.99"
+                     min="0" step="0.01" class="proj-input" style="width:80px">
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:5px 14px 5px 0;font-size:.84rem">5 items</td>
+            <td style="padding:5px 14px;text-align:center">
+              <input type="checkbox" id="ic-chk-5" checked style="accent-color:var(--accent);width:15px;height:15px">
+            </td>
+            <td style="padding:5px 0 5px 14px">
+              <input type="number" id="ic-cost-5" value="7.99"
+                     min="0" step="0.01" class="proj-input" style="width:80px">
+            </td>
+          </tr>
         </tbody>
       </table>
 
@@ -1149,7 +1181,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 </div>
 
 <script type="module">
-import { parseCSV, parseShipStation, parseAdditionalCosts, parseHpdLog, calculate, summarize } from './js/calculator.js';
+import { parseCSV, parseShipStation, parseAdditionalCosts, parseHpdLog, calculate, summarize, SUB_RENEWAL_CHANNEL } from './js/calculator.js';
 import { initScenarioView, renderScenarioView } from './js/scenarioUI.js';
 
 // ─── MCG Extra Costs — proxied via server-side edge function ──────
@@ -1186,33 +1218,87 @@ let _projHpByName = {}, _projSkuAlias = {};
 const LS_KEY = 'gp_saved_files';
 const MAX_ORDERS = 8, MAX_SHIP = 4, MAX_COSTS = 2, MAX_HPD = 4;
 
+// ─── File store ───────────────────────────────────────────────────────────────
+// A Shopify export runs to several MB, well past localStorage's ~5 MB quota, so
+// saving one used to throw QuotaExceededError and silently drop the file.
+// Metadata (name, type, date, range) stays in localStorage — it is tiny and the
+// chip list renders synchronously from it — while the CSV text itself lives in
+// IndexedDB, which has no practical size limit. Files saved before this change
+// still carry their text inline and are read back transparently.
+const IDB_NAME = 'gp_file_store', IDB_STORE = 'texts';
+let _idbPromise = null;
+function idb() {
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve, reject) => {
+    if (!window.indexedDB) { resolve(null); return; }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(IDB_STORE)) req.result.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => { console.warn('IndexedDB unavailable:', req.error); resolve(null); };
+  });
+  return _idbPromise;
+}
+function idbRun(mode, fn) {
+  return idb().then(db => {
+    if (!db) return null;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, mode);
+      const req = fn(tx.objectStore(IDB_STORE));
+      tx.oncomplete = () => resolve(req ? req.result : null);
+      tx.onerror    = () => reject(tx.error);
+    });
+  }).catch(e => { console.warn('IndexedDB error:', e); return null; });
+}
+const idbPutText    = (id, text) => idbRun('readwrite', st => st.put(text, String(id)));
+const idbGetText    = id         => idbRun('readonly',  st => st.get(String(id)));
+const idbDeleteText = id         => idbRun('readwrite', st => st.delete(String(id)));
+const idbClearTexts = ()         => idbRun('readwrite', st => st.clear());
+
+/** Text for a saved entry — from IndexedDB, or inline for pre-migration entries. */
+async function getSavedText(file) {
+  if (!file) return null;
+  if (file.text) return file.text;              // saved before the IndexedDB move
+  return await idbGetText(file.id);
+}
+
 function lsLoad() {
   try { return JSON.parse(localStorage.getItem(LS_KEY) || '[]'); } catch { return []; }
 }
 function lsSave(arr) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch(e) {
-    console.warn('localStorage full, skipping save:', e);
+    console.warn('Could not save file list:', e);
   }
 }
-function saveFilesToLS(name, type, text, range = null) {
+async function saveFilesToLS(name, type, text, range = null) {
   let arr = lsLoad();
+  const dropped = arr.filter(f => f.name === name && f.type === type);
   arr = arr.filter(f => !(f.name === name && f.type === type));
-  arr.push({ id: Date.now(), name, type, savedAt: new Date().toLocaleDateString(), text, range });
+  const id = Date.now();
+  arr.push({ id, name, type, savedAt: new Date().toLocaleDateString(), range });
   const orders = arr.filter(f => f.type === 'orders').slice(-MAX_ORDERS);
   const ship   = arr.filter(f => f.type === 'ship').slice(-MAX_SHIP);
   const costs  = arr.filter(f => f.type === 'costs').slice(-MAX_COSTS);
   const hpd    = arr.filter(f => f.type === 'hpd').slice(-MAX_HPD);
-  lsSave([...orders, ...ship, ...costs, ...hpd]);
+  const kept = [...orders, ...ship, ...costs, ...hpd];
+  const keptIds = new Set(kept.map(f => f.id));
+  await idbPutText(id, text);
+  // Drop the text of anything that fell out of the list so the store can't grow forever
+  for (const f of [...dropped, ...arr]) if (!keptIds.has(f.id)) await idbDeleteText(f.id);
+  lsSave(kept);
 }
-function deleteFromLS(id) {
-  // Remove key first to free space, then re-save the filtered list
+async function deleteFromLS(id) {
   const arr = lsLoad().filter(f => f.id !== id);
   localStorage.removeItem(LS_KEY);
   lsSave(arr);
+  await idbDeleteText(id);
   renderSavedFiles();
 }
+window.deleteFromLS = deleteFromLS;
 window.clearAllSavedFiles = () => {
   localStorage.removeItem(LS_KEY);
+  idbClearTexts();
   savedOrdersTexts = null; savedShipText = null; savedCostsText = null; savedHpdText = null;
   selectedSavedOrders = new Set(); selectedSavedShip = null; selectedSavedCosts = null; selectedSavedHpd = null;
   renderSavedFiles();
@@ -1244,7 +1330,7 @@ function renderSavedFiles() {
 // Track which saved IDs are currently selected
 let selectedSavedOrders = new Set(), selectedSavedShip = null;
 
-window.selectSaved = (id, type) => {
+window.selectSaved = async (id, type) => {
   const all = lsLoad();
   const file = all.find(f => f.id === id);
   if (!file) return;
@@ -1257,7 +1343,8 @@ window.selectSaved = (id, type) => {
       selectedSavedOrders.add(id);
       document.getElementById('chip-' + id)?.classList.add('active');
     }
-    savedOrdersTexts = [...selectedSavedOrders].map(sid => all.find(f => f.id === sid)?.text).filter(Boolean);
+    savedOrdersTexts = (await Promise.all([...selectedSavedOrders]
+      .map(sid => getSavedText(all.find(f => f.id === sid))))).filter(Boolean);
     const names = [...selectedSavedOrders].map(sid => all.find(f => f.id === sid)?.name).filter(Boolean);
     if (savedOrdersTexts.length) {
       document.getElementById('name-orders').textContent = names.join(', ');
@@ -1278,7 +1365,7 @@ window.selectSaved = (id, type) => {
       if (selectedSavedShip) document.getElementById('chip-' + selectedSavedShip)?.classList.remove('active');
       selectedSavedShip = id;
       document.getElementById('chip-' + id)?.classList.add('active');
-      savedShipText = file.text;
+      savedShipText = await getSavedText(file);
       document.getElementById('name-ship').textContent = file.name;
       document.getElementById('zone-ship').classList.add('has-file');
     }
@@ -1293,7 +1380,7 @@ window.selectSaved = (id, type) => {
       if (selectedSavedCosts) document.getElementById('chip-' + selectedSavedCosts)?.classList.remove('active');
       selectedSavedCosts = id;
       document.getElementById('chip-' + id)?.classList.add('active');
-      savedCostsText = file.text;
+      savedCostsText = await getSavedText(file);
       document.getElementById('name-costs').textContent = file.name;
       document.getElementById('zone-costs').classList.add('has-file');
     }
@@ -1308,7 +1395,7 @@ window.selectSaved = (id, type) => {
       if (selectedSavedHpd) document.getElementById('chip-' + selectedSavedHpd)?.classList.remove('active');
       selectedSavedHpd = id;
       document.getElementById('chip-' + id)?.classList.add('active');
-      savedHpdText = file.text;
+      savedHpdText = await getSavedText(file);
       document.getElementById('name-hpd').textContent = file.name;
       document.getElementById('zone-hpd').classList.add('has-file');
     }
@@ -1321,15 +1408,15 @@ window.selectSaved = (id, type) => {
 // Init saved files on load
 renderSavedFiles();
 // Auto-select all saved orders files + most recent ship file so Calculate is ready immediately
-(function autoSelectSaved() {
+(async function autoSelectSaved() {
   const all = lsLoad();
-  all.filter(f => f.type === 'orders').forEach(f => selectSaved(f.id, 'orders'));
+  for (const f of all.filter(f => f.type === 'orders')) await selectSaved(f.id, 'orders');
   const ships = all.filter(f => f.type === 'ship');
-  if (ships.length) selectSaved(ships[ships.length - 1].id, 'ship');
+  if (ships.length) await selectSaved(ships[ships.length - 1].id, 'ship');
   const costsArr = all.filter(f => f.type === 'costs');
-  if (costsArr.length) selectSaved(costsArr[costsArr.length - 1].id, 'costs');
+  if (costsArr.length) await selectSaved(costsArr[costsArr.length - 1].id, 'costs');
   const hpdArr = all.filter(f => f.type === 'hpd');
-  if (hpdArr.length) selectSaved(hpdArr[hpdArr.length - 1].id, 'hpd');
+  if (hpdArr.length) await selectSaved(hpdArr[hpdArr.length - 1].id, 'hpd');
   updatePeriodMatch();
 })();
 
@@ -1479,7 +1566,7 @@ window.handleFile = async (input, type) => {
     document.getElementById('zone-orders').classList.add('has-file');
     for (const f of ordersFiles) {
       const text = await f.text();
-      saveFilesToLS(f.name, 'orders', text, detectDateRange(text, 'orders'));
+      await saveFilesToLS(f.name, 'orders', text, detectDateRange(text, 'orders'));
     }
     renderSavedFiles();
   } else if (type === 'ship') {
@@ -1488,7 +1575,7 @@ window.handleFile = async (input, type) => {
     if (shipFile) {
       document.getElementById('zone-ship').classList.add('has-file');
       const text = await shipFile.text();
-      saveFilesToLS(shipFile.name, 'ship', text, detectDateRange(text, 'ship'));
+      await saveFilesToLS(shipFile.name, 'ship', text, detectDateRange(text, 'ship'));
       renderSavedFiles();
     }
   } else if (type === 'costs') {
@@ -1497,7 +1584,7 @@ window.handleFile = async (input, type) => {
     if (costsFile) {
       document.getElementById('zone-costs').classList.add('has-file');
       const text = await costsFile.text();
-      saveFilesToLS(costsFile.name, 'costs', text);
+      await saveFilesToLS(costsFile.name, 'costs', text);
       renderSavedFiles();
     }
   } else if (type === 'hpd') {
@@ -1506,7 +1593,7 @@ window.handleFile = async (input, type) => {
     if (hpdFile) {
       document.getElementById('zone-hpd').classList.add('has-file');
       const text = await hpdFile.text();
-      saveFilesToLS(hpdFile.name, 'hpd', text, detectDateRange(text, 'hpd'));
+      await saveFilesToLS(hpdFile.name, 'hpd', text, detectDateRange(text, 'hpd'));
       renderSavedFiles();
     }
   }
@@ -1759,8 +1846,11 @@ function renderChannelBreakdown(s, totChRev) {
     const topByRev = stores.sort((a,b) => b.revenue - a.revenue)[0];
     const topByGp  = [...stores].sort((a,b) => b.gp - a.gp)[0];
 
-    html += `<tr>
-      <td><strong>${ch || 'Unknown'}</strong></td>
+    const isSubRow = ch === SUB_RENEWAL_CHANNEL;
+    html += `<tr${isSubRow ? ' style="background:rgba(56,189,248,.06)"' : ''}>
+      <td><strong>${ch || 'Unknown'}</strong>${isSubRow
+        ? `<div style="font-size:.7rem;color:var(--muted);font-weight:400;margin-top:2px">Cost only — revenue was collected upfront. See 🔁 Subscriptions.</div>`
+        : ''}</td>
       <td class="num">${fmt(cv.revenue)}</td>
       <td class="num">${revPct.toFixed(1)}%</td>
       <td class="num">${fmt(cv.gp)}</td>
@@ -1787,6 +1877,12 @@ function renderChannelBreakdown(s, totChRev) {
   </tr>`;
 
   html += `</tbody></table>`;
+  html += `<p style="font-size:.72rem;color:var(--muted);margin-top:8px;line-height:1.6">
+    <strong>Subscription renewals (prepaid)</strong> holds the delivery legs of subscriptions whose
+    full term was charged on the order that started them. Those lines carry fulfilment cost with no
+    revenue of their own, so the row shows a loss by design — it is not a channel that loses money.
+    Subscription unit economics, pairing each delivery's cost with the monthly price actually
+    charged, are in the <strong>🔁 Subscriptions</strong> and <strong>📊 Sub P&amp;L</strong> tabs.</p>`;
   el.innerHTML = html;
 }
 
