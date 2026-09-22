@@ -595,7 +595,7 @@ write_json('sku_alias.json',     sku_alias)
 write_json('vendor_costs.json',  vendor_catalog)
 write_json('vendor_index.json',  vendor_index)
 write_json('vendor_import_report.json', {
-    'generatedAt': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+    'generatedAt': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
     'stats': vendor_stats,
     'warnings': vendor_warnings,
 })

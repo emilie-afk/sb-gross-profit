@@ -144,10 +144,33 @@ function mcgPlantUnits(sku, qty) {
   if (s.startsWith('RAKN') || s.startsWith('RAKZ') || s.startsWith('RAJZ') || s.startsWith('RAJN') ||
       s.startsWith('TAKM') || s.startsWith('XAZZ') || s.startsWith('AJN')) return 0;
   // xN suffix: multi-plant pack (e.g. S2JY1492x2 = 2 plants per unit)
-  const xm = s.match(/X(\d+)$/);
-  if (xm) return parseInt(xm[1], 10) * qty;
+  const pack = parsePackSuffix(s);
+  if (pack) return pack.n * qty;
   // Default: 1 plant per unit
   return qty;
+}
+
+/**
+ * Multi-plant pack suffix: "S2JY1492x2" = 2 plants per unit.
+ *
+ * The suffix is only real when the part before it is a full MCG SKU and the
+ * count is a plausible pack size. Without those guards a plain species SKU that
+ * happens to contain an 'x' before digits is read as a giant pack — the real
+ * case was S2Kx1125 (one $7.20 cactus) being priced as a 1,125-plant pack at
+ * ~$3,769 and dragging its whole order into the top volume-discount tier.
+ *
+ * Every genuine pack SKU in the Jul–Sep 2026 exports is <8+ char base>x2/x4/x8.
+ */
+const MAX_PACK_SIZE = 24;
+function parsePackSuffix(skuUpper) {
+  const m = (skuUpper || '').match(/X(\d+)$/);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  if (!(n >= 2 && n <= MAX_PACK_SIZE)) return null;
+  const base = skuUpper.slice(0, skuUpper.length - m[0].length);
+  // A real base SKU looks like S2KY1048 / CXVY6173 / S2JN57772 — never "S2K".
+  if (base.length < 8 || !/\d$/.test(base)) return null;
+  return { base, n };
 }
 
 function mcgTierCost(sku, mcgCosts) {
@@ -189,10 +212,9 @@ function mcgTierCost(sku, mcgCosts) {
   if (s.startsWith('PPJZ') || s.startsWith('PPKZ'))        return [MCG_TIER.airplant,   'MCG tier (airplant 2")'];
   // xN suffix: multi-plant pack — multiply tier cost by pack size
   {
-    const xm = s.match(/X(\d+)$/);
-    if (xm) {
-      const n = parseInt(xm[1], 10);
-      const base = s.slice(0, s.length - xm[0].length);
+    const pack = parsePackSuffix(s);
+    if (pack) {
+      const { base, n } = pack;
       // Determine tier from base SKU prefix
       let tierCost = null, tierLabel = null;
       if (base.startsWith('S2')||base.startsWith('C2')) { tierCost = MCG_TIER['2inch']; tierLabel = '2"'; }
@@ -447,15 +469,28 @@ function cleanMoney(val) {
 
 // ─── CSV Parser ───────────────────────────────────────────────────────────────
 
+/**
+ * RFC 4180 CSV parser.
+ *
+ * This used to split on newlines first and parse each line separately, which
+ * silently corrupted any record containing a quoted field with an embedded
+ * newline. Shopify's 'Notes' and 'Note Attributes' columns regularly do: in the
+ * Jul 2026 export 995 of 3,788 line records (26%) were affected, and because
+ * those two columns sit at positions 45-46, everything after them — Cancelled
+ * at, Refunded Amount, Vendor, Tags, Source and Lineitem discount — was lost or
+ * shifted on those records, while each stray fragment became a phantom row
+ * (5,340 rows parsed from 3,794 real records).
+ */
 export function parseCSV(text) {
-  const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-  const headers = parseCSVRow(lines[0]);
+  const all = _parseRfc4180(text);
+  if (!all.length) return [];
+  const headers = all[0];
   const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    const vals = parseCSVRow(lines[i]);
+  for (let i = 1; i < all.length; i++) {
+    const vals = all[i];
+    if (!vals.some(v => String(v).trim())) continue;
     const obj = {};
-    headers.forEach((h, idx) => { obj[h] = vals[idx] || ''; });
+    headers.forEach((h, idx) => { obj[h] = vals[idx] ?? ''; });
     rows.push(obj);
   }
   return rows;
