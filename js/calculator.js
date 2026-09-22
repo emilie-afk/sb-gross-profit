@@ -731,6 +731,19 @@ function _parseRfc4180(text) {
   return rows;
 }
 
+/**
+ * A Succulents Box subscription is charged in full on the order that starts it,
+ * so every later delivery arrives as its own order with Lineitem price 0.00 and
+ * only a fulfilment cost. Those lines are real COGS against revenue that was
+ * already recognised elsewhere — reporting them inside a normal sales channel
+ * makes that channel's margin look catastrophic when nothing is wrong.
+ *
+ * They are therefore bucketed under their own clearly named channel. Their unit
+ * economics belong in the Subscriptions and Sub P&L views, which pair each
+ * delivery's cost with the monthly price actually charged.
+ */
+export const SUB_RENEWAL_CHANNEL = 'Subscription renewals (prepaid)';
+
 // ─── Main calculation ─────────────────────────────────────────────────────────
 
 export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}, hpdShipCosts = null, mcgExtra = {}, vendorCosts = null, vendorIndex = null, options = {}) {
@@ -952,6 +965,10 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     // getCost() returns per-delivery cost for SUB/GSUB ($3/plant/mo).
     // Use first delivery only — future months have no matching revenue in this view.
     const lineCogs = unitCost !== null ? Math.round(unitCost * qty * 100) / 100 : null;
+    // A prepaid subscription delivery: subscription SKU, no revenue on this
+    // order, but a real fulfilment cost. Revenue for it was collected upfront on
+    // the order that started the subscription.
+    const isSubRenewal = isSubSku && lineRevenue === 0 && lineCogs !== null && lineCogs > 0;
     const lineGp   = lineCogs !== null ? Math.round((lineRevenue - lineCogs) * 100) / 100 : null;
     const lineGpPct = (lineGp !== null && lineRevenue !== 0)
       ? Math.round(lineGp / lineRevenue * 1000) / 10 : null;
@@ -1035,6 +1052,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
       isInfluencerSample, isDigital, subMonths, mcgVolDisc, subShipMo, expSubShipMo, subSSCostMo, subShipLoss,
+      isSubRenewal,
       // ── Audit trail carried on every calculated line ──
       vendorKey,                              // catalog vendor this line resolved against
       costMatchType,                          // how the cost was matched
@@ -1148,9 +1166,10 @@ export function summarize(lineItems) {
     byStore[s].cogs    += li.lineCogs   || 0;
     byStore[s].orders.add(li.orderNum);
 
-    // By channel
-    if (li.source) {
-      const c = li.source;
+    // By channel. Prepaid subscription deliveries get their own labelled bucket
+    // so they never drag a real sales channel's margin negative.
+    if (li.source || li.isSubRenewal) {
+      const c = li.isSubRenewal ? SUB_RENEWAL_CHANNEL : li.source;
       if (!byChannel[c]) byChannel[c] = { revenue:0, cogs:0, gp:0 };
       byChannel[c].revenue += li.lineRevenue || 0;
       byChannel[c].cogs    += li.lineCogs    || 0;
