@@ -18,7 +18,12 @@ Required Netlify env vars:
   MCG_SHEET_URL         — MCG Total sheet export URL (plant costs with extra cost)
   MCG_POTS_SHEET_URL    — MCG Pot costs sheet export URL (pot SKU → pot cost)
   AS_SHEET_URL          — Air Plant Shop sheet export URL
-  L2G_SHEET_URL         — Live to Give sheet export URL
+  L2G_SHEET_URL                   — Live to Give tab CSV export URL
+  LIVELY_GOOD_SHEET_URL           — Lively Good tab CSV export URL
+  CALATHEA_COLLECTIVE_SHEET_URL   — Calathea Collective tab CSV export URL
+  SURFSIDE_ARRANGEMENT_SHEET_URL  — Surfside Arrangement tab CSV export URL
+  VENDOR_IMPORT_STRICT (optional) — set to 1 to FAIL the build when a configured
+                                    vendor tab imports zero costs (default: warn)
   HP_SHEET_URL          — HP Dropship sheet export URL (Make.com synced sheet)
   HP_COSTS_FOLDER_ID    — Google Drive folder ID containing Shopify product exports by date
   GDRIVE_API_KEY        — Google API key with Drive API access (folder must be shared publicly)
@@ -218,21 +223,40 @@ else:
     print("  ✗ AS_SHEET_URL not set — skipping")
 
 
-# ── 3. Live to Give ───────────────────────────────────────────────────────────
-print("\n[Live to Give]")
-l2g_costs = {}
-l2g_url = os.environ.get('L2G_SHEET_URL')
-if l2g_url:
-    rows = fetch_csv(l2g_url, 'Live to Give sheet')
-    if rows:
-        for row in rows:
-            sku  = row.get('SKUs', '').strip().upper()
-            cost = clean_money(row.get('Dropship Price (60% of retail price)', ''))
-            if sku and cost and cost > 0:
-                l2g_costs[sku] = cost
-        print(f"  → {len(l2g_costs)} Live to Give SKUs")
-else:
-    print("  ✗ L2G_SHEET_URL not set — skipping")
+# ── 3. Vendor-scoped cost catalog ─────────────────────────────────────────────
+# Live to Give / Lively Good / Calathea Collective / Surfside Arrangement.
+#
+# Live to Give was previously fetched here with its own inline parser. The tab
+# still uses the same headers ('SKUs' + 'Dropship Price (60% of retail price)'),
+# so rather than adding a second Live to Give source the old parser is folded
+# into the shared vendor importer below — one fetch, one source of truth. The
+# flat l2g_costs map is derived from the vendor catalog so product_costs.json
+# keeps exactly the shape it had before.
+from vendor_sheets import (import_vendor_costs, VENDOR_ORDER, VENDOR_ENV,
+                           LIVE_TO_GIVE, loose_sku, normalize_name)
+
+print("\n═══ Vendor cost catalogs ═══")
+VENDOR_STRICT = os.environ.get('VENDOR_IMPORT_STRICT', '').strip().lower() in ('1', 'true', 'yes')
+vendor_catalog, vendor_stats, vendor_warnings = import_vendor_costs(strict=VENDOR_STRICT)
+
+# Secondary lookup indexes, built once at deploy time so the browser doesn't
+# have to. Kept per vendor — never merged across vendors.
+vendor_index = {}
+for _vendor, _entries in vendor_catalog.items():
+    by_loose, by_name = {}, {}
+    for _key, _e in _entries.items():
+        lk = loose_sku(_key)
+        if lk and lk not in by_loose:
+            by_loose[lk] = _key
+        nk = normalize_name(_e.get('productName', ''))
+        if nk and nk not in by_name:
+            by_name[nk] = _key
+    vendor_index[_vendor] = {'byLooseSku': by_loose, 'byName': by_name}
+
+# Backward-compatible flat map (generic SKU-only fallback, priority 7)
+l2g_costs = {k: v['unitCost'] for k, v in vendor_catalog.get(LIVE_TO_GIVE, {}).items()}
+print(f"\n  → {len(l2g_costs)} Live to Give SKUs merged into product_costs.json "
+      f"(generic fallback, unchanged behaviour)")
 
 
 # ── 4. HP Dropship (Google Sheet synced daily by Make.com) ────────────────────
@@ -568,7 +592,28 @@ write_json('mcg_total.json',     mcg_costs)
 write_json('product_costs.json', product_costs)
 write_json('sku_weights.json',   sku_weights)
 write_json('sku_alias.json',     sku_alias)
+write_json('vendor_costs.json',  vendor_catalog)
+write_json('vendor_index.json',  vendor_index)
+write_json('vendor_import_report.json', {
+    'generatedAt': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+    'stats': vendor_stats,
+    'warnings': vendor_warnings,
+})
 # sb_costs.json and hp_supplement.json written above (or kept from repo)
 
+print("\n─── Vendor import summary ───")
+for st in vendor_stats:
+    label = st['vendor']
+    if not st.get('configured'):
+        print(f"  {label:<24} NOT CONFIGURED ({VENDOR_ENV[label]} unset)")
+    else:
+        print(f"  {label:<24} {st.get('imported', 0)} SKUs imported")
+if vendor_warnings:
+    print("\n  ⚠ Vendor import warnings:")
+    for w in vendor_warnings:
+        print(f"    - {w}")
+
 total = len(mcg_costs) + len(product_costs) + len(sb_costs) + len(hp_suppl)
-print(f"\nBuild complete — {total} total SKUs across all sources.")
+vendor_total = sum(len(v) for v in vendor_catalog.values())
+print(f"\nBuild complete — {total} total SKUs across legacy sources, "
+      f"{vendor_total} vendor-scoped SKUs.")

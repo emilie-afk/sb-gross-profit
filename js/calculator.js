@@ -3,6 +3,8 @@
  * All data stays in the browser. No network requests.
  */
 
+import { resolveVendorCost, inferVendorKey } from './vendorCosts.js';
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 // Volume discount per plant based on total MCG plant units in the order
@@ -219,8 +221,42 @@ function mcgTierCost(sku, mcgCosts) {
   return [null, null];
 }
 
-function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, skuAlias = {}, mcgExtra = {}) {
+/**
+ * Resolve a unit cost.
+ *
+ * Returns [unitCost, costSource, matchType]. Historical callers that
+ * destructure two elements keep working unchanged.
+ *
+ * Resolution order:
+ *   0.  hard overrides (gift card / printable / Route / rack-pack)
+ *   1.  vendor-scoped catalog — exact vendor + exact SKU
+ *   2.  vendor-scoped catalog — vendor + normalized SKU
+ *   3.  vendor-scoped catalog — vendor + product-name match
+ *   4.  existing MCG rules (Total sheet, pot variants, extra, tier fallback)
+ *   5.  products export / manual uploaded costs / HP-by-name  (unchanged order)
+ *   6.  SKU alias mapping
+ *   7.  generic SKU-only fallback + MCG size fallback
+ *   8.  missing
+ *
+ * Steps 5–7 keep the exact relative order the historical calculator already
+ * used, so no previously-matched SKU changes source. Only the new vendor
+ * catalog is inserted ahead of them, and it can never return another vendor's
+ * cost.
+ */
+function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, skuAlias = {}, mcgExtra = {}, vendorCosts = null, vendorIndex = null) {
   const key = (sku || '').toUpperCase().trim();
+
+  // 1. Vendor catalog, exact vendor + exact SKU. This runs before the composite
+  //    split because some vendor SKUs legitimately contain a '+' — e.g. Surfside's
+  //    SUR-WHITEPOT-ROSETTE+DONKEY, which is one product, not a bundle of
+  //    "SUR-WHITEPOT-ROSETTE" and "DONKEY". A real catalog entry always beats a
+  //    speculative split.
+  if (vendorCosts) {
+    const exactHit = resolveVendorCost(sku, vendor, vendorCosts, vendorIndex, productName);
+    if (exactHit && exactHit.matchType === 'exact_sku' && typeof exactHit.unitCost === 'number') {
+      return [exactHit.unitCost, exactHit.source, exactHit.matchType];
+    }
+  }
 
   // Composite SKU: "S3KY2997+EEZZ7650" = two products bundled — sum both costs
   if (key.includes('+')) {
@@ -228,12 +264,12 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     let total = 0;
     const labels = [];
     for (const part of parts) {
-      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts, hpByName, null, skuAlias);
-      if (c === null) return [null, 'COST MISSING'];
+      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts, hpByName, null, skuAlias, mcgExtra, vendorCosts, vendorIndex);
+      if (c === null) return [null, 'COST MISSING', 'missing'];
       total += c;
       labels.push(`${part}:${l}`);
     }
-    return [Math.round(total * 100) / 100, 'Bundle (' + labels.join(' + ') + ')'];
+    return [Math.round(total * 100) / 100, 'Bundle (' + labels.join(' + ') + ')', 'bundle'];
   }
 
   // Rack/Pack SKUs (MCG only): detect by product name containing "PACK" + MCG vendor.
@@ -277,8 +313,19 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     }
   }
 
-  // 1. MCG Total sheet has the exact cost — always wins
-  if (mcgCosts[key] !== undefined) return [mcgCosts[key], 'MCG Total sheet'];
+  // 2–3. Vendor-scoped catalog, normalized SKU then product name (the exact-SKU
+  //      pass already ran at the top). Resolved per vendor so one vendor's cost
+  //      is never used for another's product. Unknown vendor → null → falls
+  //      through to the legacy sources.
+  if (vendorCosts) {
+    const hit = resolveVendorCost(sku, vendor, vendorCosts, vendorIndex, productName);
+    if (hit && typeof hit.unitCost === 'number') {
+      return [hit.unitCost, hit.source, hit.matchType];
+    }
+  }
+
+  // 4. MCG Total sheet has the exact cost — always wins over generic sources
+  if (mcgCosts[key] !== undefined) return [mcgCosts[key], 'MCG Total sheet', 'mcg_sheet'];
   // 1b. Pot SKU dot-variant suffix (e.g. EEZZ7650.WH → try base EEZZ7650)
   //     Single-unit costs like EEZZ7620.BR-1 are stored directly in mcgCosts (step 1 above)
   if (key.includes('.')) {
@@ -332,7 +379,7 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   //    If the order came in with an Amazon seller SKU, map it to the real SKU and re-lookup
   if (skuAlias && skuAlias[key] && skuAlias[key] !== key) {
     const canonical = skuAlias[key];
-    return getCost(canonical, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, {});
+    return getCost(canonical, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, {}, mcgExtra, vendorCosts, vendorIndex);
     // pass empty alias to avoid infinite loops if canonical itself is aliased
   }
   // 7. MCG vendor + product name size fallback
@@ -348,9 +395,36 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     if (/\b4["'′]?\s*(plug|inch|in\b)/i.test(n) || /\(4["\s]/i.test(n))
       return [MCG_TIER['4inch'], 'MCG size fallback (4" tier)'];
   }
-  return [null, 'COST MISSING'];
+  return [null, 'COST MISSING', 'missing'];
 }
 
+/** Derive a stable match-method token from a legacy cost-source label. */
+function labelToMatchType(label) {
+  if (!label) return 'unknown';
+  const l = String(label);
+  if (l === 'COST MISSING')              return 'missing';
+  if (l.startsWith('Bundle'))            return 'bundle';
+  if (l.startsWith('MCG Total sheet'))   return 'mcg_sheet';
+  if (l.startsWith('MCG Pot Costs'))     return 'mcg_pot_sheet';
+  if (l.startsWith('MCG extra (name'))   return 'mcg_extra_name';
+  if (l.startsWith('MCG sheet (name'))   return 'mcg_sheet_name';
+  if (l.startsWith('MCG extra'))         return 'mcg_extra';
+  if (l.startsWith('MCG tier'))          return 'mcg_tier';
+  if (l.startsWith('MCG size fallback')) return 'mcg_size_fallback';
+  if (l.startsWith('Products export'))   return 'generic_sku';
+  if (l.startsWith('Manual costs'))      return 'manual_upload';
+  if (l.startsWith('HP by name'))        return 'hp_product_name';
+  if (l.startsWith('Gift Card'))         return 'override_gift_card';
+  if (l.startsWith('Printable'))         return 'override_digital';
+  if (l.startsWith('Route'))             return 'override_route';
+  if (l.startsWith('Random/Pack'))       return 'override_random_pack';
+  if (l.endsWith('sheet'))               return 'exact_sku';
+  return 'other';
+}
+
+// Deprecated for expense calculation: House Plant Dropship shipping is now taken
+// from the HPD log or passed through from the Shopify shipping the customer
+// paid. Retained only for the informational weight note on mixed orders.
 function hpShipRate(totalLb) {
   for (const [max, cost] of HP_SHIP_RATES) {
     if (totalLb <= max) return cost;
@@ -421,28 +495,65 @@ export function parseAdditionalCosts(rows) {
 
 // ─── ShipStation parser ───────────────────────────────────────────────────────
 
+/** Shopify writes order names as "#472351"; ShipStation writes "472351". */
+export function normalizeOrderNumber(num) {
+  return String(num ?? '').trim().replace(/^#+/, '');
+}
+
 export function parseShipStation(rows) {
-  // Returns { costs: Map<orderNum, totalRate>, apsCosts: Map<orderNum, apsRate> }
-  // Auto-detects "line items" format (has 'Shipment #' column) vs summary format.
-  // Line items format: Rate repeats per line within a shipment → dedupe by Shipment #.
-  // apsCosts is populated only in line items format (APS shipments identified by AS- SKU prefix).
-  const costs    = new Map();
-  const apsCosts = new Map();
+  // Returns { costs: Map<orderNum, totalShippingPaid>, apsCosts, shipments }
+  //
+  // ShipStation repeats the shipment's shipping cost on every item row, so the
+  // cost column is NEVER summed across raw rows. Instead:
+  //   1. group by Shipment # within Order #
+  //   2. count the shipping cost once per unique shipment
+  //   3. sum the unique shipments belonging to the same Order #
+  // An order can legitimately have more than one shipment.
+  //
+  // WHICH COLUMN IS THE EXPENSE
+  // ---------------------------
+  // ShipStation exports carry BOTH 'Rate' and 'Shipping Paid', and they are not
+  // the same thing:
+  //   Rate          = what the label cost us          → this is the expense
+  //   Shipping Paid = what the customer paid us       → this is revenue
+  // Verified against the July 2026 export: 'Shipping Paid' equals Shopify's
+  // order-level 'Shipping' on 460 of 461 joined orders, while 'Rate' matches on
+  // 5. Treating 'Shipping Paid' as the expense would book shipping revenue as a
+  // cost. So 'Rate' is the expense whenever the column exists, and
+  // 'Shipping Paid' is used only as a fallback for exports that omit 'Rate'.
+  //
+  // apsCosts is populated only in line-items format (APS shipments identified
+  // by the AS- SKU prefix).
+  const costs     = new Map();
+  const apsCosts  = new Map();
+  const shipments = new Map(); // orderNum → [{ shipmentId, cost }]
 
-  if (!rows.length) return { costs, apsCosts };
+  if (!rows.length) return { costs, apsCosts, shipments };
 
-  const isLineItems = Object.keys(rows[0]).some(k => k.trim() === 'Shipment #');
+  const keys = Object.keys(rows[0]).map(k => k.trim());
+  const isLineItems = keys.includes('Shipment #');
+  const pick = (row, names) => {
+    for (const n of names) {
+      const k = Object.keys(row).find(kk => kk.trim().toLowerCase() === n.toLowerCase());
+      if (k !== undefined && String(row[k]).trim() !== '') return row[k];
+    }
+    return '';
+  };
+  // 'Rate' first — see the note above; 'Shipping Paid' is a fallback only.
+  const COST_COLS = ['Rate', 'Shipping Paid'];
+  const hasRateCol = keys.some(k => k.toLowerCase() === 'rate');
+  const costColumnUsed = hasRateCol ? 'Rate' : (keys.some(k => k.toLowerCase() === 'shipping paid') ? 'Shipping Paid' : 'none');
 
   if (isLineItems) {
-    // Pass 1: collect rate + APS flag per shipment
+    // Pass 1: collect cost + APS flag per shipment (first row per shipment wins)
     const shipRate = new Map();  // shipmentId → { rate, orderNum }
     const shipHasAps = new Map(); // shipmentId → bool
 
     for (const row of rows) {
-      const shipId   = (row['Shipment #'] || '').trim();
-      const orderNum = (row['Order #']    || '').trim().replace(/^#/, '');
-      const rate     = cleanMoney(row['Rate'] || '') || 0;
-      const sku      = (row['Item SKU']   || '').trim();
+      const shipId   = String(pick(row, ['Shipment #'])).trim();
+      const orderNum = normalizeOrderNumber(pick(row, ['Order #']));
+      const rate     = cleanMoney(pick(row, COST_COLS)) || 0;
+      const sku      = String(pick(row, ['Item SKU'])).trim();
       if (!shipId || !orderNum) continue;
       if (!shipRate.has(shipId)) shipRate.set(shipId, { rate, orderNum });
       if (sku.startsWith('AS-')) shipHasAps.set(shipId, true);
@@ -451,23 +562,39 @@ export function parseShipStation(rows) {
     // Pass 2: accumulate per order
     for (const [shipId, { rate, orderNum }] of shipRate) {
       costs.set(orderNum, (costs.get(orderNum) || 0) + rate);
+      if (!shipments.has(orderNum)) shipments.set(orderNum, []);
+      shipments.get(orderNum).push({ shipmentId: shipId, cost: rate });
       if (shipHasAps.get(shipId)) {
         apsCosts.set(orderNum, (apsCosts.get(orderNum) || 0) + rate);
       }
     }
   } else {
-    // Original summary format: one effective row per order
+    // Summary format: one row per shipment already
     for (const row of rows) {
       const orderCol = Object.keys(row).find(k => k.trim().toLowerCase() === 'order #');
-      const rateCol  = Object.keys(row).find(k => k.trim().toLowerCase() === 'rate');
+      const rateCol  = Object.keys(row).find(k => k.trim().toLowerCase() === 'rate')
+                    || Object.keys(row).find(k => k.trim().toLowerCase() === 'shipping paid');
       if (!orderCol || !rateCol) break;
-      const num  = (row[orderCol] || '').trim().replace(/^#/, '');
+      const num  = normalizeOrderNumber(row[orderCol]);
       const rate = cleanMoney(row[rateCol]);
-      if (num && rate !== null) costs.set(num, (costs.get(num) || 0) + rate);
+      if (num && rate !== null) {
+        costs.set(num, (costs.get(num) || 0) + rate);
+        if (!shipments.has(num)) shipments.set(num, []);
+        shipments.get(num).push({ shipmentId: `${num}#${shipments.get(num).length + 1}`, cost: rate });
+      }
     }
   }
 
-  return { costs, apsCosts };
+  // Diagnostics the caller can surface: a shipment with no rate is a gap in the
+  // export, not a free label, and must not be read as zero shipping expense.
+  let zeroCostShipments = 0, totalShipments = 0;
+  for (const list of shipments.values()) {
+    for (const sh of list) { totalShipments++; if (!(sh.cost > 0)) zeroCostShipments++; }
+  }
+
+  return { costs, apsCosts, shipments,
+           costColumnUsed: typeof costColumnUsed === 'undefined' ? 'Rate' : costColumnUsed,
+           totalShipments, zeroCostShipments };
 }
 
 // ─── HPD Log parser ───────────────────────────────────────────────────────────
@@ -571,7 +698,28 @@ function _parseRfc4180(text) {
 
 // ─── Main calculation ─────────────────────────────────────────────────────────
 
-export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}, hpdShipCosts = null, mcgExtra = {}) {
+export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}, hpdShipCosts = null, mcgExtra = {}, vendorCosts = null, vendorIndex = null, options = {}) {
+  const {
+    excludeCancelled = true,   // cancelled orders never count toward profitability
+    applyRefunds     = true,   // order-level Refunded Amount prorated across lines
+  } = options;
+
+  // ── Pre-pass 0: cancelled orders + order-level refunds ──
+  // Shopify writes 'Cancelled at' and 'Refunded Amount' on the order's first
+  // line only, so both are collected per order before the main pass.
+  const cancelledOrders = new Set();
+  const orderRefunds    = new Map(); // orderNum → refunded $ (order level)
+  for (const row of orderRows) {
+    const name = (row['Name'] || '').trim();
+    if (!name) continue;
+    const cancelledAt = (row['Cancelled at'] || row['Cancelled At'] || '').trim();
+    if (cancelledAt) cancelledOrders.add(name);
+    const refunded = cleanMoney(row['Refunded Amount'] ?? row['Refunded amount']);
+    if (refunded !== null && refunded > 0 && !orderRefunds.has(name)) {
+      orderRefunds.set(name, refunded);
+    }
+  }
+
   // ── Pre-pass: order store composition + HP weight ──
   const orderStores  = new Map(); // orderNum → Set of stores
   const orderShipping = new Map(); // orderNum → customer paid shipping
@@ -667,6 +815,8 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const orderNum = (row['Name'] || '').trim();
     const sku      = (row['Lineitem sku'] || '').trim();
     if (!sku || sku.toLowerCase() === 'nan') continue;
+    // Cancelled orders are excluded from profitability results entirely.
+    if (excludeCancelled && cancelledOrders.has(orderNum)) continue;
 
     const vendor   = (row['Vendor'] || '').trim();
     const product  = (row['Lineitem name'] || '').trim().slice(0, 100);
@@ -733,7 +883,9 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const lineRevenue = isInfluencerSample
       ? 0
       : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
-    let [unitCost, costSource] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias, mcgExtra);
+    let [unitCost, costSource, costMatchType] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias, mcgExtra, vendorCosts, vendorIndex);
+    costMatchType = costMatchType || labelToMatchType(costSource);
+    const vendorKey = inferVendorKey(sku, vendor);
     const productUp = (product || '').toUpperCase();
     const isDigital = costSource === 'Printable (no COGS)' ||
                       productUp.includes('PRINTABLE') ||
@@ -779,20 +931,22 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       isFreeShip = custShipping === 0 ? 'YES' : '';
 
       if (orderCat === 'Pure HP Dropship') {
-        const hpW    = orderHpWeight.get(orderNum) || 0;
-        const hpRate = hpW > 0 ? hpShipRate(hpW) : custShipping;
+        // House Plant Dropship shipping is passed through to the customer:
+        // expense = what the customer paid, contribution = 0. No ShipStation
+        // match is required, and the expense is never estimated from weight.
         const hpdEntry = hpdShipCosts ? hpdShipCosts.get(orderNumClean) : null;
         if (hpdEntry && hpdEntry.netTerms !== null) {
-          // Actual HPD cost from log file — overrides weight-based estimate
+          // The HPD log gives the precise actual cost — more accurate than the
+          // pass-through assumption, so it wins when present.
           shipPaid  = hpdEntry.netTerms;
           shipPaidSS = 0; shipPaidHP = hpdEntry.netTerms;
           shipDelta = Math.round((custShipping - hpdEntry.netTerms) * 100) / 100;
           shipNote  = `HPD actual (${hpdEntry.hpdOrderNum})`;
         } else {
-          shipPaid  = hpRate;
-          shipPaidSS = 0; shipPaidHP = hpRate;
-          shipDelta = Math.round((custShipping - hpRate) * 100) / 100;
-          shipNote  = `HP est (${hpW.toFixed(2)}lb)`;
+          shipPaid  = custShipping;
+          shipPaidSS = 0; shipPaidHP = custShipping;
+          shipDelta = 0;
+          shipNote  = 'HPD pass-through (Shopify shipping)';
         }
 
       } else if (orderCat === 'Pure 17381') {
@@ -807,23 +961,24 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
         shipDelta = ssRate !== null ? Math.round((custShipping - ssRate) * 100) / 100 : null;
         shipNote  = ssRate !== null ? 'ShipStation (free to customer)' : 'ShipStation (no rate found)';
 
-      } else if (orderCat === 'Mixed (17381 + HP Dropship)') {
-        const hpW    = orderHpWeight.get(orderNum) || 0;
-        const hpRate = hpShipRate(hpW);
-        shipPaidSS = ssRate || 0; shipPaidHP = hpRate;
-        shipPaid  = Math.round((shipPaidSS + hpRate) * 100) / 100;
-        shipDelta = ssRate !== null
-          ? Math.round((custShipping - hpRate - ssRate) * 100) / 100 : null;
-        shipNote  = `17381:ShipStation + HP:${hpW.toFixed(2)}lb=$${hpRate.toFixed(2)}`;
-
-      } else if (orderCat === 'Mixed (HP + Free Ship)') {
-        const hpW    = orderHpWeight.get(orderNum) || 0;
-        const hpRate = hpShipRate(hpW);
-        shipPaidSS = ssRate || 0; shipPaidHP = hpRate;
-        shipPaid  = Math.round((shipPaidSS + hpRate) * 100) / 100;
-        shipDelta = ssRate !== null
-          ? Math.round((custShipping - hpRate - ssRate) * 100) / 100 : null;
-        shipNote  = `SS + HP:${hpW.toFixed(2)}lb=$${hpRate.toFixed(2)}`;
+      } else if (orderCat === 'Mixed (17381 + HP Dropship)' ||
+                 orderCat === 'Mixed (HP + Free Ship)') {
+        // Mixed HPD shipping. The non-HPD shipment's expense is the actual
+        // deduplicated ShipStation cost. Shopify only reports one combined
+        // order-level shipping amount, so the HPD portion is the conservative
+        // remainder of what the customer paid (never negative), unless the HPD
+        // log gives the precise component.
+        const hpdEntry = hpdShipCosts ? hpdShipCosts.get(orderNumClean) : null;
+        const nonHpd   = ssRate || 0;
+        const hpdPass  = (hpdEntry && hpdEntry.netTerms !== null)
+          ? hpdEntry.netTerms
+          : Math.max(0, Math.round((custShipping - nonHpd) * 100) / 100);
+        shipPaidSS = nonHpd; shipPaidHP = hpdPass;
+        shipPaid   = Math.round((nonHpd + hpdPass) * 100) / 100;
+        shipDelta  = Math.round((custShipping - shipPaid) * 100) / 100;
+        shipNote   = (hpdEntry && hpdEntry.netTerms !== null)
+          ? `Mixed HPD shipping (SS $${nonHpd.toFixed(2)} + HPD actual $${hpdPass.toFixed(2)})`
+          : `Mixed HPD shipping (SS $${nonHpd.toFixed(2)} + HPD pass-through $${hpdPass.toFixed(2)})`;
 
       } else {
         shipPaid  = ssRate;
@@ -845,9 +1000,61 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
       isInfluencerSample, isDigital, subMonths, mcgVolDisc, subShipMo, expSubShipMo, subSSCostMo, subShipLoss,
+      // ── Audit trail carried on every calculated line ──
+      vendorKey,                              // catalog vendor this line resolved against
+      costMatchType,                          // how the cost was matched
+      missingCost: unitCost === null,         // never treat a missing cost as zero
+      baseMerchRevenue: Math.round(unitPrice * qty * 100) / 100,
+      historicalDiscount: Math.round(Math.max(0, unitPrice * qty - lineRevenue) * 100) / 100,
+      refundAllocated: 0,                     // filled in by the refund post-pass
+      isCancelled: cancelledOrders.has(orderNum),
+      isRoute, isGiftCard: costSource === 'Gift Card (no COGS)',
     });
 
     orderSeen.add(orderNum);
+  }
+
+  // ── Post-pass: order-level refunds ──
+  // The Shopify export gives only an order-level 'Refunded Amount'. It is
+  // prorated across the order's eligible product lines by each line's actual
+  // net product revenue share, capped at that line's revenue so a refund can
+  // never push a line negative. Line-level revenue in the export is NOT
+  // refund-adjusted, so there is no double counting. Any part of the refund
+  // that exceeds product revenue (refunded shipping or tax) is recorded
+  // separately rather than silently absorbed into product margin.
+  if (applyRefunds && orderRefunds.size) {
+    const byOrder = new Map();
+    for (const li of lineItems) {
+      if (!byOrder.has(li.orderNum)) byOrder.set(li.orderNum, []);
+      byOrder.get(li.orderNum).push(li);
+    }
+    for (const [orderNum, refund] of orderRefunds) {
+      const lines = byOrder.get(orderNum);
+      if (!lines || !lines.length) continue;
+      const eligible = lines.filter(l => (l.lineRevenue || 0) > 0);
+      const totalRev = eligible.reduce((s, l) => s + l.lineRevenue, 0);
+      const productRefund = Math.min(refund, totalRev);
+      let allocated = 0;
+      eligible.forEach((li, i) => {
+        const isLast = i === eligible.length - 1;
+        const share  = isLast
+          ? Math.round((productRefund - allocated) * 100) / 100
+          : Math.round(productRefund * (li.lineRevenue / totalRev) * 100) / 100;
+        allocated = Math.round((allocated + share) * 100) / 100;
+        li.refundAllocated = share;
+        li.lineRevenue = Math.round((li.lineRevenue - share) * 100) / 100;
+        li.lineGp = li.lineCogs !== null
+          ? Math.round((li.lineRevenue - li.lineCogs) * 100) / 100 : null;
+        li.lineGpPct = (li.lineGp !== null && li.lineRevenue !== 0)
+          ? Math.round(li.lineGp / li.lineRevenue * 1000) / 10 : null;
+      });
+      const first = lines[0];
+      first.orderRefund = refund;
+      first.refundBeyondProduct = Math.round((refund - productRefund) * 100) / 100;
+      if (first.orderTotal) {
+        first.orderTotal = Math.round((first.orderTotal - refund) * 100) / 100;
+      }
+    }
   }
 
   // ── Post-pass: prorate order-level shipping to every line item by revenue weight ──
