@@ -5,15 +5,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GP Dashboard — Succulents Box</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./css/app.css">
 <style>
+/* ── Legacy token bridge ───────────────────────────────────────────────────
+   The original palette was a fixed dark theme. Re-pointing those variables at
+   the design-system tokens lets every table and card that has not been
+   individually restyled follow the new light/dark themes for free, instead of
+   staying dark-on-light. New work should use the --gp-* tokens directly. */
+:root, [data-gp-theme="dark"] {
+  --bg: var(--gp-app); --surface: var(--gp-surface); --surface2: var(--gp-inset);
+  --border: var(--gp-border); --text: var(--gp-text); --muted: var(--gp-text2);
+  --accent: var(--gp-accent); --accent2: var(--gp-info);
+  --red: var(--gp-neg); --yellow: var(--gp-warn); --green: var(--gp-pos);
+  --radius: 12px; --shadow: var(--gp-shadow);
+}
+body { font-family: var(--gp-sans); }
+.value, .num, td.num, th.num { font-family: var(--gp-mono); font-variant-numeric: tabular-nums; }
+
 /* ─── Reset & base ─────────────────────────────────────────────── */
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg:#0f172a;--surface:#1e293b;--surface2:#273448;--border:#334155;
-  --text:#f1f5f9;--muted:#94a3b8;--accent:#6ee7b7;--accent2:#38bdf8;
-  --red:#f87171;--yellow:#fbbf24;--green:#6ee7b7;
-  --radius:10px;--shadow:0 4px 24px rgba(0,0,0,.4);
-}
+/* (original fixed-dark palette replaced by the token bridge above) */
 body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:14px;line-height:1.5}
 a{color:var(--accent);text-decoration:none}
 button{cursor:pointer;font-family:inherit}
@@ -136,7 +150,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
   font-weight:600;text-transform:uppercase;letter-spacing:.04em;
 }
 .badge-free{background:rgba(251,191,36,.15);color:var(--yellow)}
-.badge-missing{background:rgba(248,113,113,.15);color:var(--red)}
+.badge-missing{background:var(--gp-warn-soft);color:var(--gp-warn)}
 .badge-influencer{background:rgba(167,139,250,.2);color:#a78bfa}
 .totals-row td{background:var(--surface2)!important;border-top:2px solid var(--border);font-weight:700;position:sticky;bottom:0}
 
@@ -229,23 +243,6 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 <div id="loading"><div class="spinner"></div><p id="loading-msg">Processing…</p></div>
 
 <div id="app">
-  <!-- Top bar -->
-  <div class="topbar">
-    <div class="topbar-left">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#6ee7b7" stroke-width="2">
-        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-      </svg>
-      <div>
-        <div class="topbar h1" style="font-size:.95rem;font-weight:600">GP Dashboard</div>
-        <div class="sub" id="topbar-sub">Succulents Box Analytics</div>
-      </div>
-    </div>
-    <div style="display:flex;gap:8px">
-      <button class="logout-btn" id="btn-new-files" onclick="newFiles()" style="display:none">↑ New files</button>
-      <button class="logout-btn" id="btn-projection" onclick="openProjectionPage()" style="display:none;border-color:var(--accent);color:var(--accent)">📈 Projection</button>
-      <button class="logout-btn" onclick="logout()">Sign out</button>
-    </div>
-  </div>
 
   <!-- Upload screen -->
   <div id="upload-screen">
@@ -322,92 +319,175 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div>
   </div>
 
-  <!-- Dashboard -->
-  <div id="dashboard" class="main">
-
-    <!-- Summary cards -->
-    <div class="section-title">Overview</div>
-    <div class="cards">
-      <div class="card"><div class="label">Total Revenue</div><div class="value" id="c-revenue">—</div><div class="sub" id="c-revenue-sub" style="font-size:.7rem;color:var(--muted)"></div><div class="sub" id="c-orders">— orders</div></div>
-      <div class="card"><div class="label">Total COGS</div><div class="value" id="c-cogs">—</div></div>
-      <div class="card accent"><div class="label">Gross Profit</div><div class="value" id="c-gp">—</div><div class="sub" id="c-gpm">GP%: —</div></div>
-      <div class="card"><div class="label">Shipping Collected</div><div class="value" id="c-ship-collected">—</div><div class="sub">From customers</div></div>
-      <div class="card" style="grid-column:span 2"><div class="label">Shipping Paid</div><div style="display:flex;align-items:baseline;gap:16px"><div class="value" id="c-ship-paid">—</div><div class="sub" id="c-ship-net" style="font-size:.8rem">Net: —</div></div><div id="c-ship-vendor-breakdown"></div></div>
-      <div class="card warn" id="c-missing-wrap" style="display:none"><div class="label">Missing Cost</div><div class="value" id="c-missing">0</div><div class="sub">line items</div><button onclick="downloadMissingCosts()" style="margin-top:8px;padding:4px 10px;font-size:.72rem;background:transparent;border:1px solid var(--yellow);color:var(--yellow);border-radius:4px;cursor:pointer">↓ Download SKUs</button></div>
-    </div>
-
-    <!-- Charts -->
-    <div class="section-title">Breakdown</div>
-    <div class="charts">
-      <div class="chart-card">
-        <h3>Gross Profit by Store</h3>
-        <div class="chart-wrap"><canvas id="chart-store"></canvas></div>
+  <!-- Dashboard shell -->
+  <div id="dashboard" class="gp-shell" style="display:none">
+    <aside class="gp-rail">
+      <div class="gp-rail-head">
+        <div class="gp-rail-title"><span class="gp-mark">GP</span><h1>GP Dashboard</h1></div>
+        <div class="gp-rail-sub" id="topbar-sub">Succulents Box</div>
       </div>
-      <div class="chart-card">
-        <h3>Revenue by Channel</h3>
-        <div class="chart-wrap"><canvas id="chart-channel"></canvas></div>
+      <nav class="gp-nav" aria-label="Sections">
+        <button class="gp-nav-item" data-screen="overview" onclick="gotoScreen('overview')"><span class="gp-nav-glyph" aria-hidden="true">◆</span><span class="gp-nav-label">Overview</span></button>
+        <button class="gp-nav-item" data-screen="channels" onclick="gotoScreen('channels')"><span class="gp-nav-glyph" aria-hidden="true">▤</span><span class="gp-nav-label">Channels &amp; vendors</span></button>
+        <button class="gp-nav-item" data-screen="shipping" onclick="gotoScreen('shipping')"><span class="gp-nav-glyph" aria-hidden="true">▥</span><span class="gp-nav-label">Shipping</span></button>
+        <button class="gp-nav-item" data-screen="orders" onclick="gotoScreen('orders')"><span class="gp-nav-glyph" aria-hidden="true">☰</span><span class="gp-nav-label">Order detail</span><span class="gp-nav-badge" id="nav-badge-orders" hidden></span></button>
+        <button class="gp-nav-item" data-screen="reports" onclick="gotoScreen('reports')"><span class="gp-nav-glyph" aria-hidden="true">▦</span><span class="gp-nav-label">Reports</span></button>
+        <button class="gp-nav-item" data-screen="scenarios" onclick="gotoScreen('scenarios')"><span class="gp-nav-glyph" aria-hidden="true">◈</span><span class="gp-nav-label">Scenarios</span></button>
+      </nav>
+      <div class="gp-rail-foot">
+        <div class="gp-theme-row"><span>Appearance</span>
+          <button class="gp-theme-toggle" id="theme-toggle" onclick="toggleTheme()">Light</button></div>
+        <button class="gp-btn gp-btn-ghost" onclick="newFiles()" style="justify-content:flex-start"><span aria-hidden="true">↑</span><span>Upload new files</span></button>
+        <button class="gp-btn gp-btn-ghost" onclick="logout()" style="justify-content:flex-start"><span aria-hidden="true">→</span><span>Sign out</span></button>
       </div>
-    </div>
+    </aside>
+    <main class="gp-main">
+      <header class="gp-header">
+        <div>
+          <h2 id="screen-title">Overview</h2>
+          <div class="sub" id="screen-sub">Where profit is coming from, and what needs fixing</div>
+        </div>
+        <div class="gp-header-actions">
+          <div class="gp-period">
+            <label for="filter-date-from">Period</label>
+            <input type="date" id="filter-date-from" onchange="filterTable()" aria-label="Period from">
+            <span class="t3" aria-hidden="true">&rarr;</span>
+            <input type="date" id="filter-date-to" onchange="filterTable()" aria-label="Period to">
+            <button class="gp-btn-ghost" onclick="clearDates()" style="font-size:12px;padding:2px 6px"
+                    title="Clear dates">&times;</button>
+          </div>
+          <button class="gp-btn" onclick="downloadDetailCSV()">Export CSV</button>
+        </div>
+      </header>
+      <div class="gp-page">
 
-    <!-- Channel × Vendor breakdown -->
-    <div class="section-title">Channel &amp; Vendor Breakdown</div>
+        <!-- ══ Overview ══ -->
+        <section id="screen-overview" class="gp-screen" style="display:flex;flex-direction:column;gap:24px">
+
+          <div class="gp-card" id="needs-attention" hidden>
+            <div class="gp-card-head gp-alerts-head">
+              <span class="chip" aria-hidden="true">!</span>
+              <h3>Needs attention</h3>
+              <span class="meta" id="alerts-count"></span>
+            </div>
+            <div class="gp-alerts" id="alerts-body"></div>
+          </div>
+
+          <div class="gp-kpi-row">
+            <div class="gp-kpi">
+              <div class="label">Gross profit</div>
+              <div class="value" id="c-gp">&mdash;</div>
+              <div class="s1" id="c-gpm">&mdash;</div>
+              <div class="s2">Revenue less COGS and shipping</div>
+            </div>
+            <div class="gp-kpi">
+              <div class="label">Total revenue</div>
+              <div class="value" id="c-revenue">&mdash;</div>
+              <div class="s1" id="c-revenue-sub">&mdash;</div>
+              <div class="s2">Incl. shipping &amp; taxes</div>
+            </div>
+            <div class="gp-kpi">
+              <div class="label">Total COGS</div>
+              <div class="value" id="c-cogs">&mdash;</div>
+              <div class="s1" id="c-cogs-sub">&mdash;</div>
+              <div class="s2">Product cost only</div>
+            </div>
+            <div class="gp-kpi">
+              <div class="label">Shipping net</div>
+              <div class="value" id="c-ship-net">&mdash;</div>
+              <div class="s1" id="c-ship-collected">&mdash;</div>
+              <div class="s2" id="c-ship-paid">&mdash;</div>
+            </div>
+          </div>
+
+          <div class="gp-chart-row">
+            <div class="gp-card">
+              <div class="gp-card-head"><h3>Gross profit by store</h3>
+                <span class="meta right" id="store-chart-meta"></span></div>
+              <div class="gp-card-body">
+                <div class="gp-bars" id="store-bars"></div>
+                <button class="gp-btn-ghost" id="store-see-all"
+                        style="margin-top:14px;font-size:13px;font-weight:600;color:var(--gp-accent);padding:0"
+                        onclick="gotoScreen('channels')">See all stores &rarr;</button>
+              </div>
+            </div>
+            <div class="gp-card">
+              <div class="gp-card-head"><h3>Revenue by channel</h3>
+                <span class="meta right" id="channel-chart-meta"></span></div>
+              <div class="gp-card-body">
+                <div class="gp-donut-wrap">
+                  <div class="gp-donut" id="channel-donut" role="img" aria-label="Revenue share by channel">
+                    <div class="gp-donut-hole"><span class="p" id="donut-pct">&mdash;</span>
+                      <span class="n" id="donut-name"></span></div>
+                  </div>
+                  <div class="gp-legend" id="channel-legend"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ══ Channels & vendors ══ -->
+        <section id="screen-channels" class="gp-screen" hidden>
+    
+    
     <div id="channel-breakdown" style="margin-bottom:24px"></div>
 
     <!-- Shipping analysis -->
     <div class="section-title">Shipping Analysis</div>
     <div class="ship-grid" id="ship-grid"></div>
+        </section>
 
-    <!-- Orders table -->
-    <div class="section-title" style="margin-top:28px">Order Detail</div>
-    <div id="missing-warn" class="missing-warn" style="display:none"></div>
-    <div class="table-controls">
-      <input class="search-input" id="search" placeholder="Search order #, SKU, product…" oninput="filterTable()">
-      <select class="filter-select" id="filter-store" onchange="filterTable()"><option value="">All stores</option></select>
-      <select class="filter-select" id="filter-channel" onchange="filterTable()"><option value="">All channels</option></select>
-      <select class="filter-select" id="filter-cost" onchange="filterTable()">
-        <option value="">All cost status</option>
-        <option value="missing">Plants – no cost</option>
-        <option value="free">Free shipping</option>
-        <option value="noship">No ship cost</option>
-        <option value="influencer">Influencer samples</option>
-      </select>
-      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
-        <input type="checkbox" id="filter-exclude-nocost" onchange="filterTable()">
-        Exclude missing cost
-      </label>
-      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
-        <input type="checkbox" id="filter-exclude-digital" onchange="filterTable()">
-        Exclude digital
-      </label>
-      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
-        <input type="checkbox" id="filter-exclude-giftcard" onchange="filterTable()">
-        Exclude gift cards
-      </label>
-    </div>
-    <div class="table-controls" style="margin-top:8px">
-      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap">Date from</label>
-      <input type="date" class="filter-select" id="filter-date-from" onchange="filterTable()" style="min-width:140px">
-      <label style="font-size:.8rem;color:var(--muted);white-space:nowrap">to</label>
-      <input type="date" class="filter-select" id="filter-date-to" onchange="filterTable()" style="min-width:140px">
-      <button class="logout-btn" onclick="clearDates()" style="font-size:.75rem;white-space:nowrap">Clear dates</button>
-      <span class="count-badge" id="row-count"></span>
-      <button class="logout-btn" onclick="downloadDetailCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
-    </div>
-    <div class="view-tabs">
-      <button class="view-tab active" id="tab-sku"       onclick="switchView('sku')">SKU View</button>
-      <button class="view-tab"        id="tab-order"     onclick="switchView('order')">Order View</button>
-      <button class="view-tab"        id="tab-sub"       onclick="switchView('sub')">🔁 Subscriptions</button>
-      <button class="view-tab"        id="tab-subpl"     onclick="switchView('subpl')">📊 Sub P&amp;L</button>
-      <button class="view-tab"        id="tab-lowmargin"  onclick="switchView('lowmargin')">⚠️ Low Margin</button>
-      <button class="view-tab"        id="tab-lowsku"     onclick="switchView('lowsku')">📉 Low Margin SKU</button>
-      <button class="view-tab"        id="tab-giftcard"   onclick="switchView('giftcard')">🎟️ Gift Cards</button>
-      <button class="view-tab"        id="tab-influencer" onclick="switchView('influencer')">🎁 Influencer</button>
-      <button class="view-tab"        id="tab-freeship"   onclick="switchView('freeship')">🚚 Free Ship</button>
-      <button class="view-tab"        id="tab-hpd"        onclick="switchView('hpd')">🌿 HPD Ship</button>
-      <button class="view-tab"        id="tab-aps"        onclick="switchView('aps')">✈️ APS</button>
-      <button class="view-tab"        id="tab-scenario"   onclick="switchView('scenario')">🎛️ Scenario Calculator</button>
-    </div>
+        <!-- ══ Shipping ══ -->
+        <section id="screen-shipping" class="gp-screen" hidden
+                 style="display:none;flex-direction:column;gap:24px">
+          <div class="gp-kpi-row" id="ship-kpis"></div>
+          <div class="gp-card">
+            <div class="gp-card-head"><h3>Shipping profiles</h3>
+              <span class="meta" id="ship-profile-meta"></span></div>
+            <div class="gp-table-wrap"><table class="gp-table" style="min-width:720px" id="ship-profile-table"></table></div>
+          </div>
+          <div class="gp-card" id="carrier-split"></div>
+          <div id="ship-grid" hidden></div>
+        </section>
 
+        <!-- ══ Order detail ══ -->
+        <section id="screen-orders" class="gp-screen" hidden
+                 style="display:none;flex-direction:column;gap:16px">
+          <div class="gp-card">
+            <div class="gp-card-body" style="display:flex;flex-direction:column;gap:14px">
+              <div class="gp-filter-row">
+                <input class="gp-input" id="search" placeholder="Search order #, SKU, product…"
+                       oninput="filterTable()" aria-label="Search orders">
+                <select class="gp-select" id="filter-store" onchange="filterTable()" aria-label="Store">
+                  <option value="">All stores</option></select>
+                <select class="gp-select" id="filter-channel" onchange="filterTable()" aria-label="Channel">
+                  <option value="">All channels</option></select>
+                <select class="gp-select" id="filter-cost" onchange="filterTable()" aria-label="Cost status">
+                  <option value="">All cost status</option>
+                  <option value="missing">Plants – no cost</option>
+                  <option value="free">Free shipping</option>
+                  <option value="noship">No ship cost</option>
+                  <option value="influencer">Influencer samples</option>
+                </select>
+              </div>
+              <div class="gp-filter-row">
+                <span class="t3" style="font-size:12px">Quick filters</span>
+                <div class="gp-chips" id="quick-chips"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="gp-card">
+            <div class="gp-card-head">
+              <div class="gp-seg" role="group" aria-label="Table shape">
+                <button id="seg-sku" aria-pressed="true" onclick="setTableView('sku')">SKU view</button>
+                <button id="seg-order" aria-pressed="false" onclick="setTableView('order')">Order view</button>
+              </div>
+              <span class="meta" id="row-count"></span>
+              <div class="right"><button class="gp-btn gp-btn-sm" onclick="downloadDetailCSV()">Download CSV</button></div>
+            </div>
+            <div id="missing-warn" class="missing-warn" style="display:none"></div>
     <!-- SKU view -->
     <div id="view-sku">
     <div class="table-wrap">
@@ -565,35 +645,6 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div>
     </div><!-- /view-sub -->
 
-    <!-- Sub P&L view -->
-    <div id="view-subpl" style="display:none">
-    <div style="display:flex;align-items:center;padding:8px 16px 6px;gap:12px">
-      <span style="font-size:.85rem;font-weight:600">📊 Subscription P&amp;L — Monthly Revenue vs Actual Cost</span>
-      <span style="font-size:.75rem;color:var(--muted)">Per-unit averages by subscription type — avg price from paid orders, avg COGS/SS cost from all deliveries</span>
-      <button class="logout-btn" onclick="downloadSubPLCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
-    </div>
-    <div style="overflow-x:auto;padding:0 8px 16px">
-      <table id="subpl-table" style="width:100%;border-collapse:collapse;font-size:.8rem">
-        <thead>
-          <tr style="color:var(--muted);text-align:right;border-bottom:2px solid var(--border)">
-            <th style="text-align:left;padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('type')">Subscription Type <span id="splh-type"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('deliveries')"># Deliveries <span id="splh-deliveries"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('price')">Avg Price/mo <span id="splh-price"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('cogs')">Avg COGS/mo <span id="splh-cogs"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('ss')">Avg SS Cost/mo <span id="splh-ss"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('totalCost')">Avg Total Cost/mo <span id="splh-totalCost"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('gp')">Avg GP/mo <span id="splh-gp"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('gpPct')">GP% <span id="splh-gpPct"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('shipColl')">Avg Ship Coll/mo <span id="splh-shipColl"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('netGp')">Net GP/mo <span id="splh-netGp"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('netGpPct')">Net GP% <span id="splh-netGpPct"></span></th>
-          </tr>
-        </thead>
-        <tbody id="subpl-body"></tbody>
-      </table>
-    </div>
-    </div><!-- /view-subpl -->
-
     <!-- Low Margin view -->
     <div id="view-lowmargin" style="display:none">
     <div class="lm-threshold">
@@ -662,9 +713,6 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       </table>
     </div>
     </div><!-- /view-giftcard -->
-
-    <!-- Scenario Calculator -->
-    <div id="view-scenario" style="display:none"></div>
 
     <!-- Influencer view -->
     <div id="view-influencer" style="display:none">
@@ -848,26 +896,80 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       </table>
     </div>
     </div><!-- /view-lowsku -->
+          </div>
+        </section>
 
-  </div><!-- /dashboard -->
-
-  <!-- Projection page (standalone, full-page) -->
-  <div id="projection-page" style="display:none" class="main">
-
-    <!-- Page header -->
-    <div style="display:flex;align-items:center;justify-content:space-between;
-                margin-bottom:24px;flex-wrap:wrap;gap:12px">
-      <div style="display:flex;align-items:center;gap:14px">
-        <button onclick="closeProjectionPage()" class="logout-btn"
-                style="font-size:.82rem;display:flex;align-items:center;gap:5px">
-          ← Dashboard
-        </button>
-        <h2 style="font-size:1.05rem;font-weight:700;color:var(--text)">📈 Price Projection</h2>
-      </div>
-      <button class="logout-btn" onclick="downloadProjCsv()"
-              style="font-size:.75rem;white-space:nowrap">↓ Download CSV</button>
+        <!-- ══ Reports ══ -->
+        <section id="screen-reports" class="gp-screen" hidden
+                 style="display:none;flex-direction:column;gap:24px">
+          <div class="gp-kpi-row" id="report-kpis"></div>
+          <div class="gp-card">
+            <div class="gp-card-head"><h3>Saved analyses</h3>
+              <span class="meta">Open a report, or jump to the filtered order table</span></div>
+            <div class="gp-card-body"><div class="gp-tiles" id="report-tiles"></div></div>
+          </div>
+          <div id="report-pane">
+    <!-- Sub P&L view -->
+    <div id="view-subpl" style="display:none">
+    <div style="display:flex;align-items:center;padding:8px 16px 6px;gap:12px">
+      <span style="font-size:.85rem;font-weight:600">📊 Subscription P&amp;L — Monthly Revenue vs Actual Cost</span>
+      <span style="font-size:.75rem;color:var(--muted)">Per-unit averages by subscription type — avg price from paid orders, avg COGS/SS cost from all deliveries</span>
+      <button class="logout-btn" onclick="downloadSubPLCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
     </div>
+    <div style="overflow-x:auto;padding:0 8px 16px">
+      <table id="subpl-table" style="width:100%;border-collapse:collapse;font-size:.8rem">
+        <thead>
+          <tr style="color:var(--muted);text-align:right;border-bottom:2px solid var(--border)">
+            <th style="text-align:left;padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('type')">Subscription Type <span id="splh-type"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('deliveries')"># Deliveries <span id="splh-deliveries"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('price')">Avg Price/mo <span id="splh-price"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('cogs')">Avg COGS/mo <span id="splh-cogs"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('ss')">Avg SS Cost/mo <span id="splh-ss"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('totalCost')">Avg Total Cost/mo <span id="splh-totalCost"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('gp')">Avg GP/mo <span id="splh-gp"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('gpPct')">GP% <span id="splh-gpPct"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('shipColl')">Avg Ship Coll/mo <span id="splh-shipColl"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('netGp')">Net GP/mo <span id="splh-netGp"></span></th>
+            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('netGpPct')">Net GP% <span id="splh-netGpPct"></span></th>
+          </tr>
+        </thead>
+        <tbody id="subpl-body"></tbody>
+      </table>
+    </div>
+    </div><!-- /view-subpl -->
 
+          </div>
+        </section>
+
+        <!-- ══ Scenarios ══ -->
+        <section id="screen-scenarios" class="gp-screen" hidden>
+          <div class="gp-scen">
+            <div class="gp-card gp-pick-list">
+              <div class="overline" style="padding:4px 8px 6px">Models</div>
+              <button class="gp-pick" data-model="price" onclick="selectModel('price')"
+                      aria-pressed="true">
+                <span class="n">Price projection</span><span class="d">Model price changes by SKU</span></button>
+              <button class="gp-pick" data-model="threshold" onclick="selectModel('threshold')"
+                      aria-pressed="false">
+                <span class="n">Free shipping threshold change</span><span class="d">Move the $89 free-ship bar</span></button>
+              <button class="gp-pick" data-model="combined" onclick="selectModel('combined')"
+                      aria-pressed="false">
+                <span class="n">Combined scenario</span><span class="d">Fulfilment cost + threshold together</span></button>
+              <button class="gp-pick" data-model="mcgvol" onclick="selectModel('mcgvol')"
+                      aria-pressed="false">
+                <span class="n">MCG volume discount</span><span class="d">Fulfilment cost by order size</span></button>
+              <button class="gp-pick" data-model="itemcount" onclick="selectModel('itemcount')"
+                      aria-pressed="false">
+                <span class="n">Item count free shipping</span><span class="d">Free ship by items per order</span></button>
+              <button class="gp-pick" data-model="aps" onclick="selectModel('aps')"
+                      aria-pressed="false">
+                <span class="n">Air Plant Shop multi-item</span><span class="d">Discount the 2nd+ item surcharge</span></button>
+              <button class="gp-pick" data-model="discount" onclick="selectModel('discount')"
+                      aria-pressed="false">
+                <span class="n">Discount &amp; operating margin</span><span class="d">Sitewide/vendor discounts, ads, labor</span></button>
+            </div>
+            <div class="gp-card" id="model-panes">
+            <div class="gp-scen-model" data-model="price">
     <!-- Controls -->
     <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:20px">
       <input class="search-input" id="proj-search" placeholder="Search SKU or product name…"
@@ -915,6 +1017,36 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       changes on existing SKUs, or <strong>+ Add as new SKU</strong> to add products with no recent sales.
     </div>
 
+            </div>
+            <div class="gp-scen-model" data-model="threshold" hidden>
+
+    <!-- ── Free Shipping Threshold Modeler ── -->
+    <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
+      <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">🚚 Free Shipping Threshold Change</h3>
+      <p style="font-size:.78rem;color:var(--muted);margin-bottom:16px">
+        Models the impact on Succulents Box orders currently in the qualifying subtotal range.
+      </p>
+      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:20px">
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Current threshold ($)</div>
+          <input type="number" id="fs-cur-thresh" value="89" min="0" step="1"
+                 class="search-input" style="width:80px">
+        </div>
+        <div style="color:var(--accent);font-size:1.1rem;padding-bottom:2px">→</div>
+        <div>
+          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">New threshold ($)</div>
+          <input type="number" id="fs-new-thresh" value="69" min="0" step="1"
+                 class="search-input" style="width:80px">
+        </div>
+        <button class="calc-btn" onclick="calcFsThreshold()"
+                style="width:auto;padding:8px 20px;font-size:.85rem;margin-top:0">
+          Calculate Impact
+        </button>
+      </div>
+      <div id="fs-model-results"></div>
+    </div>
+            </div>
+            <div class="gp-scen-model" data-model="combined" hidden>
     <!-- ── Combined Scenario ── -->
     <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
       <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">📊 Combined Scenario</h3>
@@ -947,6 +1079,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <div id="sc-results"></div>
     </div>
 
+            </div>
+            <div class="gp-scen-model" data-model="mcgvol" hidden>
     <!-- ── MCG Volume Discount ── -->
     <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
       <h3 style="font-size:.95rem;font-weight:700;margin-bottom:6px">🌵 MCG Volume Discount — Fulfillment Cost Reduction</h3>
@@ -1015,6 +1149,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <div id="vd-results" style="margin-top:20px"></div>
     </div>
 
+            </div>
+            <div class="gp-scen-model" data-model="itemcount" hidden>
     <!-- ── Item Count Free Shipping ── -->
     <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
       <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">📦 Item Count Free Shipping</h3>
@@ -1091,32 +1227,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       </button>
       <div id="ic-results" style="margin-top:20px"></div>
     </div>
-
-    <!-- ── Free Shipping Threshold Modeler ── -->
-    <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
-      <h3 style="font-size:.95rem;font-weight:700;margin-bottom:4px">🚚 Free Shipping Threshold Change</h3>
-      <p style="font-size:.78rem;color:var(--muted);margin-bottom:16px">
-        Models the impact on Succulents Box orders currently in the qualifying subtotal range.
-      </p>
-      <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-bottom:20px">
-        <div>
-          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">Current threshold ($)</div>
-          <input type="number" id="fs-cur-thresh" value="89" min="0" step="1"
-                 class="search-input" style="width:80px">
-        </div>
-        <div style="color:var(--accent);font-size:1.1rem;padding-bottom:2px">→</div>
-        <div>
-          <div style="font-size:.72rem;color:var(--muted);margin-bottom:4px">New threshold ($)</div>
-          <input type="number" id="fs-new-thresh" value="69" min="0" step="1"
-                 class="search-input" style="width:80px">
-        </div>
-        <button class="calc-btn" onclick="calcFsThreshold()"
-                style="width:auto;padding:8px 20px;font-size:.85rem;margin-top:0">
-          Calculate Impact
-        </button>
-      </div>
-      <div id="fs-model-results"></div>
-    </div>
+            </div>
+            <div class="gp-scen-model" data-model="aps" hidden>
 
     <!-- ── APS Shipping Surcharge Projection ───────────────────────────── -->
     <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
@@ -1175,14 +1287,32 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       </div>
       <div id="aps-results"></div>
     </div>
+            </div>
+            <div class="gp-scen-model" data-model="discount" hidden>
+    <!-- Scenario Calculator -->
+    <div id="view-scenario" style="display:none"></div>
 
-  </div><!-- /projection-page -->
+            </div>
+            </div>
+          </div>
+        </section>
+
+      </div><!-- /gp-page -->
+    </main>
+  </div><!-- /dashboard -->
 
 </div>
 
 <script type="module">
 import { parseCSV, parseShipStation, parseAdditionalCosts, parseHpdLog, calculate, summarize, SUB_RENEWAL_CHANNEL } from './js/calculator.js';
 import { initScenarioView, renderScenarioView } from './js/scenarioUI.js';
+import { SCREENS, initTheme, toggleTheme, initRouter, showScreen, currentScreen,
+         buildAlerts, renderAlerts, renderStoreBars, renderChannelDonut,
+         renderShipping as renderShippingScreen, renderReports } from './js/shell.js';
+
+window.toggleTheme = toggleTheme;
+window.gotoScreen  = (id) => showScreen(id);
+initTheme();
 
 // ─── MCG Extra Costs — proxied via server-side edge function ──────
 // Sheet URL lives in MCG_EXTRA_SHEET_URL env var (Netlify dashboard only).
@@ -1683,9 +1813,8 @@ window.runCalc = async () => {
     initScenarioView(document.getElementById('view-scenario'), () => allLines);
 
     document.getElementById('upload-screen').style.display = 'none';
-    document.getElementById('dashboard').style.display = 'block';
-    document.getElementById('btn-new-files').style.display   = '';
-    document.getElementById('btn-projection').style.display  = '';
+    document.getElementById('dashboard').style.display = 'grid';
+    showScreen(currentScreen(), false);
     const dateRange = getDateRange(allLines);
     document.getElementById('topbar-sub').textContent =
       `${allLines.length.toLocaleString()} line items · ${dateRange}`;
@@ -1712,200 +1841,155 @@ function getDateRange(lines) {
 // ─── Render dashboard ─────────────────────────────────────────────
 function renderDashboard(lines) {
   const s = summarize(lines);
+  _lastSummary = s;
 
-  // Cards
-  document.getElementById('c-revenue').textContent     = fmt(s.totalRevenue);
-  document.getElementById('c-revenue-sub').textContent = `Incl. shipping & taxes`;
-  document.getElementById('c-cogs').textContent        = fmt(s.totalCogs);
-  document.getElementById('c-gp').textContent          = fmt(s.totalGp);
-  document.getElementById('c-gpm').textContent         = `GP%: ${s.gpPct.toFixed(1)}%`;
   const shipNet = s.totalShipCollected - s.totalShipPaid;
-  document.getElementById('c-ship-collected').textContent = fmt(s.totalShipCollected);
-  document.getElementById('c-ship-paid').textContent      = fmt(s.totalShipPaid);
+  const orders  = new Set(lines.map(l => l.orderNum)).size;
+
+  // ── KPIs. Gross profit leads: it is the point of the app. ──
+  const gpEl = document.getElementById('c-gp');
+  gpEl.textContent = fmt(s.totalGp);
+  gpEl.style.color = s.totalGp >= 0 ? 'var(--gp-pos)' : 'var(--gp-neg)';
+  document.getElementById('c-gpm').textContent = `${s.gpPct.toFixed(1)}% GP margin`;
+
+  document.getElementById('c-revenue').textContent     = fmt(s.totalRevenue);
+  document.getElementById('c-revenue-sub').textContent = `${orders.toLocaleString()} orders`;
+
+  document.getElementById('c-cogs').textContent = fmt(s.totalCogs);
+  document.getElementById('c-cogs-sub').textContent = s.missingCost > 0
+    ? `${s.missingCost.toLocaleString()} line items incomplete` : 'All sold SKUs costed';
+
   const netEl = document.getElementById('c-ship-net');
-  netEl.textContent  = 'Net: ' + fmt(shipNet);
-  netEl.style.color  = shipNet >= 0 ? 'var(--green)' : 'var(--red)';
+  netEl.textContent = fmt(shipNet);
+  netEl.style.color = shipNet >= 0 ? 'var(--gp-pos)' : 'var(--gp-neg)';
+  document.getElementById('c-ship-collected').textContent = `Collected ${fmt(s.totalShipCollected)}`;
+  document.getElementById('c-ship-paid').textContent      = `Paid ${fmt(s.totalShipPaid)}`;
 
-  // Vendor breakdown under Shipping Paid card
-  const vSS  = s.shipByVendor['ShipStation'];
-  const vHP  = s.shipByVendor['HP Dropship'];
-  document.getElementById('c-ship-vendor-breakdown').innerHTML =
-    `<div style="display:flex;gap:16px;margin-top:6px;flex-wrap:wrap">
-      <span style="font-size:.72rem;color:var(--muted)">ShipStation <span style="color:var(--text);font-weight:600">${fmt(vSS.paid)}</span> <span style="color:var(--muted)">(${vSS.orders} orders)</span></span>
-      <span style="font-size:.72rem;color:var(--muted)">HP Dropship <span style="color:var(--text);font-weight:600">${fmt(vHP.paid)}</span> <span style="color:var(--muted)">(${vHP.orders} orders)</span></span>
-    </div>`;
-
-  const orders = new Set(lines.map(l => l.orderNum)).size;
-  document.getElementById('c-orders').textContent = `${orders.toLocaleString()} orders`;
-
+  // Missing cost is no longer a KPI — it became the first alert.
   if (s.missingCost > 0) {
-    document.getElementById('c-missing-wrap').style.display = '';
-    document.getElementById('c-missing').textContent = s.missingCost;
-    document.getElementById('missing-warn').style.display = '';
-    document.getElementById('missing-warn').textContent =
-      `⚠ ${s.missingCost} line items have missing cost data (highlighted in table). Add SKU costs to products_export or mcg_total to fix.`;
+    const warn = document.getElementById('missing-warn');
+    warn.style.display = '';
+    warn.textContent = `${s.missingCost} line items have missing cost data (highlighted below). `
+      + 'Add SKU costs to products_export or mcg_total to fix.';
+    const badge = document.getElementById('nav-badge-orders');
+    badge.hidden = false; badge.textContent = s.missingCost;
   }
 
-  renderCharts(s);
-  renderShipping(s.shipByType);
+  renderAlerts(buildAlerts(lines, s));
+  renderStoreBars(s.byStore);
+  renderChannelDonut(s.byChannel);
+  renderShippingScreen(s);
+  renderReports(lines, s, openReport);
+  renderChannelBreakdown(s, Object.values(s.byChannel).reduce((a, v) => a + v.revenue, 0));
   buildFilters(lines);
+  renderQuickChips();
   filterTable();
 }
 
-// ─── Charts ────────────────────────────────────────────────────────
-let chartStore = null, chartChannel = null;
+let _lastSummary = null;
 
-function renderCharts(s) {
-  const palette = ['#6ee7b7','#38bdf8','#f472b6','#fbbf24','#a78bfa','#fb923c','#34d399','#60a5fa'];
+/** Alert CTA: land on the channel table with that channel filtered. */
+window.inspectChannel = (name) => {
+  const sel = document.getElementById('filter-channel');
+  if (sel && [...sel.options].some(o => o.value === name)) sel.value = name;
+  showScreen('channels');
+};
+window.downloadMissingSkus = () => window.downloadMissingCosts();
 
-  // GP by store
-  const stores = Object.entries(s.byStore)
-    .filter(([,v]) => v.gp !== 0)
-    .sort((a,b) => b[1].gp - a[1].gp);
-  if (chartStore) chartStore.destroy();
-  chartStore = new Chart(document.getElementById('chart-store'), {
-    type: 'bar',
-    data: {
-      labels: stores.map(([k]) => k.replace('Succulents Box (17381)','SB 17381')),
-      datasets: [{
-        label: 'Gross Profit',
-        data: stores.map(([,v]) => v.gp),
-        backgroundColor: palette,
-        borderRadius: 4,
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { color: '#94a3b8', font:{size:10} }, grid:{color:'#1e293b'} },
-        y: { ticks: { color: '#94a3b8', font:{size:10}, callback: v => '$'+Math.round(v).toLocaleString() }, grid:{color:'#334155'} }
-      }
-    }
-  });
-
-  // Revenue by channel — donut with % tooltip
-  const channels = Object.entries(s.byChannel).sort((a,b) => b[1].revenue - a[1].revenue);
-  const totChRev  = channels.reduce((sum,[,v]) => sum + v.revenue, 0);
-  if (chartChannel) chartChannel.destroy();
-  chartChannel = new Chart(document.getElementById('chart-channel'), {
-    type: 'doughnut',
-    data: {
-      labels: channels.map(([k]) => k || 'Unknown'),
-      datasets: [{ data: channels.map(([,v]) => v.revenue), backgroundColor: palette, borderWidth: 0 }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: {
-        legend: { position: 'right', labels: { color:'#94a3b8', font:{size:11}, boxWidth:12 } },
-        tooltip: { callbacks: { label: ctx => {
-          const pct = totChRev > 0 ? (ctx.parsed / totChRev * 100).toFixed(1) : 0;
-          return ` $${Math.round(ctx.parsed).toLocaleString()} (${pct}%)`;
-        }}}
-      }
-    }
-  });
-
-  // Channel × Vendor breakdown table
-  renderChannelBreakdown(s, totChRev);
+/** Report tiles deep-link to the filtered order table; Sub P&L is its own view. */
+function openReport(id) {
+  if (id === 'subpl') { renderSubPLView(); document.getElementById('view-subpl').style.display = ''; return; }
+  const map = { lowsku: 'lowsku', giftcard: 'giftcard', missing: 'missing' };
+  showScreen('orders');
+  setQuick(map[id] || 'all');
 }
 
+// ─── Charts ────────────────────────────────────────────────────────
+// Gross profit by store and revenue by channel are now rendered by shell.js as
+// horizontal bars and a conic-gradient donut — no canvas, no rotated labels,
+// and the same channel keeps the same series colour everywhere.
+
+/**
+ * Channel performance: eleven columns became six.
+ *
+ * The four vendor columns collapse into two two-line cells (name, then
+ * `$amount · pct`), revenue stacks its share beneath it, and GP% gains a
+ * progress bar. The bar is capped at 100% so a -7,829% channel stays legible
+ * instead of destroying the scale — the colour and the minus sign carry the
+ * sign, per the design system's accessibility floor.
+ */
 function renderChannelBreakdown(s, totChRev) {
-  const el = document.getElementById('channel-breakdown');
-  if (!el) return;
+  const wrap = document.getElementById('channel-breakdown');
+  if (!wrap) return;
+  const channels = Object.entries(s.byChannel || {}).sort((a, b) => b[1].revenue - a[1].revenue);
 
-  const fmt  = v => '$' + v.toFixed(2);
-  const pct  = (a, b) => b > 0 ? (a / b * 100).toFixed(1) + '%' : '—';
-  const gpClr = v => v >= 40 ? 'var(--green)' : v >= 20 ? 'var(--yellow)' : 'var(--red)';
+  const cell = (st) => st
+    ? `<div class="gp-cell-stack"><div class="a">${esc(st.name)}</div>
+         <div class="b">${fmt(st.revenue)} · ${st.pct}</div></div>`
+    : '<span class="t3">—</span>';
 
-  const channels = Object.entries(s.byChannel).sort((a,b) => b[1].revenue - a[1].revenue);
-
-  let html = `<table class="proj-table" style="width:100%;font-size:.78rem">
-    <thead><tr>
-      <th>Channel</th>
-      <th class="num">Revenue</th>
-      <th class="num">Rev %</th>
-      <th class="num">GP $</th>
-      <th class="num">GP %</th>
-      <th>Top Vendor (Revenue)</th>
-      <th class="num">Vendor Rev</th>
-      <th class="num">Vendor Rev %</th>
-      <th>Top Vendor (GP)</th>
-      <th class="num">Vendor GP</th>
-      <th class="num">Vendor GP %</th>
-    </tr></thead><tbody>`;
-
+  let body = '';
   for (const [ch, cv] of channels) {
-    const revPct  = totChRev > 0 ? cv.revenue / totChRev * 100 : 0;
-    const gpPctV  = cv.revenue > 0 ? cv.gp / cv.revenue * 100 : 0;
-
-    // Per-store breakdown for this channel
-    const stores  = Object.entries((s.byChannelStore || {})[ch] || {})
-      .map(([name, v]) => ({ name, ...v, gpPct: v.revenue > 0 ? v.gp / v.revenue * 100 : 0 }));
-
-    const topByRev = stores.sort((a,b) => b.revenue - a.revenue)[0];
-    const topByGp  = [...stores].sort((a,b) => b.gp - a.gp)[0];
-
-    const isSubRow = ch === SUB_RENEWAL_CHANNEL;
-    html += `<tr${isSubRow ? ' style="background:rgba(56,189,248,.06)"' : ''}>
-      <td><strong>${ch || 'Unknown'}</strong>${isSubRow
-        ? `<div style="font-size:.7rem;color:var(--muted);font-weight:400;margin-top:2px">Cost only — revenue was collected upfront. See 🔁 Subscriptions.</div>`
-        : ''}</td>
-      <td class="num">${fmt(cv.revenue)}</td>
-      <td class="num">${revPct.toFixed(1)}%</td>
-      <td class="num">${fmt(cv.gp)}</td>
-      <td class="num" style="color:${gpClr(gpPctV)}">${pct(cv.gp, cv.revenue)}</td>
-      <td style="color:var(--muted)">${topByRev ? topByRev.name : '—'}</td>
-      <td class="num">${topByRev ? fmt(topByRev.revenue) : '—'}</td>
-      <td class="num">${topByRev ? pct(topByRev.revenue, cv.revenue) : '—'}</td>
-      <td style="color:var(--muted)">${topByGp  ? topByGp.name  : '—'}</td>
-      <td class="num">${topByGp  ? fmt(topByGp.gp)      : '—'}</td>
-      <td class="num" style="color:${topByGp ? gpClr(topByGp.gpPct) : ''}">${topByGp ? pct(topByGp.gp, topByGp.revenue) : '—'}</td>
+    const gpPctV = cv.revenue > 0 ? cv.gp / cv.revenue * 100 : 0;
+    const stores = Object.entries((s.byChannelStore || {})[ch] || {})
+      .map(([name, v]) => ({ name, ...v }));
+    const byRev = [...stores].sort((a, b) => b.revenue - a.revenue)[0];
+    const byGp  = [...stores].sort((a, b) => b.gp - a.gp)[0];
+    const neg = cv.gp < 0;
+    const tone = neg ? 'var(--gp-neg)' : 'var(--gp-pos)';
+    body += `<tr>
+      <td style="font-weight:600">${esc(ch || 'Unknown')}</td>
+      <td class="num"><div class="gp-cell-stack"><div class="a" style="font-weight:600">${fmt(cv.revenue)}</div>
+        <div class="b">${totChRev > 0 ? (cv.revenue / totChRev * 100).toFixed(1) : '0.0'}%</div></div></td>
+      <td class="num" style="font-weight:600;color:${tone}">${fmt(cv.gp)}</td>
+      <td style="width:170px">
+        <div class="gp-pctbar">
+          <span class="track"><span class="fill" style="width:${
+            Math.max(0, Math.min(100, gpPctV))}%;background:${neg ? 'var(--gp-neg)' : 'var(--gp-brand)'}"></span></span>
+          <span class="fig" style="color:${tone}">${gpPctV.toFixed(1)}%</span>
+        </div></td>
+      <td>${cell(byRev && { name: byRev.name, revenue: byRev.revenue,
+            pct: cv.revenue > 0 ? (byRev.revenue / cv.revenue * 100).toFixed(1) + '%' : '—' })}</td>
+      <td>${cell(byGp && { name: byGp.name, revenue: byGp.gp,
+            pct: byGp.revenue > 0 ? (byGp.gp / byGp.revenue * 100).toFixed(1) + '%' : '—' })}</td>
     </tr>`;
   }
 
-  // Totals row
-  const totGp  = channels.reduce((s,[,v]) => s + v.gp,      0);
-  const totGpP = totChRev > 0 ? totGp / totChRev * 100 : 0;
-  html += `<tr class="tfoot-total">
-    <td><strong>Total</strong></td>
-    <td class="num">${fmt(totChRev)}</td>
-    <td class="num">100%</td>
-    <td class="num">${fmt(totGp)}</td>
-    <td class="num" style="color:${gpClr(totGpP)}">${totGpP.toFixed(1)}%</td>
-    <td colspan="6"></td>
-  </tr>`;
+  const totGp = channels.reduce((a, [, v]) => a + v.gp, 0);
+  const totPct = totChRev > 0 ? totGp / totChRev * 100 : 0;
 
-  html += `</tbody></table>`;
-  html += `<p style="font-size:.72rem;color:var(--muted);margin-top:8px;line-height:1.6">
-    <strong>Subscription renewals (prepaid)</strong> holds the delivery legs of subscriptions whose
-    full term was charged on the order that started them. Those lines carry fulfilment cost with no
-    revenue of their own, so the row shows a loss by design — it is not a channel that loses money.
-    Subscription unit economics, pairing each delivery's cost with the monthly price actually
-    charged, are in the <strong>🔁 Subscriptions</strong> and <strong>📊 Sub P&amp;L</strong> tabs.</p>`;
-  el.innerHTML = html;
+  wrap.innerHTML = `
+    <div class="gp-card">
+      <div class="gp-card-head">
+        <h3>Channel performance</h3>
+        <span class="meta">${channels.length} channels · sorted by revenue</span>
+        <div class="right"><button class="gp-btn gp-btn-sm" onclick="downloadDetailCSV()">Export</button></div>
+      </div>
+      <div class="gp-table-wrap">
+        <table class="gp-table" style="min-width:860px">
+          <thead><tr>
+            <th>Channel</th><th class="num">Revenue</th><th class="num">Gross profit</th>
+            <th>GP %</th><th>Top vendor by revenue</th><th>Top vendor by GP</th>
+          </tr></thead>
+          <tbody>${body}</tbody>
+          <tfoot><tr><td>Total</td><td class="num">${fmt(totChRev)}</td>
+            <td class="num" style="color:${totGp < 0 ? 'var(--gp-neg)' : 'var(--gp-pos)'}">${fmt(totGp)}</td>
+            <td>${totPct.toFixed(1)}%</td><td colspan="2"></td></tr></tfoot>
+        </table>
+      </div>
+      <div class="gp-card-body" style="border-top:1px solid var(--gp-border)">
+        <p class="gp-note"><strong>Subscription renewals (prepaid)</strong> holds the delivery legs of
+        subscriptions charged in full on the order that started them: fulfilment cost with no revenue of
+        their own, so that row shows a loss by design. Their unit economics are in Reports.</p>
+      </div>
+    </div>`;
 }
 
-// ─── Shipping cards ────────────────────────────────────────────────
-function renderShipping(shipByType) {
-  const grid = document.getElementById('ship-grid');
-  grid.innerHTML = '';
-  for (const [type, v] of Object.entries(shipByType)) {
-    const delta = v.collected - v.paid;
-    const html = `
-      <div class="ship-card">
-        <div class="type">${type}</div>
-        <div class="row"><span>Orders</span><span>${v.orders}</span></div>
-        <div class="row"><span>Collected</span><span>${fmt(v.collected)}</span></div>
-        <div class="row"><span>Paid</span><span>${fmt(v.paid)}</span></div>
-        <div class="row">
-          <span>Net</span>
-          <span class="${delta >= 0 ? 'pos':'neg'}">${fmt(delta)}</span>
-        </div>
-      </div>`;
-    grid.insertAdjacentHTML('beforeend', html);
-  }
-}
+const esc = (v) => String(v ?? '').replace(/[&<>"]/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+// The seven shipping profile cards became one table — see renderShipping() in
+// js/shell.js. The old #ship-grid container is retained but hidden.
 
 // ─── Table ─────────────────────────────────────────────────────────
 function buildFilters(lines) {
@@ -1922,9 +2006,12 @@ window.filterTable = () => {
   const store         = document.getElementById('filter-store').value;
   const chan          = document.getElementById('filter-channel').value;
   const cost          = document.getElementById('filter-cost').value;
-  const excludeNoCost    = document.getElementById('filter-exclude-nocost').checked;
-  const excludeDigital   = document.getElementById('filter-exclude-digital').checked;
-  const excludeGiftCard  = document.getElementById('filter-exclude-giftcard').checked;
+  // The three exclude checkboxes became quick-filter chips; read them defensively
+  // so the filter works whether or not the legacy controls are present.
+  const chk = id => document.getElementById(id)?.checked === true;
+  const excludeNoCost   = chk('filter-exclude-nocost');
+  const excludeDigital  = chk('filter-exclude-digital');
+  const excludeGiftCard = chk('filter-exclude-giftcard');
   const dateFrom      = document.getElementById('filter-date-from').value;
   const dateTo        = document.getElementById('filter-date-to').value;
 
@@ -1955,17 +2042,19 @@ window.filterTable = () => {
   });
 
   currentPage = 1;
-  document.getElementById('row-count').textContent = `${filteredLines.length.toLocaleString()} rows`;
+  const miss = filteredLines.filter(l => l.costSource === 'COST MISSING').length;
+  document.getElementById('row-count').textContent =
+    `${filteredLines.length.toLocaleString()} rows` + (miss ? ` · ${miss} missing cost` : '');
   renderPage();
-  if (currentView === 'order')      renderOrderView();
-  if (currentView === 'sub')        renderSubView();
-  if (currentView === 'subpl')      renderSubPLView();
-  if (currentView === 'lowmargin')  renderLowMarginView();
-  if (currentView === 'lowsku')     renderLowSkuView();
-  if (currentView === 'giftcard')   renderGiftCardView();
-  if (currentView === 'influencer') renderInfluencerView();
-  if (currentView === 'freeship')   renderFreeShipView();
-  // HPD view uses its own data (hpdData), not filteredLines — no re-render needed on filter change
+  const pane = QUICK_VIEW[quickFilter] || tableView;
+  if (pane === 'order')      renderOrderView();
+  if (pane === 'sub')        renderSubView();
+  if (pane === 'lowmargin')  renderLowMarginView();
+  if (pane === 'lowsku')     renderLowSkuView();
+  if (pane === 'giftcard')   renderGiftCardView();
+  if (pane === 'influencer') renderInfluencerView();
+  if (pane === 'freeship')   renderFreeShipView();
+  // HPD and APS read their own uploads, not filteredLines — no re-render on filter change
 };
 
 window.sortBy = key => {
@@ -1993,7 +2082,7 @@ function renderPage() {
   const tbody = document.getElementById('table-body');
   tbody.innerHTML = page.map(li => {
     const missing = li.costSource === 'COST MISSING';
-    const rowCls  = missing ? 'style="background:rgba(248,113,113,.06)"' : '';
+    const rowCls  = missing ? 'class="row-missing"' : '';
     return `<tr ${rowCls}>
       <td>${li.orderNum}</td>
       <td>${li.date || ''}</td>
@@ -2122,8 +2211,6 @@ function deltaClass(v) { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg
 window.newFiles = () => {
   document.getElementById('dashboard').style.display = 'none';
   document.getElementById('upload-screen').style.display = '';
-  document.getElementById('btn-new-files').style.display  = 'none';
-  document.getElementById('btn-projection').style.display = 'none';
   // Reset file inputs and saved selections
   ordersFiles = []; shipFile = null; costsFile = null; hpdFile = null;
   savedOrdersTexts = null; savedShipText = null; savedCostsText = null; savedHpdText = null;
@@ -2246,7 +2333,7 @@ window.downloadSubCSV = () => {
 };
 
 // ─── Order View ───────────────────────────────────────────────────────────────
-let currentView = 'sku';
+
 let orderRows = [], orderSortKey = 'date', orderSortAsc = false, orderPage = 1;
 const ORDER_PAGE_SIZE = 100;
 let ordFilteredLines = [];  // filteredLines after order-view-local filters
@@ -2272,33 +2359,96 @@ window.applyOrdFilters = () => {
   _renderOrderViewFromLines();
 };
 
-window.switchView = view => {
-  currentView = view;
-  document.getElementById('view-sku').style.display        = view === 'sku'        ? '' : 'none';
-  document.getElementById('view-order').style.display      = view === 'order'      ? '' : 'none';
-  document.getElementById('view-sub').style.display        = view === 'sub'        ? '' : 'none';
-  document.getElementById('view-lowmargin').style.display  = view === 'lowmargin'  ? '' : 'none';
-  document.getElementById('view-lowsku').style.display     = view === 'lowsku'     ? '' : 'none';
-  document.getElementById('view-giftcard').style.display   = view === 'giftcard'   ? '' : 'none';
-  document.getElementById('view-influencer').style.display = view === 'influencer' ? '' : 'none';
-  document.getElementById('view-freeship').style.display   = view === 'freeship'   ? '' : 'none';
-  document.getElementById('view-hpd').style.display        = view === 'hpd'        ? '' : 'none';
-  document.getElementById('view-aps').style.display        = view === 'aps'        ? '' : 'none';
-  document.getElementById('view-subpl').style.display      = view === 'subpl'      ? '' : 'none';
-  document.getElementById('view-scenario').style.display    = view === 'scenario'   ? '' : 'none';
-  ['sku','order','sub','subpl','lowmargin','lowsku','giftcard','influencer','freeship','hpd','aps','scenario'].forEach(v =>
-    document.getElementById(`tab-${v}`).classList.toggle('active', v === view));
-  if (view === 'order')      renderOrderView();
-  if (view === 'sub')        renderSubView();
-  if (view === 'subpl')      renderSubPLView();
-  if (view === 'lowmargin')  renderLowMarginView();
-  if (view === 'lowsku')     renderLowSkuView();
-  if (view === 'giftcard')   renderGiftCardView();
-  if (view === 'influencer') renderInfluencerView();
-  if (view === 'freeship')   renderFreeShipView();
-  if (view === 'hpd')        renderHpdView();
-  if (view === 'aps')        renderApsView();
-  if (view === 'scenario')   renderScenarioView();
+// ─── Order detail: table shape vs narrowing ────────────────────────
+// The eleven undifferentiated view buttons split by what they actually do:
+// SKU/Order change the SHAPE of the table (segmented control), the rest NARROW
+// the same data (chips), and Sub P&L / Scenario Calculator left the table
+// entirely to become their own destinations.
+
+const QUICK = [
+  ['all',        'All rows'],
+  ['lowmargin',  'Low margin'],
+  ['lowsku',     'Low margin SKU'],
+  ['missing',    'Missing cost'],
+  ['sub',        'Subscriptions'],
+  ['giftcard',   'Gift cards'],
+  ['influencer', 'Influencer'],
+  ['freeship',   'Free ship'],
+  ['hpd',        'HPD ship'],
+  ['aps',        'APS'],
+];
+// A chip that has a purpose-built table shows it; the rest narrow the SKU table,
+// so no column that exists today is lost.
+const QUICK_VIEW = { lowmargin: 'lowmargin', lowsku: 'lowsku', giftcard: 'giftcard',
+                     sub: 'sub', influencer: 'influencer', freeship: 'freeship',
+                     hpd: 'hpd', aps: 'aps' };
+const ALL_PANES = ['sku','order','sub','subpl','lowmargin','giftcard','influencer',
+                   'freeship','hpd','aps','lowsku'];
+
+let tableView = 'sku', quickFilter = 'all';
+
+function renderQuickChips() {
+  const el = document.getElementById('quick-chips');
+  if (!el) return;
+  el.innerHTML = QUICK.map(([id, label]) =>
+    `<button class="gp-chip" data-quick="${id}" aria-pressed="${id === quickFilter}">${label}</button>`).join('');
+  el.querySelectorAll('[data-quick]').forEach(b =>
+    b.addEventListener('click', () => setQuick(b.dataset.quick)));
+}
+
+function showPane(name) {
+  for (const p of ALL_PANES) {
+    const el = document.getElementById('view-' + p);
+    if (el) el.style.display = p === name ? '' : 'none';
+  }
+}
+
+window.setTableView = (v) => {
+  tableView = v;
+  document.getElementById('seg-sku').setAttribute('aria-pressed', String(v === 'sku'));
+  document.getElementById('seg-order').setAttribute('aria-pressed', String(v === 'order'));
+  if (quickFilter === 'all' || quickFilter === 'missing') applyQuick();
+};
+
+window.setQuick = (id) => {
+  quickFilter = id;
+  document.querySelectorAll('[data-quick]').forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.quick === id)));
+  applyQuick();
+};
+
+function applyQuick() {
+  const costSel = document.getElementById('filter-cost');
+  if (costSel) costSel.value = quickFilter === 'missing' ? 'missing' : '';
+  const pane = QUICK_VIEW[quickFilter] || tableView;
+  showPane(pane);
+  filterTable();
+  if (pane === 'order')      renderOrderView();
+  if (pane === 'sub')        renderSubView();
+  if (pane === 'lowmargin')  renderLowMarginView();
+  if (pane === 'lowsku')     renderLowSkuView();
+  if (pane === 'giftcard')   renderGiftCardView();
+  if (pane === 'influencer') renderInfluencerView();
+  if (pane === 'freeship')   renderFreeShipView();
+  if (pane === 'hpd')        renderHpdView();
+  if (pane === 'aps')        renderApsView();
+}
+
+// Screens that need a render when first shown.
+initRouter((screen) => {
+  if (screen === 'orders')    applyQuick();
+  if (screen === 'reports')   renderSubPLView();
+  if (screen === 'scenarios') renderScenarioView();
+});
+
+// ─── Scenarios: list picker + one pane ─────────────────────────────
+window.selectModel = (key) => {
+  document.querySelectorAll('[data-model]').forEach(el => {
+    if (el.classList.contains('gp-pick')) el.setAttribute('aria-pressed', String(el.dataset.model === key));
+    else el.hidden = el.dataset.model !== key;
+  });
+  if (key === 'discount') renderScenarioView();
+  if (key === 'price')    renderProjView();
 };
 
 function computeOrderRows(lines) {
@@ -2398,8 +2548,8 @@ function renderOrderPage() {
   document.getElementById('order-table-body').innerHTML = page.map(o => {
     const isOpen = ordExpanded.has(o.orderNum);
     const safe   = o.orderNum.replace(/[^a-zA-Z0-9]/g, '_');
-    const rowCls = `lm-order-row${isOpen ? ' open' : ''}${o.missingCost ? ' missing-row' : ''}`;
-    const bgStyle = o.missingCost ? ' style="background:rgba(248,113,113,.06)"' : '';
+    const rowCls = `lm-order-row${isOpen ? ' open' : ''}${o.missingCost ? ' missing-row row-missing' : ''}`;
+    const bgStyle = '';
     const lines  = linesByOrder.get(o.orderNum) || [];
 
     const detailHtml = isOpen ? `
@@ -3677,20 +3827,11 @@ window.downloadHpdCsv = () => {
 };
 
 // ─── Projection page nav ─────────────────────────────────────────
-window.openProjectionPage = function() {
-  document.getElementById('dashboard').style.display        = 'none';
-  document.getElementById('projection-page').style.display  = '';
-  document.getElementById('btn-new-files').style.display    = 'none';
-  document.getElementById('btn-projection').style.display   = 'none';
-  renderProjView();
-};
-
-window.closeProjectionPage = function() {
-  document.getElementById('projection-page').style.display  = 'none';
-  document.getElementById('dashboard').style.display        = '';
-  document.getElementById('btn-new-files').style.display    = '';
-  document.getElementById('btn-projection').style.display   = '';
-};
+// The standalone Projection page became the Scenarios screen, reached from the
+// sidebar and deep-linkable at #/scenarios. Kept as aliases so any remaining
+// caller still lands somewhere sensible.
+window.openProjectionPage  = () => showScreen('scenarios');
+window.closeProjectionPage = () => showScreen('overview');
 
 // ─── Free Shipping Threshold Modeler ─────────────────────────────
 let _fsRows = [];
