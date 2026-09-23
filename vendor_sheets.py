@@ -1,7 +1,7 @@
 """
 vendor_sheets.py — vendor-scoped product cost import
 ====================================================
-Imports product costs for the four gift/arrangement vendors from the
+Imports product costs for the gift/arrangement vendors from the
 "Products Master" Google Sheet (one tab per vendor) and returns a
 VENDOR-AWARE catalog:
 
@@ -15,8 +15,8 @@ VENDOR-AWARE catalog:
     }
 
 The values imported here are PRODUCT costs (COGS). No shipping component is
-imported — the Surfside tab carries a free-text shipping note column and the
-Calathea tab carries a weight column; neither is part of product COGS.
+imported — the Surfside tab carries a free-text shipping note column, and the
+Calathea and LindaMakes tabs carry weight columns; none is part of product COGS.
 
 Every tab is validated and the counts are printed so a Netlify build log shows
 exactly what landed. A configured tab that yields zero valid costs is a loud
@@ -30,8 +30,10 @@ LIVE_TO_GIVE         = 'Live to Give'
 LIVELY_GOOD          = 'Lively Good'
 CALATHEA_COLLECTIVE  = 'Calathea Collective'
 SURFSIDE_ARRANGEMENT = 'Surfside Arrangement'
+LINDAMAKES           = 'LindaMakes'
 
-VENDOR_ORDER = [LIVE_TO_GIVE, LIVELY_GOOD, CALATHEA_COLLECTIVE, SURFSIDE_ARRANGEMENT]
+VENDOR_ORDER = [LIVE_TO_GIVE, LIVELY_GOOD, CALATHEA_COLLECTIVE, SURFSIDE_ARRANGEMENT,
+                LINDAMAKES]
 
 # vendor → env var holding the CSV export URL of that tab
 VENDOR_ENV = {
@@ -39,6 +41,7 @@ VENDOR_ENV = {
     LIVELY_GOOD:          'LIVELY_GOOD_SHEET_URL',
     CALATHEA_COLLECTIVE:  'CALATHEA_COLLECTIVE_SHEET_URL',
     SURFSIDE_ARRANGEMENT: 'SURFSIDE_ARRANGEMENT_SHEET_URL',
+    LINDAMAKES:           'LINDAMAKES_SHEET_URL',
 }
 
 
@@ -123,7 +126,8 @@ def col_index(header, candidates):
 
 
 # ── Per-vendor tab specs ──────────────────────────────────────────────────────
-# Verified against the live tabs on 2026-09-22; see DEPLOYMENT.md for gids.
+# Verified against the live tabs on 2026-09-22 (LindaMakes 2026-09-23);
+# see DEPLOYMENT.md for gids.
 VENDOR_SPECS = {
     LIVE_TO_GIVE: dict(
         header_required=['sku'],
@@ -157,6 +161,16 @@ VENDOR_SPECS = {
         cost=['Cost (what Surfside Succulents receives)', 'Cost'],
         name=['Product'],
         carry_name=True,
+        active=None,
+    ),
+    LINDAMAKES: dict(
+        header_required=['sku', 'cost'],
+        sku=['SKU'],
+        # The sheet header spells the vendor 'LindaMakess'; match on the prefix
+        # so a later correction does not break the import.
+        cost=['Cost (what LindaMakes receives)', 'Cost'],
+        name=['Product'],
+        carry_name=True,      # product cell is merged across colourway rows
         active=None,
     ),
 }
