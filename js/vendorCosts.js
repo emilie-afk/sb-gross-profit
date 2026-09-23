@@ -1,7 +1,7 @@
 /**
  * vendorCosts.js — vendor-aware product cost catalog
  * ===================================================
- * The four gift/arrangement vendors each publish their own cost tab, and the
+ * Each gift/arrangement vendor publishes its own cost tab, and the
  * same SKU string could in principle appear under more than one vendor. Costs
  * are therefore resolved by (vendor, SKU) — never by SKU alone — and a cost is
  * never silently borrowed from another vendor.
@@ -16,9 +16,10 @@ export const LIVE_TO_GIVE         = 'Live to Give';
 export const LIVELY_GOOD          = 'Lively Good';
 export const CALATHEA_COLLECTIVE  = 'Calathea Collective';
 export const SURFSIDE_ARRANGEMENT = 'Surfside Arrangement';
+export const LINDAMAKES           = 'LindaMakes';
 
 export const VENDOR_KEYS = [
-  LIVE_TO_GIVE, LIVELY_GOOD, CALATHEA_COLLECTIVE, SURFSIDE_ARRANGEMENT,
+  LIVE_TO_GIVE, LIVELY_GOOD, CALATHEA_COLLECTIVE, SURFSIDE_ARRANGEMENT, LINDAMAKES,
 ];
 
 // Shopify's Vendor column is free text and has drifted over time. Map the
@@ -38,6 +39,10 @@ const VENDOR_ALIASES = {
   'surfside arrangements': SURFSIDE_ARRANGEMENT,
   'surfside succulents': SURFSIDE_ARRANGEMENT,
   'surfside': SURFSIDE_ARRANGEMENT,
+  'lindamakes': LINDAMAKES,
+  'linda makes': LINDAMAKES,
+  // The cost tab's own header spells it with a trailing s.
+  'lindamakess': LINDAMAKES,
 };
 
 // SKU-prefix inference, used only when the Vendor column doesn't name a known
@@ -46,6 +51,7 @@ const VENDOR_SKU_PREFIXES = [
   [/^CC-/i,          CALATHEA_COLLECTIVE],
   [/^SUR-/i,         SURFSIDE_ARRANGEMENT],
   [/^(PL|PB)_/i,     LIVELY_GOOD],
+  [/^LM-/i,          LINDAMAKES],
 ];
 
 // Live to Give SKUs are words, not codes ("Pray DLX", "TY simple").
