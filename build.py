@@ -22,6 +22,7 @@ Required Netlify env vars:
   LIVELY_GOOD_SHEET_URL           — Lively Good tab CSV export URL
   CALATHEA_COLLECTIVE_SHEET_URL   — Calathea Collective tab CSV export URL
   SURFSIDE_ARRANGEMENT_SHEET_URL  — Surfside Arrangement tab CSV export URL
+  LINDAMAKES_SHEET_URL            — LindaMakes tab CSV export URL
   VENDOR_IMPORT_STRICT (optional) — set to 1 to FAIL the build when a configured
                                     vendor tab imports zero costs (default: warn)
   HP_SHEET_URL          — HP Dropship sheet export URL (Make.com synced sheet)
