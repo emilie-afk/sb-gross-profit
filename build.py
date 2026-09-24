@@ -618,3 +618,66 @@ total = len(mcg_costs) + len(product_costs) + len(sb_costs) + len(hp_suppl)
 vendor_total = sum(len(v) for v in vendor_catalog.values())
 print(f"\nBuild complete — {total} total SKUs across legacy sources, "
       f"{vendor_total} vendor-scoped SKUs.")
+
+
+# ── Optional: push the generated cost catalog to the weekly-automation Worker ──
+# No-op unless both CATALOG_PUSH_URL and SB_INGEST_SECRET are set in the Netlify
+# environment. The Worker validates and versions the catalog; a shrunken or
+# empty one is rejected there and never replaces the last accepted catalog.
+# A push failure is reported but never fails the dashboard build.
+def _hook_refresh_id(raw):
+    from catalog_hook import refresh_id_from_hook_body
+    return refresh_id_from_hook_body(raw)
+
+
+def push_catalog():
+    url = os.environ.get('CATALOG_PUSH_URL', '').strip()
+    secret = os.environ.get('SB_INGEST_SECRET', '').strip()
+    if not url or not secret:
+        print("\nCatalog push: skipped (CATALOG_PUSH_URL / SB_INGEST_SECRET not set)")
+        return
+    if not url.startswith('https://'):
+        print("\nCatalog push: skipped (CATALOG_PUSH_URL must be https)")
+        return
+    tables = {}
+    for name in ['mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement',
+                 'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index']:
+        path = os.path.join(DATA_DIR, f'{name}.json')
+        if os.path.exists(path):
+            with open(path) as f:
+                tables[name] = json.load(f)
+    body = {'tables': tables, 'meta': {
+        'source': 'build_push',
+        'builtAt': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+        'commit': os.environ.get('COMMIT_REF', ''),
+    }}
+    # Make S5 triggers this build through a Netlify build hook whose JSON body
+    # carries the Worker's catalog refresh id. Netlify exposes that body as
+    # INCOMING_HOOK_BODY; echoing the id lets the Worker verify THIS build's
+    # catalog reached it (Revision 6). Anything that is not a refresh id is ignored.
+    refresh_id = _hook_refresh_id(os.environ.get('INCOMING_HOOK_BODY', ''))
+    if refresh_id:
+        body['meta']['refreshId'] = refresh_id
+        print(f"\nCatalog push: answering catalog refresh {refresh_id}")
+    extra_url = os.environ.get('MCG_EXTRA_SHEET_URL', '').strip()
+    if extra_url:
+        try:
+            with urllib.request.urlopen(extra_url, timeout=15) as r:
+                body['mcgExtraCsv'] = r.read().decode('utf-8', errors='replace')
+        except Exception as e:
+            print(f"  ⚠ MCG extra sheet fetch failed ({e}); pushing catalog without it")
+    try:
+        req = urllib.request.Request(url.rstrip('/') + '/v1/ingest/catalog',
+                                     data=json.dumps(body).encode('utf-8'), method='POST',
+                                     headers={'Content-Type': 'application/json', 'X-Ingest-Secret': secret})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            res = json.loads(r.read().decode('utf-8'))
+        status = 'accepted' if res.get('accepted') else 'REJECTED'
+        print(f"\nCatalog push: {status} {res.get('catalogRev')} (active: {res.get('activeCatalogRev')})")
+        for reason in res.get('reasons') or []:
+            print(f"    - {reason}")
+    except Exception as e:
+        print(f"\nCatalog push: failed ({type(e).__name__}); the dashboard build is unaffected")
+
+
+push_catalog()

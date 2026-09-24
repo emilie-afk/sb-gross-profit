@@ -1,0 +1,28 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+:root{--bg:#0f172a;--surface:#1e293b;--surface2:#273448;--border:#334155;--text:#f1f5f9;
+--muted:#94a3b8;--accent:#6ee7b7;--accent2:#38bdf8;--red:#f87171;--yellow:#fbbf24;--radius:10px}
+body{background:var(--bg);color:var(--text);font-family:sans-serif;font-size:14px;margin:0;padding:16px}
+</style></head><body>
+<div id="view-scenario"></div>
+<script type="module">
+import { initScenarioView } from '../js/scenarioUI.js';
+import { calculate } from '../js/calculator.js';
+const VC = await (await fetch('../data/vendor_costs.json')).json();
+const VI = await (await fetch('../data/vendor_index.json')).json();
+const r = (o) => Object.assign({
+  'Name':'#472351','Lineitem quantity':'1','Lineitem name':'P','Lineitem price':'0',
+  'Lineitem sku':'X','Shipping':'0','Subtotal':'0','Total':'0','Taxes':'0',
+  'Created at':'2026-07-05 10:00:00 -0700','Vendor':'','Source':'web',
+  'Lineitem discount':'0','Cancelled at':'','Refunded Amount':'0'}, o);
+const rows = [
+  r({Name:'#472351','Lineitem sku':'CC-WC-PLANT-DAD',Vendor:'Calathea Collective','Lineitem name':'White Watering Can - Plant Dad','Lineitem price':'45.00','Lineitem discount':'4.50',Shipping:'9.00',Subtotal:'40.50',Total:'49.50'}),
+  r({Name:'#472352','Lineitem sku':'SUR-HEART-SMALL',Vendor:'Surfside Arrangement','Lineitem name':'Small Heart','Lineitem price':'80.00',Shipping:'12.00',Subtotal:'80',Total:'92'}),
+  r({Name:'#472353','Lineitem sku':'PL_FLF_4IN1',Vendor:'Lively Root','Lineitem name':'Fiddle Leaf Fig','Lineitem price':'67.08',Shipping:'15.00',Subtotal:'67.08',Total:'82.08'}),
+  r({Name:'#472354','Lineitem sku':'MYSTERY-1',Vendor:'Nobody','Lineitem name':'Mystery','Lineitem price':'20.00',Shipping:'5.00',Subtotal:'20',Total:'25'}),
+];
+const ship = new Map([['472351',7.5],['472352',11],['472353',14],['472354',6]]);
+const lines = calculate(rows, ship, {}, {}, {}, {}, {}, {}, null, {}, VC, VI);
+window.__lines = lines;
+initScenarioView(document.getElementById('view-scenario'), () => lines);
+window.__ready = true;
+</script></body></html>

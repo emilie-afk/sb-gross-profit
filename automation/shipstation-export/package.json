@@ -1,0 +1,16 @@
+{
+  "name": "sb-shipstation-export",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Weekly ShipStation custom shipment export for the SB GP pipeline (runs on the Windows host)",
+  "type": "module",
+  "scripts": {
+    "login": "node src/login.mjs --config config.local.json",
+    "export": "node src/export.mjs --config config.local.json",
+    "codegen": "playwright codegen https://ship.shipstation.com/",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.56.0"
+  }
+}

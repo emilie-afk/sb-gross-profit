@@ -1,0 +1,20 @@
+__pycache__/
+node_modules/
+data/
+
+# ── Weekly automation: never commit source data, generated order data, dumps or secrets ──
+*.csv
+!tests/**/*.csv
+*.sqlite
+*.sqlite3
+*.db
+*.sql.gz
+worker/.wrangler/
+worker/.dev.vars
+.dev.vars
+.env
+.env.*
+automation/**/config.local.json
+automation/**/storage-state*.json
+automation/**/downloads/
+automation/**/runs/

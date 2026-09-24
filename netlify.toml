@@ -5,3 +5,9 @@
 [[edge_functions]]
   path = "/*"
   function = "auth"
+
+# Same-origin proxy to the SB GP Worker (/api/v1/* → Worker /v1/*). Runs after
+# the password gate above. Needs SB_WORKER_ORIGIN; without it, answers 503.
+[[edge_functions]]
+  path = "/api/v1/*"
+  function = "api-proxy"

@@ -1,0 +1,19 @@
+{
+  "name": "sb-gp-worker",
+  "private": true,
+  "type": "module",
+  "description": "Weekly automation Worker for the SB GP dashboard. Dev tooling only; the Worker has no runtime dependencies.",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "integration": "node test/workerd-integration.mjs",
+    "adversarial": "node test/workerd-adversarial.mjs",
+    "migrate:local": "wrangler d1 migrations apply sb-gp --local",
+    "migrate:remote": "wrangler d1 migrations apply sb-gp --remote",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "miniflare": "^3.20250718.0",
+    "wrangler": "^3.100.0"
+  }
+}
