@@ -1290,7 +1290,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             </div>
             <div class="gp-scen-model" data-model="discount" hidden>
     <!-- Scenario Calculator -->
-    <div id="view-scenario" style="display:none"></div>
+    <div id="view-scenario"></div>
 
             </div>
             </div>
@@ -1752,18 +1752,36 @@ window.runCalc = async () => {
   errEl.style.display = 'none';
   showLoading('Loading cost tables…');
   try {
+    // A missing or unbuilt data file used to reject inside r.json() with
+    // "Unexpected token '<'" — the server's 404 HTML page — which killed the
+    // whole run and told the user nothing. Degrade to an empty table and name
+    // the file instead; missing costs then surface through the normal
+    // missing-cost alert rather than as a parse error.
+    const missingData = [];
+    const loadData = async (name) => {
+      try {
+        const r = await fetch('./data/' + name);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return await r.json();
+      } catch (e) {
+        console.warn(`data/${name} unavailable (${e.message}) — continuing without it`);
+        missingData.push(name);
+        return {};
+      }
+    };
+
     const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp, hpByName, skuAlias, mcgExtra,
            vendorCosts, vendorIndex] = await Promise.all([
-      fetch('./data/mcg_total.json').then(r => r.json()),
-      fetch('./data/product_costs.json').then(r => r.json()),
-      fetch('./data/sku_weights.json').then(r => r.json()),
-      fetch('./data/sb_costs.json').then(r => r.json()).catch(() => ({})),
-      fetch('./data/hp_supplement.json').then(r => r.json()).catch(() => ({})),
-      fetch('./data/hp_by_name.json').then(r => r.json()).catch(() => ({})),
-      fetch('./data/sku_alias.json').then(r => r.json()).catch(() => ({})),
+      loadData('mcg_total.json'),
+      loadData('product_costs.json'),
+      loadData('sku_weights.json'),
+      loadData('sb_costs.json'),
+      loadData('hp_supplement.json'),
+      loadData('hp_by_name.json'),
+      loadData('sku_alias.json'),
       fetchMcgExtraCosts(),
-      fetch('./data/vendor_costs.json').then(r => r.json()).catch(() => null),
-      fetch('./data/vendor_index.json').then(r => r.json()).catch(() => null),
+      loadData('vendor_costs.json'),
+      loadData('vendor_index.json'),
     ]);
 
     // Build additionalCosts: baked-in Shopify export costs + any user-uploaded overrides
@@ -1815,6 +1833,12 @@ window.runCalc = async () => {
     document.getElementById('upload-screen').style.display = 'none';
     document.getElementById('dashboard').style.display = 'grid';
     showScreen(currentScreen(), false);
+    if (missingData.length) {
+      const warn = document.getElementById('missing-warn');
+      warn.style.display = '';
+      warn.textContent = `Cost tables not loaded: ${missingData.join(', ')}. `
+        + 'Costs from those sources are missing — re-run the build if this is unexpected.';
+    }
     const dateRange = getDateRange(allLines);
     document.getElementById('topbar-sub').textContent =
       `${allLines.length.toLocaleString()} line items · ${dateRange}`;
@@ -2444,8 +2468,17 @@ initRouter((screen) => {
 // ─── Scenarios: list picker + one pane ─────────────────────────────
 window.selectModel = (key) => {
   document.querySelectorAll('[data-model]').forEach(el => {
-    if (el.classList.contains('gp-pick')) el.setAttribute('aria-pressed', String(el.dataset.model === key));
-    else el.hidden = el.dataset.model !== key;
+    if (el.classList.contains('gp-pick')) {
+      el.setAttribute('aria-pressed', String(el.dataset.model === key));
+      return;
+    }
+    const on = el.dataset.model === key;
+    el.hidden = !on;
+    // Some model panes were moved in from the old view tabs and brought an
+    // inline display:none with them; the wrapper owns visibility now.
+    el.style.display = on ? '' : 'none';
+    if (on) el.querySelectorAll(':scope > [style*="display:none"]')
+              .forEach(child => { child.style.display = ''; });
   });
   if (key === 'discount') renderScenarioView();
   if (key === 'price')    renderProjView();
