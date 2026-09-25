@@ -127,3 +127,21 @@ test('C7: the dashboard reads the weekly automation status through the proxy; cy
   const post = await b.proxy(new Request(`${SITE}/api/v1/automation/status`, { method: 'POST', headers: { origin: SITE } }));
   assert.equal(post.status, 404, 'status is read-only');
 });
+
+test('C8: rate limiting through the proxy — and the documented shared-lockout limitation', async () => {
+  const env = await makeEnv();
+  const a = browser(env), b = browser(env);
+  for (let i = 0; i < 10; i++) await assert.rejects(login(`wrong-${i}`, { fetchImpl: a.fetchImpl }), e => e.status === 401);
+  // Behind the proxy the Worker sees one address for every dashboard user (it does
+  // not trust forwarded-for headers), so ten wrong passwords lock EVERYONE out.
+  await assert.rejects(login(PASSWORD, { fetchImpl: b.fetchImpl }), e => e.status === 429);
+  await assert.rejects(login(PASSWORD, { fetchImpl: a.fetchImpl }), e => e.status === 429);
+  // A forged forwarded-for header does not escape the limit.
+  const forged = await b.proxy(new Request(`${SITE}/api/v1/auth/login`, { method: 'POST', body: JSON.stringify({ password: PASSWORD }),
+    headers: { origin: SITE, 'content-type': 'application/json', 'x-forwarded-for': '198.51.100.9', 'cf-connecting-ip': '198.51.100.9' } }));
+  assert.equal(forged.status, 429);
+  // The attempts older than the window no longer count (simulated by ageing them).
+  await env.DB.prepare("UPDATE auth_attempt SET attempt_at = '2000-01-01T00:00:00.000Z'").run();
+  await login(PASSWORD, { fetchImpl: b.fetchImpl });
+  assert.ok(b.jar.has('sb_session'));
+});

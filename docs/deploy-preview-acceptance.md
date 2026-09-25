@@ -1,4 +1,4 @@
-# Deploy-preview acceptance (Revision 8)
+# Deploy-preview acceptance (Revision 8; C8 additions B11–B13)
 
 These checks need a real Netlify build and a real Worker, so they cannot run in
 the unit or Miniflare suites. **Status: NOT RUN.** Nothing has been deployed.
@@ -69,10 +69,14 @@ SITE_PASSWORD=… DASHBOARD_PASSWORD=… node tools/proxy-smoke.mjs https://<bra
 | B8 | Logout clears the cookie; a copied cookie is refused afterwards (401) | NOT RUN |
 | B9 | Forged cookie refused (401) | NOT RUN |
 | B10 | Expired session refused (401). Run the staging Worker with `SESSION_TTL_SECONDS = "60"` and add `--expired-wait 90` to the smoke script. | NOT RUN |
+| B11 | C8: rate limiting through the proxy — the 11th wrong password in 15 minutes gets 429, and a second browser is locked out too (documented shared-lockout limitation; see DEPLOYMENT.md "Credentials") | NOT RUN |
+| B12 | C8: `/api/v1/automation/status` needs a session (401 without) and carries no secret, path, email address or sheet address | NOT RUN |
+| B13 | C8: no production DB traffic — `tools/staging-acceptance.mjs` S9 passes, and `wrangler d1 execute sb-gp --remote` row counts (`ingest_run`, `settings_audit`, `shipping_cost_source_version`) are unchanged before/after | NOT RUN |
 
 Already covered offline (`worker/test/proxy.test.mjs`): the real proxy module
 in front of the real Worker handler, covering login, session, logout, expired
-and revoked sessions, route allowlist, header stripping and the CSRF origin check.
+and revoked sessions, route allowlist, header stripping, the CSRF origin check,
+rate limiting with the shared lockout (C8) and the automation-status route (C7).
 
 The script refuses to run unless `SB_WORKER_URL` is the staging Worker.
 
