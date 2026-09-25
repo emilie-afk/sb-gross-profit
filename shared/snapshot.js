@@ -12,7 +12,7 @@
  *   normalized HPD ─────────► HPD map ────────────────┘
  */
 import { calculate, summarize } from './calculator.js';
-import { toLegacyShopifyRows, attachLineKeys, toLegacyShipStationCosts, toLegacyHpdMap } from './adapters/legacy.js';
+import { toLegacyShopifyRows, attachLineKeys, toLegacyShipStationCosts, toLegacyHpdMap, explicitRouteRefunds } from './adapters/legacy.js';
 import { DEFAULT_EXPENSE_POLICY } from './adapters/shipstation.js';
 import { applyAllocationContract } from './allocation.js';
 import { diagnoseShipping, diagnoseShippingFromReport } from './shippingDiagnostic.js';
@@ -23,7 +23,7 @@ import { buildNarrative, draftComparison } from './narrative.js';
 import { engineArgsFromCatalog } from './catalog.js';
 import { r2, addDays } from './normalized.js';
 
-export const ENGINE_VERSION = '2026.09.25-c3';
+export const ENGINE_VERSION = '2026.09.25-c4a';
 
 /**
  * Where ShipStation expense comes from.
@@ -64,7 +64,7 @@ export function buildSnapshot({ weekStart, orders, shipments = [], hpdOrders = [
 
   const engineLines = calculate(rows, ssCosts, a.mcgCosts, a.productCosts, a.skuWeights, a.additionalCosts,
     a.hpByName, a.skuAlias, hpdMap, a.mcgExtra, a.vendorCosts, a.vendorIndex,
-    { shippingRules: fromReport ? SHIPPING_RULES.C3 : SHIPPING_RULES.LEGACY });
+    { shippingRules: fromReport ? SHIPPING_RULES.C3 : SHIPPING_RULES.LEGACY, routeRefunds: explicitRouteRefunds(orders) });
   const summary = summarize(engineLines);
   const keyed = attachLineKeys(engineLines, rows, keys);
   const contract = applyAllocationContract(keyed, orders);

@@ -748,6 +748,12 @@ export const SHIPPING_RULES = Object.freeze({ C3: 'c3', LEGACY: 'legacy' });
 export const LIVELY_ROOT_STORE = 'Lively Root';
 export const CANCELLED_AFTER_SHIPPING_CATEGORY = 'Cancelled after shipping';
 
+/** Route Shipping Protection line: detected by SKU or by Shopify's product name. */
+export function isRouteLine(sku, productName) {
+  return /^ROUTEINS/i.test(String(sku || '').trim()) ||
+    String(productName || '').toUpperCase().includes('SHIPPING PROTECTION BY ROUTE');
+}
+
 const parseShopifyTime = s => {
   const m = String(s || '').trim().match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)\s*([+-]\d{2}:?\d{2}|Z)?$/);
   if (!m) return null;
@@ -802,7 +808,13 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     // cancelled-after-shipping retention. 'legacy': the Revision 8 engine,
     // kept for the before/after bridge and the compatibility golden.
     shippingRules    = SHIPPING_RULES.C3,
+    // C4a: Map<orderName, amount> of refunds Shopify explicitly attributes to
+    // the order's Route line (refund line items naming it). The CSV export has
+    // no line-level refunds, so the manual and CSV paths pass nothing and a
+    // Route line never receives any part of a general refund.
+    routeRefunds     = null,
   } = options;
+  if (routeRefunds !== null && !(routeRefunds instanceof Map)) throw new Error('routeRefunds must be a Map');
   if (!Object.values(SHIPPING_RULES).includes(shippingRules)) throw new Error(`Unknown shippingRules ${shippingRules}`);
   const c3 = shippingRules === SHIPPING_RULES.C3;
 
@@ -1027,8 +1039,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
                       productUp.includes('E-BOOK') ||
                       /^(DIGITAL|PRINTABLE|EBOOK)/i.test(sku);
     // Route insurance — pass-through: cost = what customer paid, GP = $0
-    const isRoute = /^ROUTEINS/i.test(sku) ||
-        (product || '').toUpperCase().includes('SHIPPING PROTECTION BY ROUTE');
+    const isRoute = isRouteLine(sku, product);
     if (isRoute) {
       unitCost   = unitPrice;
       costSource = 'Route (pass-through)';
@@ -1168,8 +1179,15 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
   // net product revenue share, capped at that line's revenue so a refund can
   // never push a line negative. Line-level revenue in the export is NOT
   // refund-adjusted, so there is no double counting. Any part of the refund
-  // that exceeds product revenue (refunded shipping or tax) is recorded
-  // separately rather than silently absorbed into product margin.
+  // that exceeds product revenue (refunded shipping, tax, or an unattributed
+  // amount) is recorded separately rather than silently absorbed into product
+  // margin.
+  //
+  // C4a: Route Shipping Protection lines are never eligible for the prorated
+  // share — a general refund is not evidence that Route was refunded. A Route
+  // refund is recognised only when Shopify explicitly identifies the Route line
+  // (`routeRefunds`); it then reduces both the Route amount collected and the
+  // pass-through amount remitted, so Route stays at zero contribution.
   if (applyRefunds && orderRefunds.size) {
     const byOrder = new Map();
     for (const li of lineItems) {
@@ -1183,9 +1201,35 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       if (cancelledAfterShipping.has(orderNum)) continue;
       const lines = byOrder.get(orderNum);
       if (!lines || !lines.length) continue;
-      const eligible = lines.filter(l => (l.lineRevenue || 0) > 0);
+
+      // Explicit Route refund (Shopify refund line on the Route line) only.
+      const routeLines = lines.filter(l => l.isRoute && (l.lineRevenue || 0) > 0);
+      const routeRev = Math.round(routeLines.reduce((s, l) => s + l.lineRevenue, 0) * 100) / 100;
+      const explicitRoute = Math.round(Math.max(0, Math.min(
+        routeRefunds ? (Number(routeRefunds.get(orderNum)) || 0) : 0, refund, routeRev)) * 100) / 100;
+      let routeAllocated = 0;
+      routeLines.forEach((li, i) => {
+        if (!(explicitRoute > 0)) return;
+        const isLast = i === routeLines.length - 1;
+        const share  = isLast
+          ? Math.round((explicitRoute - routeAllocated) * 100) / 100
+          : Math.round(explicitRoute * (li.lineRevenue / routeRev) * 100) / 100;
+        routeAllocated = Math.round((routeAllocated + share) * 100) / 100;
+        li.refundAllocated = share;
+        li.routeRefundSource = 'shopify_refund_line';
+        li.lineRevenue = Math.round((li.lineRevenue - share) * 100) / 100;
+        // Pass-through: a refunded Route amount is not remitted either.
+        if (li.lineCogs !== null) li.lineCogs = Math.round((li.lineCogs - share) * 100) / 100;
+        li.lineGp = li.lineCogs !== null
+          ? Math.round((li.lineRevenue - li.lineCogs) * 100) / 100 : null;
+        li.lineGpPct = (li.lineGp !== null && li.lineRevenue !== 0)
+          ? Math.round(li.lineGp / li.lineRevenue * 1000) / 10 : null;
+      });
+
+      const generalRefund = Math.round((refund - explicitRoute) * 100) / 100;
+      const eligible = lines.filter(l => !l.isRoute && (l.lineRevenue || 0) > 0);
       const totalRev = eligible.reduce((s, l) => s + l.lineRevenue, 0);
-      const productRefund = Math.min(refund, totalRev);
+      const productRefund = Math.min(generalRefund, totalRev);
       let allocated = 0;
       eligible.forEach((li, i) => {
         const isLast = i === eligible.length - 1;
@@ -1202,7 +1246,8 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       });
       const first = lines[0];
       first.orderRefund = refund;
-      first.refundBeyondProduct = Math.round((refund - productRefund) * 100) / 100;
+      if (explicitRoute > 0) first.routeRefund = explicitRoute;
+      first.refundBeyondProduct = Math.round((generalRefund - productRefund) * 100) / 100;
       if (first.orderTotal) {
         first.orderTotal = Math.round((first.orderTotal - refund) * 100) / 100;
       }

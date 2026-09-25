@@ -19,7 +19,7 @@
  * Literal CSV column names live in this file and in the manual-upload path only.
  * They are not part of any API response.
  */
-import { normalizeOrderNumber } from '../calculator.js';
+import { normalizeOrderNumber, isRouteLine } from '../calculator.js';
 import {
   SOURCE_SYSTEMS, DISCOUNT_SOURCES, REFUND_SOURCES, toMoney, r2, orderNumberOf,
   parseCsvNoteAttributes, formatCsvNoteAttributes, businessDateOf, assertNoCustomerFields,
@@ -172,6 +172,26 @@ export function toLegacyShopifyRows(orders) {
     });
   }
   return { rows, keys };
+}
+
+/**
+ * C4a: refunds Shopify explicitly attributes to an order's Route line, as the
+ * `routeRefunds` option calculate() takes. Only refund line items that name a
+ * Route line count; an order-level or historical CSV refund (no refund lines)
+ * never becomes a Route refund.
+ */
+export function explicitRouteRefunds(orders) {
+  const out = new Map();
+  for (const o of orders) {
+    const routeIdx = new Set((o.lines || []).filter(l => isRouteLine(l.sku, l.productName)).map(l => l.lineIndex));
+    if (!routeIdx.size) continue;
+    let amt = 0;
+    for (const rf of o.refunds || []) {
+      for (const rl of rf.lines || []) if (routeIdx.has(rl.lineIndex)) amt = r2(amt + (rl.subtotal || 0));
+    }
+    if (amt > 0) out.set(o.orderName, amt);
+  }
+  return out;
 }
 
 /**

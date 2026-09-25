@@ -487,6 +487,28 @@ GP, with no residual. In the Worker, a later Shopify ingest that delivers the
 order touches that order's week, so `/v1/admin/revise-touched` drafts a
 revision; published snapshots are never changed.
 
+### Route refund allocation (C4a)
+
+Route Shipping Protection stays a customer-funded pass-through (collected =
+remitted, zero contribution) and stays out of operating revenue, product
+revenue and COGS, advertising and labor allocation, vendor/SKU profitability
+and reverse-cost results.
+
+- A general Shopify refund (the export's order-level `Refunded Amount`) is
+  prorated over the order's product lines only. It is never spread onto the
+  Route line; anything beyond product revenue stays at order level
+  (`refundBeyondProduct`) and is shown in the revenue bridge.
+- A Route refund is recognised only when Shopify's refund lines explicitly name
+  the Route line (`explicitRouteRefunds()` → the engine's `routeRefunds`
+  option). It lowers Route collected and remitted together. The CSV export has
+  no refund lines, so CSV and manual uploads never produce a Route refund.
+- Headline revenue, COGS, shipping and GP are unchanged by the correction; only
+  the split between Route and product lines (browser dashboard, scenario tool,
+  per-store product revenue) changes. The Worker contract already excluded
+  Route from prorated refunds.
+- Route statement reconciliation (Payments and Reimbursements CSVs) remains
+  deferred; those formats are not available.
+
 ### Cost catalog: refresh, freshness, versioning
 
 **Worker direct fetch (C6, replaces the Netlify build hook).** The Worker reads

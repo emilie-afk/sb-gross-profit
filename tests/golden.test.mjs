@@ -14,6 +14,9 @@
  *
  * 2. C3 (Revision 9): the same week on the Shipping Cost Report source with the
  *    C3 rules. Pinned when C3 was introduced (approved C3 scope, 2026-09-25).
+ *    C4a changed only the engine-version label for this fixture (it has no
+ *    refunded order with a Route line), so the label is normalized to the C3
+ *    value before hashing.
  *
  * If either fails, do not update the constant without an approved financial change.
  */
