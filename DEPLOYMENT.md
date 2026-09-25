@@ -336,7 +336,14 @@ npx wrangler secret put ADMIN_SECRET               # admin/compute routes (diffe
 npx wrangler secret put SESSION_SIGNING_KEY        # session HMAC key (different value)
 cd .. && node tools/hash-password.mjs | npx wrangler secret put DASHBOARD_PASSWORD_HASH --config worker/wrangler.toml
 cd worker && npx wrangler deploy
+# C8: bind the D1 database to this Worker's SB_ENVIRONMENT once (audited):
+#   POST /v1/admin/environment/bind { "environment": "production", "reason": "…" }
 ```
+
+The full, ordered checklist (staging first, shadow run, rollback, control
+enablement) is `docs/c8-deployment-package.md`. Staging and production are
+isolated: each `wrangler.toml` environment declares `SB_ENVIRONMENT`, and a
+Worker refuses every request against a D1 database bound to the other one.
 
 Each secret is at least 32 random characters (`openssl rand -base64 48`). Store
 copies in the password manager; the Windows host keeps the ingest secret in
