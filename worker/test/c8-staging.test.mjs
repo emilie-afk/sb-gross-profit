@@ -10,7 +10,9 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import worker from '../src/index.js';
-import { makeEnv, ingest, admin, call, catalog, sessionCookie, WEEK } from './helpers.mjs';
+import { makeEnv, ingest, admin, call, catalog, sessionCookie, WEEK, PASSWORD } from './helpers.mjs';
+import { signSession } from '../src/auth.js';
+import { isSafeRead } from '../src/environment.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.join(HERE, '..', '..');
@@ -60,6 +62,66 @@ test('C8 isolation: a staging Worker pointed at a production-bound D1 reads and 
   assert.deepEqual(after, before, 'nothing was written');
   const h = await call(env, 'GET', '/v1/health');
   assert.deepEqual([h.status, h.json.environment], [200, 'staging']);
+});
+
+/** Every row of every table, hashed: "touched nothing" means this is unchanged. */
+async function digest(env) {
+  const tables = ((await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name").all()).results || []).map(r => r.name);
+  const parts = [];
+  for (const t of tables) parts.push([t, JSON.stringify((await env.DB.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()).results || [])]);
+  return JSON.stringify(parts);
+}
+const sessionFor = async env => `sb_session=${(await signSession(env)).token}`;
+const login = (env, password = PASSWORD) => call(env, 'POST', '/v1/auth/login', { body: { password } });
+const logout = (env, cookie) => call(env, 'POST', '/v1/auth/logout', { cookie });
+
+test('C8 guard classification: only an explicit list of GET routes counts as a safe read', () => {
+  for (const [m, p] of [['GET', '/v1/weeks'], ['GET', '/v1/auth/session'], ['GET', `/v1/snapshot/${WEEK}/orders/%23900001`], ['GET', '/v1/admin/settings'], ['GET', `/v1/admin/cycles/${WEEK}`]]) assert.equal(isSafeRead(m, p), true, `${m} ${p}`);
+  for (const [m, p] of [['POST', '/v1/auth/login'], ['POST', '/v1/auth/logout'], ['POST', '/v1/ingest/catalog'], ['POST', '/v1/admin/runs'], ['GET', '/v1/admin/storage'],
+    ['GET', '/v1/some-future-route'], ['POST', '/v1/some-future-route'], ['PUT', '/v1/weeks'], ['DELETE', '/v1/weeks'], ['POST', '/v1/weeks']]) assert.equal(isSafeRead(m, p), false, `${m} ${p}`);
+});
+
+test('C8 guard: an unbound database serves health and the approved reads; login, logout and every other route write nothing', async () => {
+  const env = await makeEnv({ SB_ENVIRONMENT: 'staging' });
+  const cookie = await sessionFor(env);
+  const before = await digest(env);
+  assert.deepEqual([(await call(env, 'GET', '/v1/health')).status, (await call(env, 'GET', '/v1/health')).json.environment], [200, 'staging']);
+  assert.equal((await admin(env, 'GET', '/v1/admin/settings')).status, 200);
+  assert.equal((await call(env, 'GET', '/v1/weeks', { cookie })).status, 200, 'a signed session can read');
+  assert.equal((await call(env, 'GET', '/v1/auth/session', { cookie })).status, 200);
+  for (const r of [await login(env), await login(env, 'wrong'), await logout(env, cookie), await admin(env, 'GET', '/v1/admin/storage'),
+                   await call(env, 'POST', '/v1/some-future-route', { body: {} }), await ingest(env, '/v1/ingest/catalog', catalog()),
+                   await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK })]) {
+    assert.deepEqual([r.status, r.json?.error], [409, 'database_environment_unbound'], JSON.stringify(r.json));
+  }
+  assert.equal(await digest(env), before, 'nothing written: no auth_attempt, no session_revocation, no storage_usage, nothing else');
+  assert.equal((await call(env, 'GET', '/v1/auth/session', { cookie })).status, 200, 'the refused logout revoked nothing');
+});
+
+test('C8 guard: a mismatched database — login, logout, reads, admin, ingest and Cron all touch nothing', async () => {
+  const env = await makeEnv({ SB_ENVIRONMENT: 'production' });
+  assert.equal((await bind(env, 'production', 'production bind (test)')).status, 200);
+  const cookie = await sessionFor(env);
+  env.SB_ENVIRONMENT = 'staging';
+  const before = await digest(env);
+  const rs = [await login(env), await login(env, 'wrong'), await logout(env, cookie), await call(env, 'GET', '/v1/auth/session', { cookie }),
+    await call(env, 'GET', '/v1/weeks', { cookie }), await call(env, 'GET', `/v1/snapshot/${WEEK}`, { cookie }), await admin(env, 'GET', '/v1/admin/settings'),
+    await admin(env, 'GET', '/v1/admin/storage'), await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK }), await ingest(env, '/v1/ingest/catalog', catalog()),
+    await call(env, 'GET', '/v1/ingest/week-plan', { headers: { 'X-Ingest-Secret': env.INGEST_SECRET } }), await call(env, 'POST', '/v1/some-future-route', { body: {} })];
+  for (const r of rs) assert.deepEqual([r.status, r.json?.error], [503, 'database_environment_mismatch'], JSON.stringify(r.json));
+  assert.deepEqual(await worker.scheduled({ scheduledTime: Date.parse('2026-09-21T08:30:00Z') }, env, null), { skipped: 'database_environment_mismatch' });
+  assert.equal(await digest(env), before);
+});
+
+test('C8 guard: on a correctly bound database authentication still works', async () => {
+  const env = await makeEnv({ SB_ENVIRONMENT: 'staging' });
+  assert.equal((await bind(env, 'staging')).status, 200);
+  assert.equal((await login(env, 'wrong')).status, 401);
+  const cookie = await sessionCookie(env);
+  assert.equal((await call(env, 'GET', '/v1/auth/session', { cookie })).status, 200);
+  assert.equal((await logout(env, cookie)).status, 200);
+  assert.equal((await call(env, 'GET', '/v1/auth/session', { cookie })).status, 401, 'logout revoked the session');
+  assert.ok(await env.DB.prepare('SELECT COUNT(*) n FROM auth_attempt').first().then(r => r.n) >= 2);
 });
 
 test('C8 isolation: wrangler.toml declares each environment, separate D1 databases, and every control off', () => {

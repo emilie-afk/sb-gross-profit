@@ -68,16 +68,20 @@ Per environment (`--env staging` for staging). Every value is different between 
 | cron trigger | config | **none** until section 7 step 2 |
 | `TEST_HOOK`, `TEST_HOOKS_ENABLED`, `TEST_STALE_MS` | — | **never** set in any deployed environment |
 
-After the migrations and the first deploy, bind the database once (audited):
+**Mandatory deployment step (approved):** after the migrations and the first deploy, bind the database once (audited), in each environment:
 
 ```
 curl -X POST https://<worker>/v1/admin/environment/bind -H "X-Admin-Secret: <admin secret>" \
      -H "Content-Type: application/json" -d '{"environment":"staging","reason":"initial bind"}'
 ```
 
-Until bound, writes are refused (`database_environment_unbound`). A database
-bound to the other environment refuses every request
-(`database_environment_mismatch`).
+Until the database is bound, only an explicit list of read-only GET routes is
+served. Everything else is refused with `database_environment_unbound` before
+it touches D1: login and logout (they write auth state), ingest, admin, the
+Cron tick, and any unknown or future route. A database bound to the other
+environment refuses every request except `/v1/health`
+(`database_environment_mismatch`). The allowlist is `SAFE_READS` in
+`worker/src/environment.js`.
 
 Then register the overlay base catalog (`POST /v1/admin/catalog/base`) and set
 `catalog_overlay_base_rev`, as C6d describes in `DEPLOYMENT.md`.

@@ -20,7 +20,7 @@ import { createAndCompute, recompute, revise, restateCosts, listRestatements, we
 import { adminCatalogFetch, adminCatalogBase } from './catalogFetch.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
 import { scheduledTick, automationStatus, acceptCycleCatalogReuse, adminCycleStatus } from './orchestrate.js';
-import { environmentGuard, bindEnvironment } from './environment.js';
+import { environmentGuard, bindEnvironment, isSafeRead } from './environment.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -33,8 +33,9 @@ async function route(request, env) {
   // C8: a Worker never touches a D1 database bound to another environment.
   const bindCall = p === '/v1/admin/environment/bind' && m === 'POST';
   if (bindCall) { requireSecret(request, env, 'admin'); return bindEnvironment(request, env); }
-  const writes = m !== 'GET' && (p.startsWith('/v1/ingest/') || p.startsWith('/v1/admin/'));
-  await environmentGuard(env, { write: writes });
+  // Explicit safe-read classification: login, logout, ingest, admin and any
+  // unknown or future route count as writes.
+  await environmentGuard(env, { write: !isSafeRead(m, p) });
 
   // ── Auth ──
   if (p === '/v1/auth/login' && m === 'POST') return login(request, env);

@@ -9,7 +9,10 @@
  *                       Cron tick does nothing. A staging Worker that was pointed
  *                       at the production D1 (or the reverse) can neither read
  *                       nor write it.
- *   not bound yet     → reads are allowed; every write is refused (409) until
+ *   not bound yet     → only the explicit SAFE_READS below are served; every
+ *                       other request — login and logout (they write auth
+ *                       state), ingest, admin, any unknown or future route —
+ *                       is refused (409) before it touches the database, until
  *                       POST /v1/admin/environment/bind { environment, reason }.
  *   SB_ENVIRONMENT unset → the guard is inactive (unit tests, local dev only;
  *                       both wrangler.toml environments set it).
@@ -22,6 +25,27 @@ import { nowIso, atomic } from './db.js';
 import { actorFor } from './actor.js';
 
 export const ENV_KEY = 'database_environment';
+
+/**
+ * Requests known to be read-only. Anything not listed is treated as a write:
+ * a new route is refused on an unbound database until it is added here
+ * deliberately. (GET /v1/admin/storage is NOT listed: it records a
+ * storage_usage row.)
+ */
+const W = '\\d{4}-\\d{2}-\\d{2}';
+export const SAFE_READS = Object.freeze([
+  '/v1/auth/session', '/v1/ingest/week-plan',
+  '/v1/weeks', '/v1/history', '/v1/compare', '/v1/automation/status',
+  `/v1/snapshot/${W}`, `/v1/snapshot/${W}/orders`, `/v1/snapshot/${W}/orders/[^/]+`, `/v1/snapshot/${W}/issues`, `/v1/snapshot/${W}/scenario-input`,
+  '/v1/admin/settings', '/v1/admin/week-plan', '/v1/admin/readiness', '/v1/admin/restatements', '/v1/admin/catalog-pushes',
+  '/v1/admin/runs/[\\w-]+', '/v1/admin/catalog-refresh/[\\w-]+', `/v1/admin/cycles/${W}`,
+  '/v1/admin/shipping-cost/versions', '/v1/admin/shipping-cost/versions/[\\w-]+', '/v1/admin/shipping-cost/segments', '/v1/admin/shipping-cost/effective',
+].map(p => new RegExp(`^${p}$`)));
+
+/** True only for a GET the Worker serves without writing anything. */
+export function isSafeRead(method, path) {
+  return method === 'GET' && SAFE_READS.some(re => re.test(path));
+}
 const NAMES = new Set(['production', 'staging']);
 
 async function boundEnvironment(db) {

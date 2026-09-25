@@ -336,7 +336,8 @@ npx wrangler secret put ADMIN_SECRET               # admin/compute routes (diffe
 npx wrangler secret put SESSION_SIGNING_KEY        # session HMAC key (different value)
 cd .. && node tools/hash-password.mjs | npx wrangler secret put DASHBOARD_PASSWORD_HASH --config worker/wrangler.toml
 cd worker && npx wrangler deploy
-# C8: bind the D1 database to this Worker's SB_ENVIRONMENT once (audited):
+# C8, MANDATORY: bind the D1 database to this Worker's SB_ENVIRONMENT once (audited);
+# until then only the read-only allowlist is served (login included in the refusals):
 #   POST /v1/admin/environment/bind { "environment": "production", "reason": "…" }
 ```
 
