@@ -28,10 +28,10 @@
  * cents. No row, filename or value is ever logged.
  */
 import { ApiError, json, readJson } from './http.js';
-import { newId, nowIso, getSettings, jsonInsert, atomic } from './db.js';
+import { newId, nowIso, getSettings, jsonInsert, atomic, selectIn } from './db.js';
 import { actorFor, actorJson } from './actor.js';
 import { parseCSV } from '../../shared/calculator.js';
-import { addDays, contentHash } from '../../shared/normalized.js';
+import { addDays, contentHash, weekStartOf } from '../../shared/normalized.js';
 import { parseShippingCostReport, aggregateByOrder, fromCents, toCents, SCHEMA_VERSION } from '../../shared/adapters/shippingCostReport.js';
 
 const ROW_COLS = ['version_id', 'row_seq', 'ship_date_raw', 'ship_date', 'order_key', 'provider', 'service', 'package', 'items', 'zone',
@@ -130,7 +130,30 @@ export function autoAcceptable(cmp, reviewFlags) {
 
 // ─── Activation / rollback ────────────────────────────────────────────────────
 
+/**
+ * C3: record which Shopify weeks an activation or rollback changed, as an
+ * ingest run (source 'shipping_cost_report') of the cycle week that ends the
+ * report's range, so /v1/admin/revise-touched drafts revisions for them.
+ */
+async function recordTouchedWeeks(db, beforeTotals, cycleEnd) {
+  const afterTotals = await effectiveOrderTotals(db);
+  const changed = [];
+  for (const k of new Set([...beforeTotals.keys(), ...afterTotals.keys()])) {
+    if ((beforeTotals.get(k)?.costCents ?? null) !== (afterTotals.get(k)?.costCents ?? null)) changed.push(k);
+  }
+  const weeks = {};
+  for (const r of await selectIn(db, 'SELECT week_start FROM shopify_order WHERE order_number IN (SELECT value FROM json_each(?1))', changed)) {
+    weeks[r.week_start] = (weeks[r.week_start] || 0) + 1;
+  }
+  const at = nowIso();
+  await db.prepare(`INSERT INTO ingest_run (run_id, source, week_start, started_at, finished_at, status, rows_seen, rows_written, duplicates, diagnostics, weeks_touched)
+    VALUES (?1, 'shipping_cost_report', ?2, ?3, ?3, 'ok', ?4, ?5, 0, ?6, ?7)`)
+    .bind(newId('ing'), weekStartOf(cycleEnd), at, changed.length, changed.length, JSON.stringify({ changedOrders: changed.length }), JSON.stringify(weeks)).run();
+  return { changedOrders: changed.length, weeksTouched: weeks };
+}
+
 async function activate(db, version, actor, reason) {
+  const totalsBefore = await effectiveOrderTotals(db);
   const before = await activeSegments(db);
   const n = (await db.prepare('SELECT COUNT(*) AS n FROM shipping_cost_activation').first()).n;
   const activationId = newId('sca');
@@ -151,7 +174,8 @@ async function activate(db, version, actor, reason) {
   ];
   try { await atomic(db, stmts); }
   catch (e) { if (isGuardAbort(e)) throw new ApiError(409, 'activation_conflict', 'Another activation happened first; nothing was written'); throw e; }
-  return { activationId, segments: after };
+  const touched = await recordTouchedWeeks(db, totalsBefore, version.requested_to);
+  return { activationId, segments: after, touched };
 }
 
 // ─── Ingest ───────────────────────────────────────────────────────────────────
@@ -258,6 +282,7 @@ export async function rollbackActivation(request, env, activationId) {
   if (!latest || latest.activation_id !== activationId) throw new ApiError(409, 'not_latest', 'Only the latest activation can be rolled back');
   const prior = JSON.parse(latest.prior_segments);
   const at = nowIso();
+  const totalsBefore = await effectiveOrderTotals(env.DB);
   await atomic(env.DB, [
     env.DB.prepare('DELETE FROM shipping_cost_active_segment'),
     ...prior.map(s => env.DB.prepare('INSERT INTO shipping_cost_active_segment (seg_from, seg_to, version_id, activation_id) VALUES (?1, ?2, ?3, ?4)')
@@ -266,7 +291,8 @@ export async function rollbackActivation(request, env, activationId) {
       WHERE activation_id = ?1`).bind(activationId, at, actor.cls, actor.label, reason),
     env.DB.prepare(`UPDATE shipping_cost_source_version SET status = 'rolled_back' WHERE version_id = ?1`).bind(latest.version_id),
   ]);
-  return json({ activationId, rolledBack: true, segments: prior });
+  const touched = await recordTouchedWeeks(env.DB, totalsBefore, latest.range_to);
+  return json({ activationId, rolledBack: true, segments: prior, touched });
 }
 export async function getSegments(env) { return json({ segments: await activeSegments(env.DB) }); }
 export async function getEffectiveSummary(env) {

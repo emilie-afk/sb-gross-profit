@@ -182,8 +182,12 @@ test('compute writes a snapshot from D1 identical to one built directly from the
   const r = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   assert.equal(r.status, 200, JSON.stringify(r.json));
   const cat = catalog();
+  // C3: the Worker's expense source is the Shipping Cost Report (loaded() ingests one row per order).
+  const report = new Map(nodes.map((o, i) => [o.name.slice(1), { orderKey: o.name.slice(1), costCents: i % 20 === 0 ? 540 : 510, rowCount: 1,
+    firstShipDate: `2026-09-${15 + (i % 5)}`, lastShipDate: `2026-09-${15 + (i % 5)}` }]));
   const direct = buildSnapshot({ weekStart: WEEK, orders: normalizeShopifyOrders(nodes),
-    shipments: normalizeShipStationRows(ship).shipments, catalog: { rev: 'x', ...cat } });
+    shipments: normalizeShipStationRows(ship).shipments, catalog: { rev: 'x', ...cat },
+    shippingSource: 'shipping_cost_report', shippingCostReport: report });
   const stored = await admin(env, 'GET', `/v1/snapshot/${WEEK}?includeDrafts=1`);
   assert.equal(stored.status, 200);
   for (const k of ['operatingRevenue', 'shopifyNetRevenueInclPassThrough', 'operatingGpAfterShipping', 'routeCollected', 'routeNet',
@@ -196,7 +200,7 @@ test('compute writes a snapshot from D1 identical to one built directly from the
 });
 
 test('the gate blocks a week under the coverage threshold, and a blocked draft cannot publish', async () => {
-  const { env } = await loaded(20);                                   // 1 of 20 shipments at zero fee → 95%
+  const { env } = await loaded(20, {}, { reportMissingEvery: 20 });   // 1 of 20 orders without a report row → 95%
   await admin(env, 'POST', '/v1/admin/settings', { ss_coverage_threshold: 0.99, reason: 'test threshold' });
   const r = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   assert.equal(r.json.state, 'blocked');
@@ -246,7 +250,7 @@ test('A15/A16: publishing a revision supersedes the previous one; published numb
 });
 
 test('A25: orders are paginated and filterable; order detail and issues are per-snapshot', async () => {
-  const { env } = await loaded(120);
+  const { env } = await loaded(120, {}, { reportMissingEvery: 20 });
   await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   const p1 = await admin(env, 'GET', `/v1/snapshot/${WEEK}/orders?includeDrafts=1&limit=50&offset=0&sort=gp_asc`);
   assert.deepEqual([p1.json.orders.length, p1.json.page.total], [50, 120]);
@@ -255,7 +259,7 @@ test('A25: orders are paginated and filterable; order detail and issues are per-
   const gps = p1.json.orders.map(o => o.operatingGp);
   assert.deepEqual(gps, [...gps].sort((a, b) => a - b));
   const miss = await admin(env, 'GET', `/v1/snapshot/${WEEK}/orders?includeDrafts=1&missingShipping=true`);
-  assert.equal(miss.json.page.total, 6);                                                           // every 20th has a zero fee
+  assert.equal(miss.json.page.total, 6);                                                           // every 20th has no report row
   const bad = await admin(env, 'GET', `/v1/snapshot/${WEEK}/orders?includeDrafts=1&limit=5000`);
   assert.equal(bad.status, 400);
   const one = await admin(env, 'GET', `/v1/snapshot/${WEEK}/orders/${encodeURIComponent('#900005')}?includeDrafts=1`);

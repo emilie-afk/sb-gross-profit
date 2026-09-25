@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { WEEK, makeEnv, call, ingest, admin, sessionCookie, catalog, weekOrders, loaded, viaNormalized } from './helpers.mjs';
+import { ingestReport } from './helpers.mjs';
 import { gqlOrder, ssCustom } from '../../tests/fixtures-normalized.mjs';
 import { normalizeShopifyOrders } from '../../shared/adapters/shopifyGraphql.js';
 
@@ -28,6 +29,8 @@ async function loadPrevWeek(env, n = 10) {
   assert.equal((await ingest(env, '/v1/ingest/catalog', cat)).json.refresh.status, 'fulfilled');   // duplicate content still verifies
   assert.equal((await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: PREV }))).status, 200);
   assert.equal((await ingest(env, '/v1/ingest/shipstation', { format: 'rows', rows: ship, weekStart: PREV })).status, 200);
+  await ingestReport(env, nodes.map((o, i) => ({ order: o.name.slice(1), date: `2026-09-${String(8 + (i % 5)).padStart(2, '0')}`, cost: 5.10 })),
+                     { from: PREV, to: '2026-09-13', exportedAt: '2026-09-14T15:00:00Z' });
   return { nodes, ship };
 }
 
@@ -244,9 +247,12 @@ test('earlier weeks touched by Shopify updates and late shipments become unpubli
   const up = await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [refunded, prevNodes[1]], weekStart: WEEK }));
   assert.equal(up.status, 200, JSON.stringify(up.json));
   assert.deepEqual(up.json.weeksTouched, { [PREV]: 1 });                                  // the unchanged order is a duplicate
-  const late = await ingest(env, '/v1/ingest/shipstation', { format: 'rows', weekStart: WEEK,
-    rows: ssCustom({ shipment: 'LATE1', order: '800002', fee: '1.00', rate: '1.00' }) });
-  assert.deepEqual(late.json.weeksTouched, { [PREV]: 1 });
+  // C3: a late label arrives in the next Shipping Cost Report (shipped this week, for a PREV order).
+  const weekRows = Array.from({ length: 20 }, (_, i) => ({ order: `9${String(i).padStart(5, '0')}`, date: `2026-09-${15 + (i % 5)}`, cost: i % 20 === 0 ? 5.40 : 5.10 }));
+  const late = await ingestReport(env, [...weekRows, { order: '800002', date: '2026-09-16', cost: 1.00 }]);
+  const touchedRun = await env.DB.prepare("SELECT weeks_touched FROM ingest_run WHERE source = 'shipping_cost_report' ORDER BY started_at DESC, rowid DESC LIMIT 1").first();
+  assert.deepEqual(JSON.parse(touchedRun.weeks_touched), { [PREV]: 1 });
+  assert.ok(late.versionId);
 
   const rv = await admin(env, 'POST', '/v1/admin/revise-touched', { weekStart: WEEK });
   assert.equal(rv.status, 200, JSON.stringify(rv.json));
@@ -255,7 +261,7 @@ test('earlier weeks touched by Shopify updates and late shipments become unpubli
   assert.equal(x.weekStart, PREV);
   assert.equal(x.published, false);
   assert.notEqual(x.snapshotStatus, 'published');
-  assert.match(x.reason, /2 changed record\(s\) from shopify:updated_since, shipstation/);
+  assert.match(x.reason, /2 changed record\(s\) from shopify:updated_since, shipping_cost_report/);
   const cookie = await sessionCookie(env);
   assert.equal((await call(env, 'GET', `/v1/snapshot/${PREV}`, { cookie })).json.snapshotId, a.json.snapshotId);   // published unchanged
   const again = await admin(env, 'POST', '/v1/admin/revise-touched', { weekStart: WEEK });

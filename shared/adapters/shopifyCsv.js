@@ -25,6 +25,8 @@ export const SHOPIFY_ORDERS_CSV_COLUMNS = Object.freeze([
   'Refunded Amount', 'Refunded amount', 'Source', 'Source name', 'Tags', 'Note Attributes', 'Note attributes',
   'Vendor', 'Lineitem name', 'Lineitem price', 'Lineitem quantity', 'Lineitem sku', 'Lineitem discount',
   'Lineitem requires shipping', 'Fulfillment Status', 'Lineitem fulfillment status',
+  // C3: fulfilment timestamp, the event-order evidence for cancelled-after-shipping.
+  'Fulfilled at',
 ]);
 const ALLOWED = new Set(SHOPIFY_ORDERS_CSV_COLUMNS);
 

@@ -9,6 +9,9 @@ import worker from '../src/index.js';
 import { D1Shim } from './d1shim.mjs';
 import { hashPassword } from '../src/auth.js';
 import { gqlOrder, ssCustom } from '../../tests/fixtures-normalized.mjs';
+import { reportRow } from '../../tests/fixtures-shipping-cost.mjs';
+import { sanitizeShippingCostReport, parseShippingCostReport } from '../../shared/adapters/shippingCostReport.js';
+import { toCsvText } from '../../shared/adapters/shopifyCsv.js';
 import { normalizeShopifyOrders } from '../../shared/adapters/shopifyGraphql.js';
 
 /**
@@ -31,6 +34,9 @@ export async function makeEnv(extra = {}) {
     INGEST_SECRET: rnd(), ADMIN_SECRET: rnd(), SESSION_SIGNING_KEY: rnd(),
     DASHBOARD_PASSWORD_HASH: await hashPassword(PASSWORD, { iterations: 1000 }),
     ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'false',
+    // The scheduled-path tests need automation on; worker/wrangler.toml keeps it "false"
+    // (tests/c3-controls.test.mjs checks both the file and the refusal).
+    AUTOMATION_ENABLED: 'true',
     ...extra,
   };
 }
@@ -89,7 +95,32 @@ export function weekOrders(n = 60) {
  * tests about other behaviour can reach `validated`; tests of the lock itself
  * pass lock: false.
  */
-export async function loaded(n = 60, extra = {}, { lock = true, refresh = true } = {}) {
+/**
+ * C3: ingest and accept a Shipping Cost Report for WEEK. `costs` maps order
+ * number → cost (dollars) with ship dates on the order dates; orders left out
+ * have no report row.
+ */
+export async function ingestReport(env, entries, { from = WEEK, to = '2026-09-20', exportedAt = '2026-09-21T15:00:00Z' } = {}) {
+  const raw = entries.map(e => reportRow({ date: e.date, order: e.order, cost: Number(e.cost).toFixed(2), paid: '5.00' }));
+  const s = sanitizeShippingCostReport(raw);
+  const p = parseShippingCostReport(s.rows, { requestedFrom: from, requestedTo: to });
+  const r = await ingest(env, '/v1/ingest/shipping-cost-report', { format: 'csv_text', text: toCsvText(s.rows, s.columns), requestedFrom: from, requestedTo: to,
+    rowCount: p.rowCount, shippingCostTotal: p.shippingCostCents / 100, exportedAt });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  if (r.json.status === 'pending_review') assert.equal((await admin(env, 'POST', `/v1/admin/shipping-cost/versions/${r.json.versionId}/accept`, { reason: 'test: reviewed' })).status, 200);
+  return r.json;
+}
+
+/**
+ * Test-only stand-in for the future Shipping Cost Report verification checklist:
+ * the API cannot set the flag true before that commit, so tests of the
+ * publication machinery write it straight into the D1 stand-in.
+ */
+export async function markShippingSourceVerifiedForTests(env) {
+  await env.DB.prepare("UPDATE settings SET value = 'true' WHERE key = 'shipping_cost_report_source_verified'").run();
+}
+
+export async function loaded(n = 60, extra = {}, { lock = true, refresh = true, shippingReport = true, verified = true, reportMissingEvery = 0 } = {}) {
   const env = await makeEnv(extra);
   const { nodes, ship } = weekOrders(n);
   if (lock) assert.equal((await admin(env, 'POST', '/v1/admin/settings', { carrier_fee_priority_locked: true, reason: 'test: priority locked' })).status, 200);
@@ -98,6 +129,12 @@ export async function loaded(n = 60, extra = {}, { lock = true, refresh = true }
   assert.equal((await ingest(env, '/v1/ingest/catalog', cat)).status, 200);
   assert.equal((await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: WEEK }))).status, 200);
   assert.equal((await ingest(env, '/v1/ingest/shipstation', { format: 'rows', rows: ship, weekStart: WEEK })).status, 200);
+  // C3: the expense source. Every order has a report row (the mapping export's
+  // zero-cost labels are costed here), so order-level coverage is complete.
+  // `reportMissingEvery: k` leaves every k-th order without a row (coverage gaps).
+  if (shippingReport) await ingestReport(env, nodes.map((o, i) => ({ order: o.name.slice(1), date: `2026-09-${15 + (i % 5)}`, cost: i % 20 === 0 ? 5.40 : 5.10 }))
+    .filter((_, i) => !(reportMissingEvery && i % reportMissingEvery === 0)));
+  if (shippingReport && verified) await markShippingSourceVerifiedForTests(env);
   return { env, nodes, ship };
 }
 

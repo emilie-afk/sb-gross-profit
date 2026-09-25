@@ -20,13 +20,28 @@ const { gqlOrder, ssCustom } = await import(REPO + '/tests/fixtures-normalized.m
 const { buildSnapshot } = await import(REPO + '/shared/snapshot.js');
 const { normalizeShopifyOrders } = await import(REPO + '/shared/adapters/shopifyGraphql.js');
 const { normalizeShipStationRows } = await import(REPO + '/shared/adapters/shipstation.js');
+const { reportRow } = await import(REPO + '/tests/fixtures-shipping-cost.mjs');
+const { sanitizeShippingCostReport, parseShippingCostReport } = await import(REPO + '/shared/adapters/shippingCostReport.js');
+const { toCsvText } = await import(REPO + '/shared/adapters/shopifyCsv.js');
+// C3: the expense source is a Shipping Cost Report, sanitized as the collector does.
+const reportBody = entries => {
+  const s = sanitizeShippingCostReport(entries.map(e => reportRow({ date: e.date, order: e.order, cost: e.cost })));
+  const p = parseShippingCostReport(s.rows, { requestedFrom: '2026-09-14', requestedTo: '2026-09-20' });
+  return { format: 'csv_text', text: toCsvText(s.rows, s.columns), requestedFrom: '2026-09-14', requestedTo: '2026-09-20',
+           rowCount: p.rowCount, shippingCostTotal: p.shippingCostCents / 100, exportedAt: '2026-09-21T15:00:00Z' };
+};
+const postReport = async (callFn, entries) => {
+  const r = await callFn('POST', '/v1/ingest/shipping-cost-report', { body: reportBody(entries), headers: I });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  if (r.json.status === 'pending_review') assert.equal((await callFn('POST', `/v1/admin/shipping-cost/versions/${r.json.versionId}/accept`, { body: { reason: 'integration test' }, headers: A })).status, 200);
+};
 const rnd = () => crypto.randomUUID() + crypto.randomUUID();
 const PASSWORD = 'synthetic-' + crypto.randomUUID();
 const S = { INGEST_SECRET: rnd(), ADMIN_SECRET: rnd(), SESSION_SIGNING_KEY: rnd(), DASHBOARD_PASSWORD_HASH: await hashPassword(PASSWORD, { iterations: 100000 }) };
 const bundle = await build({ entryPoints: [path.join(REPO, 'worker/src/index.js')], bundle: true, format: 'esm',
   platform: 'neutral', target: 'es2022', write: false });
 const mf = new Miniflare({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2024-09-01', d1Databases: ['DB'],
-  bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'false', D1_QUOTA_BYTES: '5000000000' } });
+  bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'false', AUTOMATION_ENABLED: 'true', D1_QUOTA_BYTES: '5000000000' } });
 const db = await mf.getD1Database('DB');
 for (const f of fs.readdirSync(REPO + '/worker/migrations').sort()) {
   const sql = fs.readFileSync(path.join(REPO, 'worker/migrations', f), 'utf8').split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
@@ -62,13 +77,17 @@ const o = await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ nodes
 assert.equal(o.status, 200, JSON.stringify(o.json)); assert.equal(o.json.rowsWritten, 400);
 const s = await call('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: ship, weekStart: '2026-09-14' }, headers: I });
 assert.equal(s.json.rowsWritten, 400);
+const reportEntries = nodes.map((n, i) => ({ order: n.name.slice(1), date: `2026-09-${15 + (i % 5)}`, cost: '5.10' })).filter((_, i) => i % 25 !== 0);
+await postReport(call, reportEntries);
 const again = await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ nodes, weekStart: '2026-09-14' }), headers: I });
 assert.deepEqual([again.json.rowsWritten, again.json.duplicates], [0, 400]);
 const run = await call('POST', '/v1/admin/runs', { body: { weekStart: '2026-09-14' }, headers: A });
 assert.equal(run.status, 200, JSON.stringify(run.json));
 console.log('run:', run.json.state, run.json.snapshotStatus, run.json.profitabilityStatus, 'gate failures:', run.json.gate.failures.map(f => f.code).join(',') || 'none', `(${Date.now() - t0} ms)`);
 const snap = await call('GET', '/v1/snapshot/2026-09-14?includeDrafts=1', { headers: A });
-const direct = buildSnapshot({ weekStart: '2026-09-14', orders: normalizeShopifyOrders(nodes), shipments: normalizeShipStationRows(ship).shipments, catalog: { rev: 'x', ...catalog } });
+const reportAgg = new Map(reportEntries.map(e => [e.order, { orderKey: e.order, costCents: 510, rowCount: 1, firstShipDate: e.date, lastShipDate: e.date }]));
+const direct = buildSnapshot({ weekStart: '2026-09-14', orders: normalizeShopifyOrders(nodes), shipments: normalizeShipStationRows(ship).shipments, catalog: { rev: 'x', ...catalog },
+                               shippingSource: 'shipping_cost_report', shippingCostReport: reportAgg });
 for (const k of Object.keys(direct.totals).filter(k => k !== 'labels')) assert.deepEqual(snap.json.totals[k], direct.totals[k], k);
 console.log('D1 round-trip totals identical to direct build:', Object.keys(direct.totals).length - 1, 'fields');
 console.log('  operating revenue', snap.json.totals.operatingRevenue, ' route', JSON.stringify(snap.json.passThrough), ' coverage', snap.json.totals.shipStationExpenseCoverage + '%');
@@ -100,7 +119,7 @@ await mf.dispose();
 // 2. The full go-live path on real D1 in a throwaway instance with both locks ON
 //    (only here; the repository keeps them off).
 const mf2 = new Miniflare({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2024-09-01', d1Databases: ['DB'],
-  bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'true', D1_QUOTA_BYTES: '5000000000' } });
+  bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'true', AUTOMATION_ENABLED: 'true', D1_QUOTA_BYTES: '5000000000' } });
 const db2 = await mf2.getD1Database('DB');
 for (const f of fs.readdirSync(REPO + '/worker/migrations').sort()) {
   const sql = fs.readFileSync(path.join(REPO, 'worker/migrations', f), 'utf8').split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
@@ -117,6 +136,9 @@ assert.equal((await call2('POST', '/v1/ingest/catalog', { body: { ...catalog, me
 const few = nodes.slice(0, 40), fewShip = ship.filter(r => few.some(n => n.name.slice(1) === r['Order Number']));
 await call2('POST', '/v1/ingest/shopify', { body: viaNormalized({ nodes: few, weekStart: '2026-09-14' }), headers: I });
 await call2('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: fewShip.map(r => ({ ...r, 'Carrier Fee': '5.10' })), weekStart: '2026-09-14' }, headers: I });
+await postReport(call2, few.map((n, i) => ({ order: n.name.slice(1), date: `2026-09-${15 + (i % 5)}`, cost: '5.10' })));
+// Test-only stand-in for the future source-verification checklist (the API refuses true in C3).
+await db2.prepare("UPDATE settings SET value = 'true' WHERE key = 'shipping_cost_report_source_verified'").run();
 const run2 = await call2('POST', '/v1/admin/runs', { body: { weekStart: '2026-09-14' }, headers: A });
 assert.equal(run2.json.state, 'validated', JSON.stringify(run2.json.gate?.failures));
 const [p1, p2] = await Promise.all([call2('POST', '/v1/admin/publish', { body: { snapshotId: run2.json.snapshotId }, headers: A }),
@@ -130,7 +152,7 @@ await mf2.dispose();
 
 // 3. Scheduled-week ownership on real D1: two simultaneous scheduled computes.
 const mf3 = new Miniflare({ modules: true, script: bundle.outputFiles[0].text, compatibilityDate: '2024-09-01', d1Databases: ['DB'],
-  bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'false', D1_QUOTA_BYTES: '5000000000' } });
+  bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'false', AUTOMATION_ENABLED: 'true', D1_QUOTA_BYTES: '5000000000' } });
 const db3 = await mf3.getD1Database('DB');
 for (const f of fs.readdirSync(REPO + '/worker/migrations').sort()) {
   const sql = fs.readFileSync(path.join(REPO, 'worker/migrations', f), 'utf8').split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
@@ -147,6 +169,7 @@ await call3('POST', '/v1/ingest/catalog', { body: { ...catalog, meta: { refreshI
 await call3('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'week', nodes: few, weekStart: W }), headers: I });
 await call3('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'updated_since', nodes: [], weekStart: W }), headers: I });
 await call3('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: fewShip, weekStart: W }, headers: I });
+await postReport(call3, few.map((n, i) => ({ order: n.name.slice(1), date: `2026-09-${15 + (i % 5)}`, cost: '5.10' })));
 const sched = label => call3('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label }, headers: A });
 const counts = async () => db3.prepare(`SELECT (SELECT COUNT(*) FROM schedule_cycle) AS cycles,
     (SELECT COUNT(*) FROM reporting_run WHERE trigger = 'schedule') AS runs, (SELECT COUNT(*) FROM snapshot) AS snaps,

@@ -10,12 +10,35 @@ import { newId, nowIso, getSettings, jsonInsert, atomic } from './db.js';
 import { loadOrdersForWeek, loadShipmentsForOrders, loadHpdForOrders, loadCatalog, latestAcceptedCatalogMeta } from './store.js';
 import { createRun, createRunStatements, getRun, transition, ownsCycle } from './runs.js';
 import { WORKER } from './actor.js';
-import { buildSnapshot, ENGINE_VERSION } from '../../shared/snapshot.js';
+import { buildSnapshot, ENGINE_VERSION, SHIPPING_SOURCES } from '../../shared/snapshot.js';
+import { effectiveOrderTotals, activeSegments } from './shippingCost.js';
+import { selectIn } from './db.js';
 import { evaluateGate, canPublish } from '../../shared/gate.js';
 import { addDays } from '../../shared/normalized.js';
 import { weekWindowUtc, scheduledRunFor } from '../../shared/schedule.js';
 
 const J = v => JSON.stringify(v ?? null);
+
+/**
+ * C3: the week's Shipping Cost Report view. `byOrder` holds the active cost of
+ * the week's orders; `covers` is true once active segments reach the week's
+ * last day; `unmatched` counts report orders first shipped in the week that
+ * match no ingested Shopify order.
+ */
+export async function reportForWeek(db, weekStart, orders) {
+  const all = await effectiveOrderTotals(db);
+  const keys = new Set(orders.map(o => String(o.orderNumber || '').replace(/^#/, '')));
+  const byOrder = new Map([...all].filter(([k]) => keys.has(k)));
+  const segs = await activeSegments(db);
+  const weekEnd = addDays(weekStart, 6);
+  const covers = segs.length > 0 && segs[0].segFrom <= weekStart && segs[segs.length - 1].segTo >= weekEnd;
+  const shippedInWeek = [...all.values()].filter(a => a.firstShipDate >= weekStart && a.firstShipDate <= weekEnd && !keys.has(a.orderKey)).map(a => a.orderKey);
+  const known = new Set((await selectIn(db, 'SELECT order_number FROM shopify_order WHERE order_number IN (SELECT value FROM json_each(?1))', shippedInWeek)).map(r => r.order_number));
+  const unmatched = shippedInWeek.filter(k => !known.has(k)).length;
+  const last = await db.prepare(`SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id
+    WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1`).bind(weekStart).first();
+  return { byOrder, covers, unmatched, previousShippingExpense: last ? last.e : null };
+}
 
 export async function sourceStatus(db, weekStart, { orders, shipments, hpd }) {
   const out = {};
@@ -305,15 +328,25 @@ export async function computeWeek(env, { weekStart, runId = null, trigger = 'man
     const policy = { priority: ['carrierFee', 'legacyRate'], locked: settings.carrier_fee_priority_locked === true,
                      insuranceTreatment: settings.insurance_treatment || 'awaiting_confirmation' };
     const prev = await previousWeekSnapshots(db, weekStart);
+    // C3: ShipStation expense is the Shipping Cost Report's Shipping Cost summed
+    // per Shopify order, read through the active non-overlapping segments. The
+    // mapping export is loaded for diagnostics only and is never an expense.
+    const report = await reportForWeek(db, weekStart, orders);
     const snap = buildSnapshot({ weekStart, orders, shipments, hpdOrders: hpd, catalog, policy,
-                                 previous: prev.published, previousDraft: prev.draft });
-    const sources = await sourceStatus(db, weekStart, { orders, shipments, hpd });
+                                 previous: prev.published, previousDraft: prev.draft,
+                                 shippingSource: SHIPPING_SOURCES.REPORT, shippingCostReport: report.byOrder,
+                                 c3: { asOf: nowIso(), policySettings: settings, previousShippingExpense: report.previousShippingExpense,
+                                       unmatchedReportOrders: report.unmatched, sourceVerified: settings.shipping_cost_report_source_verified === true,
+                                       provisionalEnabled: settings.provisional_publication_enabled === true,
+                                       publicationAllowed: settings.publication_enabled === true && env.PUBLICATION_ALLOWED === 'true' } });
+    const sources = { ...(await sourceStatus(db, weekStart, { orders, shipments, hpd })), shipstation: report.covers ? 'ok' : 'pending' };
     const freshness = await catalogFreshness(db, run.run_id, info);
     const catalogInfo = { ...info, freshness };
     const ordersInOtherTimezone = (await db.prepare(`SELECT COUNT(*) AS n FROM shopify_order WHERE week_start = ?1
       AND (normalized_timezone IS NULL OR normalized_timezone <> ?2)`).bind(weekStart, settings.store_timezone).first())?.n || 0;
     const gate = evaluateGate({ totals: snap.totals, reconciliation: snap.reconciliation, sources,
-                                catalog: { accepted: true, rev: info.rev, freshness }, settings, ordersInOtherTimezone });
+                                catalog: { accepted: true, rev: info.rev, freshness }, settings, ordersInOtherTimezone,
+                                shippingC3: snap.shipping.c3 });
     const gateRecord = { ...gate, sources, storeTimezone: settings.store_timezone, storeTimezoneConfirmed: settings.store_timezone_confirmed === true,
       catalog: { expectedRefreshId: info.refreshId || null, selectedRev: info.rev,
       capturedAt: info.capturedAt, basis: info.basis, freshness } };
@@ -510,6 +543,9 @@ const isStale = (env, run) => Date.now() - Date.parse(run.updated_at) > staleMs(
  *      ownership mid-way cannot write a snapshot.
  */
 export async function computeScheduledWeek(env, { weekStart, actor }) {
+  // Fifth control: the scheduled path is off unless the Worker environment
+  // explicitly allows automation. worker/wrangler.toml sets it "false".
+  if (env.AUTOMATION_ENABLED !== 'true') throw new ApiError(409, 'automation_disabled', 'Scheduled computation is disabled in this environment (AUTOMATION_ENABLED is not "true")');
   const db = env.DB;
   const settings = await getSettings(db);
   const ready = await readiness(db, weekStart, settings);

@@ -31,6 +31,9 @@ import fs from 'node:fs'; import path from 'node:path'; import assert from 'node
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const { hashPassword } = await import(REPO + '/worker/src/auth.js');
 const { gqlOrder, ssCustom } = await import(REPO + '/tests/fixtures-normalized.mjs');
+const { reportRow } = await import(REPO + '/tests/fixtures-shipping-cost.mjs');
+const { sanitizeShippingCostReport, parseShippingCostReport } = await import(REPO + '/shared/adapters/shippingCostReport.js');
+const { toCsvText } = await import(REPO + '/shared/adapters/shopifyCsv.js');
 
 const rnd = () => crypto.randomUUID() + crypto.randomUUID();
 const S = { INGEST_SECRET: rnd(), ADMIN_SECRET: rnd(), SESSION_SIGNING_KEY: rnd(), DASHBOARD_PASSWORD_HASH: await hashPassword('synthetic-' + rnd(), { iterations: 1000 }) };
@@ -55,7 +58,7 @@ async function world() {
   const ctx = { on: async () => {} };
   const mf = new Miniflare({ modules: true, script: bundle, compatibilityDate: '2024-09-01', d1Databases: ['DB'],
     serviceBindings: { TEST_HOOK: async req => { await ctx.on(new URL(req.url).pathname.slice(1), await req.json()); return new Response('ok'); } },
-    bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'false',
+    bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'false', AUTOMATION_ENABLED: 'true',
                 D1_QUOTA_BYTES: '5000000000', TEST_HOOKS_ENABLED: 'true', TEST_STALE_MS: String(STALE_MS) } });
   const db = await mf.getD1Database('DB');
   for (const f of fs.readdirSync(REPO + '/worker/migrations').sort()) {
@@ -73,6 +76,14 @@ async function world() {
   await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'week', nodes, weekStart: W }), headers: I });
   await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'updated_since', nodes: [], weekStart: W }), headers: I });
   await call('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: ship, weekStart: W }, headers: I });
+  // C3: the expense source (every order has a row, so coverage is complete).
+  const rs = sanitizeShippingCostReport(nodes.map((n, i) => reportRow({ date: `2026-09-${15 + (i % 5)}`, order: n.name.slice(1), cost: '5.10' })));
+  const rp = parseShippingCostReport(rs.rows, { requestedFrom: W, requestedTo: '2026-09-20' });
+  const rep = await call('POST', '/v1/ingest/shipping-cost-report', { body: { format: 'csv_text', text: toCsvText(rs.rows, rs.columns), requestedFrom: W, requestedTo: '2026-09-20',
+    rowCount: rp.rowCount, shippingCostTotal: rp.shippingCostCents / 100, exportedAt: '2026-09-21T15:00:00Z' }, headers: I });
+  await call('POST', `/v1/admin/shipping-cost/versions/${rep.json.versionId}/accept`, { body: { reason: 'adversarial test only' }, headers: A });
+  // Test-only stand-in for the future source-verification checklist, so runs reach `validated`.
+  await db.prepare("UPDATE settings SET value = 'true' WHERE key = 'shipping_cost_report_source_verified'").run();
   const schedule = label => call('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label }, headers: A });
   const q = async (sql, ...p) => (await db.prepare(sql).bind(...p).all()).results;
   const digest = async () => JSON.stringify(await Promise.all(['reporting_run', 'run_transition', 'snapshot', 'snapshot_totals', 'snapshot_order', 'schedule_cycle']

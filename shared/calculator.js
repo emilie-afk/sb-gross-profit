@@ -744,13 +744,67 @@ function _parseRfc4180(text) {
  */
 export const SUB_RENEWAL_CHANNEL = 'Subscription renewals (prepaid)';
 
+export const SHIPPING_RULES = Object.freeze({ C3: 'c3', LEGACY: 'legacy' });
+export const LIVELY_ROOT_STORE = 'Lively Root';
+export const CANCELLED_AFTER_SHIPPING_CATEGORY = 'Cancelled after shipping';
+
+const parseShopifyTime = s => {
+  const m = String(s || '').trim().match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)\s*([+-]\d{2}:?\d{2}|Z)?$/);
+  if (!m) return null;
+  const off = !m[3] ? 'Z' : m[3] === 'Z' ? 'Z' : (m[3].includes(':') ? m[3] : `${m[3].slice(0, 3)}:${m[3].slice(3)}`);
+  const t = Date.parse(`${m[1]}T${m[2].length === 5 ? m[2] + ':00' : m[2]}${off}`);
+  return Number.isNaN(t) ? null : t;
+};
+
+/**
+ * Evidence that a cancelled order shipped before it was cancelled (C3).
+ * Every condition is required; `reason` names the first that fails.
+ */
+export function cancelledAfterShippingEvidence(row, shipStationCost) {
+  if (!row) return { qualifies: false, reason: 'no_order_row' };
+  const cancelledAt = parseShopifyTime(row['Cancelled at'] || row['Cancelled At']);
+  if (cancelledAt === null) return { qualifies: false, reason: 'not_cancelled' };
+  const fulfilledAt = parseShopifyTime(row['Fulfilled at']);
+  if (fulfilledAt === null) return { qualifies: false, reason: 'no_fulfilled_at' };
+  if (!(fulfilledAt < cancelledAt)) return { qualifies: false, reason: 'fulfilled_after_cancellation' };
+  if (!/^(fulfilled|partial)/i.test(String(row['Fulfillment Status'] || '').trim())) return { qualifies: false, reason: 'not_fulfilled' };
+  if (!(shipStationCost > 0)) return { qualifies: false, reason: 'no_carrier_cost' };
+  const shipping = cleanMoney(row['Shipping']) || 0;
+  const kept = Math.round(((cleanMoney(row['Total']) || 0) - (cleanMoney(row['Taxes']) || 0) - (cleanMoney(row['Refunded Amount'] ?? row['Refunded amount']) || 0)) * 100) / 100;
+  if (!(shipping > 0) || Math.abs(kept - shipping) > 0.005) return { qualifies: false, reason: 'retained_amount_is_not_the_shipping' };
+  return { qualifies: true, reason: null, shipping };
+}
+
+function shippingOnlyLine(row, orderNum, evidence, shipStationCosts) {
+  const ssRate = shipStationCosts.get(orderNum.replace(/^#/, '')) || null;
+  const shipping = evidence.shipping;
+  return {
+    orderNum, date: (row['Created at'] || '').trim().slice(0, 10), source: normalizeChannel(row['Source name'] || row['Source'] || ''),
+    orderCat: CANCELLED_AFTER_SHIPPING_CATEGORY, store: 'Shipping only', vendor: '', sku: '', product: 'Shipping retained after cancellation', qty: 0,
+    unitPrice: 0, lineRevenue: 0, orderTotal: shipping, unitCost: 0, costSource: 'Cancelled after shipping (shipping only)', lineCogs: 0,
+    lineGp: 0, lineGpPct: null, lineNetGp: 0, lineNetGpPct: null,
+    shipCollected: shipping, isFreeShip: '', shipPaid: ssRate, shipPaidSS: ssRate || 0, shipPaidHP: 0,
+    shipDelta: ssRate !== null ? Math.round((shipping - ssRate) * 100) / 100 : null, shipNote: 'Cancelled after shipping: customer shipping kept, carrier cost kept',
+    shipPaidLR: null, shippingRules: SHIPPING_RULES.C3,
+    isInfluencerSample: false, isDigital: false, subMonths: 1, mcgVolDisc: 0, subShipMo: null, expSubShipMo: null, subSSCostMo: null, subShipLoss: null,
+    isSubRenewal: false, vendorKey: null, costMatchType: 'shipping_only', missingCost: false, baseMerchRevenue: 0, historicalDiscount: 0,
+    refundAllocated: 0, isCancelled: true, isCancelledAfterShipping: true, isShippingOnly: true, isRoute: false, isGiftCard: false,
+  };
+}
+
 // ─── Main calculation ─────────────────────────────────────────────────────────
 
 export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, skuWeights, additionalCosts = {}, hpByName = {}, skuAlias = {}, hpdShipCosts = null, mcgExtra = {}, vendorCosts = null, vendorIndex = null, options = {}) {
   const {
     excludeCancelled = true,   // cancelled orders never count toward profitability
     applyRefunds     = true,   // order-level Refunded Amount prorated across lines
+    // 'c3' (Revision 9 C3, default): Lively Root pass-through and
+    // cancelled-after-shipping retention. 'legacy': the Revision 8 engine,
+    // kept for the before/after bridge and the compatibility golden.
+    shippingRules    = SHIPPING_RULES.C3,
   } = options;
+  if (!Object.values(SHIPPING_RULES).includes(shippingRules)) throw new Error(`Unknown shippingRules ${shippingRules}`);
+  const c3 = shippingRules === SHIPPING_RULES.C3;
 
   // ── Pre-pass 0: cancelled orders + order-level refunds ──
   // Shopify writes 'Cancelled at' and 'Refunded Amount' on the order's first
@@ -855,6 +909,33 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     return 'Other';
   }
 
+  // ── C3: Lively Root (Shopify Collective) pass-through ──
+  // Succulents Box never ships or pays for Lively Root shipments: the customer's
+  // shipping is passed to Lively Root, so collected = expense and net = 0. Only
+  // orders whose physical items are ALL Lively Root qualify (Route protection
+  // may ride along); a mix with another shipped vendor cannot be split from
+  // Shopify's single order-level shipping amount and is left unchanged.
+  const lrPassThrough = new Set();
+  if (c3) for (const [name, stores] of orderStores) {
+    if (stores.has(LIVELY_ROOT_STORE) && [...stores].every(st => st === LIVELY_ROOT_STORE || st === 'Route')) lrPassThrough.add(name);
+  }
+
+  // ── C3: cancelled after shipping ──
+  // Normally a cancelled order is excluded entirely. When Shopify shows the
+  // order was fulfilled BEFORE it was cancelled, a ShipStation cost exists, and
+  // everything except the shipping was refunded, the customer-paid shipping and
+  // the actual carrier cost are kept as a shipping-only result. The final
+  // cancellation flag alone is never taken as evidence of shipment.
+  const cancelledAfterShipping = new Map();   // orderNum → { shipping }
+  if (c3 && excludeCancelled) {
+    const firstRow = new Map();
+    for (const row of orderRows) { const n = (row['Name'] || '').trim(); if (n && !firstRow.has(n)) firstRow.set(n, row); }
+    for (const name of cancelledOrders) {
+      const e = cancelledAfterShippingEvidence(firstRow.get(name), shipStationCosts.get(name.replace(/^#/, '')));
+      if (e.qualifies) cancelledAfterShipping.set(name, e);
+    }
+  }
+
   // ── Main pass ──
   const lineItems = [];
   const orderSeen = new Set();
@@ -864,7 +945,11 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const sku      = (row['Lineitem sku'] || '').trim();
     if (!sku || sku.toLowerCase() === 'nan') continue;
     // Cancelled orders are excluded from profitability results entirely.
-    if (excludeCancelled && cancelledOrders.has(orderNum)) continue;
+    if (excludeCancelled && cancelledOrders.has(orderNum)) {
+      const cas = cancelledAfterShipping.get(orderNum);
+      if (cas && !orderSeen.has(orderNum)) { lineItems.push(shippingOnlyLine(row, orderNum, cas, shipStationCosts)); orderSeen.add(orderNum); }
+      continue;
+    }
 
     const vendor   = (row['Vendor'] || '').trim();
     const product  = (row['Lineitem name'] || '').trim().slice(0, 100);
@@ -975,7 +1060,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
 
     // Shipping (order-level, first row only)
     let shipCollected = null, shipPaid = null, shipDelta = null, shipNote = null;
-    let shipPaidSS = null, shipPaidHP = null;
+    let shipPaidSS = null, shipPaidHP = null, shipPaidLR = null;
     let isFreeShip = '';
 
     if (isFirstRow) {
@@ -1032,6 +1117,15 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
           ? `Mixed HPD shipping (SS $${nonHpd.toFixed(2)} + HPD actual $${hpdPass.toFixed(2)})`
           : `Mixed HPD shipping (SS $${nonHpd.toFixed(2)} + HPD pass-through $${hpdPass.toFixed(2)})`;
 
+      } else if (lrPassThrough.has(orderNum)) {
+        // C3: Lively Root ships and charges; Succulents Box passes the customer's
+        // shipping through. A ShipStation cost is not used unless a verified
+        // source shows Succulents Box bought that label.
+        shipPaid   = custShipping;
+        shipPaidSS = 0; shipPaidHP = 0; shipPaidLR = custShipping;
+        shipDelta  = 0;
+        shipNote   = ssRate !== null ? 'Lively Root pass-through (ShipStation cost present, not used)' : 'Lively Root pass-through (Shopify Collective)';
+
       } else {
         shipPaid  = ssRate;
         shipPaidSS = ssRate || 0; shipPaidHP = 0;
@@ -1051,6 +1145,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       unitPrice, lineRevenue, orderTotal, unitCost, costSource, lineCogs, lineGp, lineGpPct,
       lineNetGp, lineNetGpPct,
       shipCollected, isFreeShip, shipPaid, shipPaidSS, shipPaidHP, shipDelta, shipNote,
+      ...(c3 ? { shipPaidLR, shippingRules } : {}),
       isInfluencerSample, isDigital, subMonths, mcgVolDisc, subShipMo, expSubShipMo, subSSCostMo, subShipLoss,
       isSubRenewal,
       // ── Audit trail carried on every calculated line ──
@@ -1082,6 +1177,10 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       byOrder.get(li.orderNum).push(li);
     }
     for (const [orderNum, refund] of orderRefunds) {
+      // A cancelled-after-shipping result already nets the refund: only the
+      // retained customer shipping is revenue (evidence required it to equal
+      // Total − Taxes − Refunded).
+      if (cancelledAfterShipping.has(orderNum)) continue;
       const lines = byOrder.get(orderNum);
       if (!lines || !lines.length) continue;
       const eligible = lines.filter(l => (l.lineRevenue || 0) > 0);
@@ -1151,6 +1250,7 @@ export function summarize(lineItems) {
   const shipByVendor = {
     'ShipStation':    { paid: 0, orders: new Set() },
     'HP Dropship':    { paid: 0, orders: new Set() },
+    'Lively Root':    { paid: 0, orders: new Set() },   // C3 pass-through (Shopify Collective)
   };
 
   for (const li of lineItems) {
@@ -1202,6 +1302,10 @@ export function summarize(lineItems) {
       if (li.shipPaidHP !== null) {
         shipByVendor['HP Dropship'].paid += li.shipPaidHP;
         if (li.shipPaidHP > 0) shipByVendor['HP Dropship'].orders.add(li.orderNum);
+      }
+      if (li.shipPaidLR !== null && li.shipPaidLR !== undefined) {
+        shipByVendor['Lively Root'].paid += li.shipPaidLR;
+        if (li.shipPaidLR > 0) shipByVendor['Lively Root'].orders.add(li.orderNum);
       }
     }
   }

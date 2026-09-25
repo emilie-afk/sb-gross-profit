@@ -14,7 +14,7 @@ function stable(v) {
   return JSON.stringify(v ?? null);
 }
 
-export function goldenSnapshot() {
+function goldenInputs() {
   const csvRows = [
     ...csvOrder({ name: '#900101', subtotal: 30, shipping: 7.99, taxes: 2.1, total: 40.09,
       lines: [{ sku: 'MG-ALOE', price: 12, qty: 1, vendor: 'Succulents Box' }, { sku: 'MG-JADE', price: 18, qty: 1, vendor: 'Succulents Box' }] }),
@@ -35,8 +35,33 @@ export function goldenSnapshot() {
     ...ssCustom({ shipment: 'S104', order: '900104', fee: '0', rate: '', items: [{ sku: 'LM-VASE-PRO-BUD-RAINBOW', qty: 1 }] }),
     ...ssCustom({ shipment: 'S105', order: '900105', fee: '5.40', insurance: '1.25', items: [{ sku: 'MG-ALOE', qty: 2 }] }),
   ]);
+  return { orders, shipments };
+}
+
+/** Revision 8 compatibility (mapping-export source, legacy rules). */
+export function goldenSnapshot() {
+  const { orders, shipments } = goldenInputs();
   return buildSnapshot({ weekStart: '2026-09-14', orders, shipments, catalog: FIXTURE_CATALOG });
 }
 
-export const goldenHash = () => createHash('sha256').update(stable(goldenSnapshot())).digest('hex');
+/**
+ * C3: the same week with a synthetic Shipping Cost Report (Shipping Cost
+ * summed per Shopify order; order 900104 has no row, 900102 has two rows).
+ */
+export const GOLDEN_C3_REPORT = new Map([
+  ['900101', { orderKey: '900101', costCents: 612, rowCount: 1, firstShipDate: '2026-09-15', lastShipDate: '2026-09-15' }],
+  ['900102', { orderKey: '900102', costCents: 870, rowCount: 2, firstShipDate: '2026-09-15', lastShipDate: '2026-09-16' }],
+  ['900105', { orderKey: '900105', costCents: 540, rowCount: 1, firstShipDate: '2026-09-17', lastShipDate: '2026-09-17' }],
+]);
+export function goldenSnapshotC3() {
+  const { orders } = goldenInputs();
+  return buildSnapshot({ weekStart: '2026-09-14', orders, catalog: FIXTURE_CATALOG, shippingSource: 'shipping_cost_report',
+                         shippingCostReport: GOLDEN_C3_REPORT, c3: { asOf: '2026-09-21T09:00:00Z', unmatchedReportOrders: 0 } });
+}
+
+/** The engine-version label is normalized so the pin tracks behaviour only. */
+export const REVISION8_ENGINE_VERSION = '2026.09.24-phase1';
+const hashOf = snap => createHash('sha256').update(stable(snap)).digest('hex');
+export const goldenHash = () => hashOf({ ...goldenSnapshot(), engineVersion: REVISION8_ENGINE_VERSION });
+export const goldenHashC3 = () => hashOf(goldenSnapshotC3());
 

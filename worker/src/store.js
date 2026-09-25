@@ -50,12 +50,13 @@ export async function saveOrders(db, orders, runId, { timeZone } = {}) {
       cancelled_at: o.cancelledAt, subtotal: o.subtotal, shipping: o.shipping, taxes: o.taxes, total: o.total, duties: o.duties,
       discount_amount: o.discountAmount, refunded_amount: o.refundedAmount, discount_codes: J(o.discountCodes || []),
       source_name: o.sourceName, tags: J(o.tags || []), note_attributes: J(o.noteAttributes || []), store: o.store,
-      source_system: o.sourceSystem, content_hash: h, ingest_run_id: runId, ingested_at: at, normalized_timezone: timeZone });
+      source_system: o.sourceSystem, content_hash: h, ingest_run_id: runId, ingested_at: at, normalized_timezone: timeZone,
+      fulfillment_status: o.fulfillmentStatus ?? null, fulfilled_at: o.fulfilledAt ?? null });
     for (const l of o.lines) {
       lineRows.push({ order_name: o.orderName, line_index: l.lineIndex, line_id: l.lineId, sku: l.sku, product_name: l.productName,
         quantity: l.quantity, current_quantity: l.currentQuantity, unit_price: l.unitPrice, vendor: l.vendor,
         requires_shipping: l.requiresShipping === null || l.requiresShipping === undefined ? null : String(l.requiresShipping),
-        line_discount: l.lineDiscount, discount_source: l.discountSource || 'none' });
+        line_discount: l.lineDiscount, discount_source: l.discountSource || 'none', fulfillment_status: l.fulfillmentStatus ?? null });
       (l.discountAllocations || []).forEach((a, k) => allocRows.push({ order_name: o.orderName, line_index: l.lineIndex, alloc_index: k,
         amount: a.amount, application_type: a.applicationType, application_index: a.applicationIndex, allocation_method: a.allocationMethod,
         target_selection: a.targetSelection, target_type: a.targetType, code: a.code, title: a.title }));
@@ -134,10 +135,13 @@ async function assembleOrders(db, orders) {
     discountAmount: o.discount_amount, refundedAmount: o.refunded_amount, discountCodes: P(o.discount_codes, []),
     sourceName: o.source_name, tags: P(o.tags, []), noteAttributes: P(o.note_attributes, []), store: o.store,
     sourceSystem: o.source_system,
+    ...(o.fulfillment_status != null ? { fulfillmentStatus: o.fulfillment_status } : {}),
+    ...(o.fulfilled_at != null ? { fulfilledAt: o.fulfilled_at } : {}),
     lines: (L.get(o.order_name) || []).map(l => ({
       lineIndex: l.line_index, lineId: l.line_id, sku: l.sku, productName: l.product_name, quantity: l.quantity,
       currentQuantity: l.current_quantity, unitPrice: l.unit_price, vendor: l.vendor, requiresShipping: l.requires_shipping,
       lineDiscount: l.line_discount, discountSource: l.discount_source,
+      ...(l.fulfillment_status != null ? { fulfillmentStatus: l.fulfillment_status } : {}),
       discountAllocations: (A.get(o.order_name) || []).filter(a => a.line_index === l.line_index).map(a => ({
         amount: a.amount, applicationType: a.application_type, applicationIndex: a.application_index,
         allocationMethod: a.allocation_method, targetSelection: a.target_selection, targetType: a.target_type,

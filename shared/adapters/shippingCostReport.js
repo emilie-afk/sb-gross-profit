@@ -166,3 +166,34 @@ export function aggregateByOrder(rows) {
 export function shippingCostUploadBody({ text, requestedFrom, requestedTo, rowCount, shippingCostTotal, sanitizedSha256, exportedAt }) {
   return { format: 'csv_text', text, requestedFrom, requestedTo, rowCount, shippingCostTotal, sanitizedSha256, exportedAt };
 }
+
+/** 'raw' (the 18-column ShipStation file), 'sanitized' (the 15 approved columns) or null. */
+export function shippingCostReportKind(headers) {
+  const h = (headers || []).map(x => String(x).replace(/^﻿/, '').trim());
+  const same = cols => h.length === cols.length && cols.every(c => h.includes(c));
+  return same(SHIPPING_COST_REPORT_RAW_COLUMNS) ? 'raw' : same(SHIPPING_COST_REPORT_COLUMNS) ? 'sanitized' : null;
+}
+
+/**
+ * Local-only manual preview (dashboard, C3). The browser parses the report,
+ * drops Recipient / Shipping Paid / +/- at once, and keeps only the sanitized
+ * rows. Nothing is uploaded. Returns the per-order costs the engine takes
+ * (dollars), the aggregates for classification, and counts-only facts.
+ *
+ * @param {object[]} parsedRows  rows from parseCSV(text)
+ */
+export function previewShippingCostReport(parsedRows) {
+  const headers = parsedRows.length ? Object.keys(parsedRows[0]) : [];
+  const kind = shippingCostReportKind(headers);
+  if (!kind) { const e = new Error('Not a ShipStation Shipping Cost Report (columns differ)'); e.code = 'report_schema_changed'; throw e; }
+  const rows = kind === 'raw' ? sanitizeShippingCostReport(parsedRows).rows : parsedRows.map(r => {
+    const o = {}; for (const c of SHIPPING_COST_REPORT_COLUMNS) o[c] = r[c] ?? r[`﻿${c}`] ?? ''; return o; });
+  const dates = rows.map(r => parseShipDate(r['Ship Date'])?.date).filter(Boolean).sort();
+  if (!dates.length) { const e = new Error('The report has no dated rows'); e.code = 'report_invalid'; throw e; }
+  const p = parseShippingCostReport(rows, { requestedFrom: dates[0], requestedTo: dates[dates.length - 1] });
+  const agg = aggregateByOrder(p.rows);
+  const costs = new Map([...agg].filter(([, a]) => a.costCents > 0).map(([k, a]) => [k, fromCents(a.costCents)]));
+  return { kind, rows, agg, costs,
+           facts: { rows: p.rowCount, orders: agg.size, shippingCost: fromCents(p.shippingCostCents), firstShipDate: p.firstShipDate,
+                    lastShipDate: p.lastShipDate, reviewFlags: p.reviewFlags, droppedColumns: kind === 'raw' ? [...SHIPPING_COST_REPORT_DROPPED] : [] } };
+}

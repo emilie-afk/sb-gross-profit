@@ -437,7 +437,11 @@ test('shipping collected and expense stay at historical actuals in a scenario', 
   const b = summarizeScenario(lines, { sitewideDiscount: 0.45, adRate: 0, monthlyLabor: 0 });
   assert.equal(a.scenario.shipCollected, b.scenario.shipCollected);
   assert.equal(a.scenario.shipExpense, b.scenario.shipExpense);
-  near(a.scenario.shipExpense, 7.5 + 11 + 14);
+  // C3: the Lively Root order is a pass-through (expense = the $15 collected);
+  // its synthetic ShipStation cost is not used. The legacy engine used it.
+  near(a.scenario.shipExpense, 7.5 + 11 + 15);
+  const legacy = summarizeScenario(calc(baseOrders(), { ship: SS, options: { shippingRules: 'legacy' } }), { sitewideDiscount: 0, adRate: 0, monthlyLabor: 0 });
+  near(legacy.scenario.shipExpense, 7.5 + 11 + 14);
 });
 
 test('vendor costs are resolved per vendor and never borrowed across vendors', () => {

@@ -438,6 +438,43 @@ limit then applies to all dashboard users together: ten wrong passwords lock
 everyone out for 15 minutes. That is the intended trade-off for Phase 1 (the
 Worker does not trust forwarded-for headers, which a caller could forge).
 
+### Shipping expense: Shipping Cost Report (C3, provisional)
+
+The Worker's compute takes ShipStation expense from the ShipStation Analytics
+Shipping Cost Report (C2 versions and active segments), Shipping Cost summed
+per Shopify order. The mapping export is loaded for diagnostics only.
+
+- Lively Root (Shopify Collective) orders: shipping is a pass-through
+  (expense = customer shipping collected, net zero); a ShipStation cost is not used.
+- Cancelled after shipping: kept as a shipping-only result only when Shopify
+  shows `Fulfilled at` before `Cancelled at`, a Shipping Cost exists, and only
+  the shipping was retained. Otherwise the order stays excluded.
+- Order-level coverage (matched ÷ expected ShipStation orders), zero-shipping
+  classes, Heat Pack delays and the lifecycle
+  (`shipping_order_coverage_open | _updated | _complete`, 14-day aging) are
+  stored on each snapshot under `totals.labels.c3`. Partial-shipment
+  verification is unavailable (`partial_fulfillment_check_available=false`,
+  `partial_fulfillment_verification_complete=false`); `shipping_complete` is
+  never produced.
+- Audited settings (migration 0009, reason required): `vendor_first_paid_shipping_dates`,
+  `mcg_free_shipping_threshold`, `shipping_coverage_aging_days`,
+  `provisional_publication_enabled` (locked false).
+- Gate: `shipping_source_unverified` and `shipping_order_coverage_open` block
+  publication until the source is verified (or, later, provisional
+  publication is enabled). Product-cost completeness is reported separately.
+- A report activation or rollback records the weeks whose order costs changed
+  (ingest run `shipping_cost_report`), so `/v1/admin/revise-touched` drafts
+  revisions for them.
+- `AUTOMATION_ENABLED` (worker/wrangler.toml, "false") must be "true" for the
+  scheduled path to run.
+
+Dashboard: the ShipStation upload accepts the Shipping Cost Report. The file is
+reduced to its 15 approved columns in the browser (Recipient, Shipping Paid and
++/- are dropped at once), only that form is stored locally, and nothing is
+uploaded. A "Provisional result" panel shows the catalog version, missing-cost
+lines and revenue, product-cost completeness, shipping-source verification,
+order-level coverage and the zero-shipping classes.
+
 ### Cost catalog: refresh, freshness, versioning
 
 **Worker direct fetch (C6, replaces the Netlify build hook).** The Worker reads

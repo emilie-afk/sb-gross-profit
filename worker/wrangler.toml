@@ -27,6 +27,8 @@ ALLOWED_ORIGINS = "https://sb-profit.netlify.app"
 COOKIE_SAMESITE = "Strict"
 # Second go-live lock. Leave "false" until the Revision 5 go-live gate passes.
 PUBLICATION_ALLOWED = "false"
+# Fifth control: scheduled computation. Leave "false" until the automation commit is approved.
+AUTOMATION_ENABLED = "false"
 D1_QUOTA_BYTES = "5000000000"
 # Staging only: SESSION_TTL_SECONDS = "60" lets tools/proxy-smoke.mjs --expired-wait test
 # session expiry. Leave unset in production (12 hours).
@@ -48,5 +50,6 @@ migrations_dir = "migrations"
 ALLOWED_ORIGINS = "https://weekly-automation-phase1--sb-profit.netlify.app"
 COOKIE_SAMESITE = "Strict"
 PUBLICATION_ALLOWED = "false"
+AUTOMATION_ENABLED = "false"
 D1_QUOTA_BYTES = "5000000000"
 SESSION_TTL_SECONDS = "60"

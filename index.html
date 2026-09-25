@@ -268,8 +268,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
              ondrop="handleDrop(event,'ship')">
           <input type="file" id="input-ship" accept=".csv" onchange="handleFile(this,'ship')">
           <div class="icon">🚚</div>
-          <div class="label">ShipStation CSV <span style="color:var(--muted);font-weight:400">(optional)</span></div>
-          <div class="hint">ShipStation → Reports → Shipments → Export</div>
+          <div class="label">ShipStation Shipping Cost Report <span style="color:var(--muted);font-weight:400">(optional)</span></div>
+          <div class="hint">ShipStation → Analytics → Reports → Shipping Cost → Export. Read in this browser only: Recipient, Shipping Paid and +/- are removed at once and nothing is uploaded. (The older Shipments export still loads, labelled as the Revision 8 basis.)</div>
           <div class="filename" id="name-ship"></div>
         </div>
 
@@ -371,6 +371,14 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
               <span class="meta" id="alerts-count"></span>
             </div>
             <div class="gp-alerts" id="alerts-body"></div>
+          </div>
+
+          <div class="gp-card" id="c3-disclosure" hidden>
+            <div class="gp-card-head">
+              <h3>Provisional result</h3>
+              <span class="meta" id="c3-disclosure-meta"></span>
+            </div>
+            <div class="gp-alerts" id="c3-disclosure-body" style="padding:12px 18px;font-size:13px;line-height:1.6"></div>
           </div>
 
           <div class="gp-kpi-row">
@@ -1305,6 +1313,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
 <script type="module">
 import { parseCSV, parseShipStation, parseAdditionalCosts, parseHpdLog, calculate, summarize, SUB_RENEWAL_CHANNEL } from './js/calculator.js';
+import { previewShippingCostReport, shippingCostReportKind, SHIPPING_COST_REPORT_COLUMNS } from './js/shippingCostReport.js';
+import { classifyShipping, unmatchedReportOrders, shippingLifecycle, shippingDisclosures, DEFAULT_POLICY_SETTINGS } from './js/shippingPolicy.js';
+import { toCsvText } from './shared/adapters/shopifyCsv.js';
+import { catalogRevOf } from './shared/catalog.js';
 import { initScenarioView, renderScenarioView } from './js/scenarioUI.js';
 import { SCREENS, initTheme, toggleTheme, initRouter, showScreen, currentScreen,
          buildAlerts, renderAlerts, renderStoreBars, renderChannelDonut,
@@ -1333,6 +1345,19 @@ let savedOrdersTexts = null, savedShipText = null, savedCostsText = null, savedH
 let selectedSavedCosts = null, selectedSavedHpd = null;
 let hpdData = null; // Map<shopifyOrderNum, entry> from parseHpdLog
 let apsShipCosts = new Map(); // orderNum → APS shipment Rate (from line-items SS format)
+// C3: the ShipStation file currently selected, already sanitized when it is a
+// Shipping Cost Report (Recipient / Shipping Paid / +/- never kept or stored).
+let shipTextCurrent = null;
+let c3Preview = null;          // { facts, classification, lifecycle, disclosures } for the disclosure panel
+
+/** A Shipping Cost Report is reduced to its 15 approved columns before anything else happens. */
+function sanitizeShipText(text) {
+  const rows = parseCSV(text.replace(/^\uFEFF/, ''));
+  const kind = rows.length ? shippingCostReportKind(Object.keys(rows[0])) : null;
+  if (!kind) return { text, kind: 'shipments_export' };
+  const p = previewShippingCostReport(rows);
+  return { text: toCsvText(p.rows, [...SHIPPING_COST_REPORT_COLUMNS]), kind: 'shipping_cost_report' };
+}
 let allLines = [], filteredLines = [], sortKey = 'date', sortAsc = false;
 let currentPage = 1;
 const PAGE_SIZE = 100;
@@ -1495,7 +1520,7 @@ window.selectSaved = async (id, type) => {
       if (selectedSavedShip) document.getElementById('chip-' + selectedSavedShip)?.classList.remove('active');
       selectedSavedShip = id;
       document.getElementById('chip-' + id)?.classList.add('active');
-      savedShipText = await getSavedText(file);
+      try { savedShipText = sanitizeShipText(await getSavedText(file)).text; } catch { savedShipText = null; }
       document.getElementById('name-ship').textContent = file.name;
       document.getElementById('zone-ship').classList.add('has-file');
     }
@@ -1572,7 +1597,8 @@ function detectDateRange(text, type) {
     if (idx < 0) return null;
     for (let i = 1; i < lines.length; i++) {
       const v = quickField(lines[i], idx);
-      const m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      // Shipments export "05/01/2026"; Shipping Cost Report "5/1/2026 12:00:00 AM"
+      const m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+\d{1,2}:\d{2}:\d{2}\s*[AP]M)?$/);
       if (m) dates.push(`${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`);
     }
   } else if (type === 'hpd') {
@@ -1702,9 +1728,13 @@ window.handleFile = async (input, type) => {
   } else if (type === 'ship') {
     shipFile = input.files[0] || null;
     document.getElementById('name-ship').textContent = shipFile ? shipFile.name : '';
+    shipTextCurrent = null;
     if (shipFile) {
       document.getElementById('zone-ship').classList.add('has-file');
-      const text = await shipFile.text();
+      let text;
+      try { text = sanitizeShipText(await shipFile.text()).text; }
+      catch (e) { const err = document.getElementById('upload-error'); err.textContent = 'ShipStation file refused: ' + e.message; err.style.display = 'block'; shipFile = null; return; }
+      shipTextCurrent = text;                                   // only the sanitized form is kept or stored
       await saveFilesToLS(shipFile.name, 'ship', text, detectDateRange(text, 'ship'));
       renderSavedFiles();
     }
@@ -1807,13 +1837,20 @@ window.runCalc = async () => {
     let orderRows = [];
     for (const txt of orderTexts) orderRows = orderRows.concat(parseCSV(txt));
 
-    let shipCosts = new Map();
-    const shipText = shipFile ? await shipFile.text() : savedShipText;
+    let shipCosts = new Map(), reportPreview = null;
+    const shipText = shipTextCurrent || savedShipText;
     if (shipText) {
       setLoadingMsg('Parsing ShipStation…');
-      const ssResult = parseShipStation(parseCSV(shipText));
-      shipCosts    = ssResult.costs;
-      apsShipCosts = ssResult.apsCosts;
+      const shipRows = parseCSV(shipText.replace(/^\uFEFF/, ''));
+      if (shipRows.length && shippingCostReportKind(Object.keys(shipRows[0]))) {
+        // C3: Shipping Cost Report — Shipping Cost summed per Shopify order.
+        reportPreview = previewShippingCostReport(shipRows);
+        shipCosts = reportPreview.costs; apsShipCosts = new Map();
+      } else {
+        const ssResult = parseShipStation(shipRows);
+        shipCosts    = ssResult.costs;
+        apsShipCosts = ssResult.apsCosts;
+      }
     }
 
     const hpdText = hpdFile ? await hpdFile.text() : savedHpdText;
@@ -1827,7 +1864,11 @@ window.runCalc = async () => {
     setLoadingMsg('Calculating gross profit…');
     await new Promise(r => setTimeout(r, 20));
     allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias, hpdData, mcgExtra, vendorCosts, vendorIndex);
+    c3Preview = await buildC3Preview({ orderRows, lines: allLines, reportPreview, hasShipFile: !!shipText,
+      catalog: { tables: { mcg_total: mcgCosts, product_costs: productCosts, sku_weights: skuWeights, sb_costs: sbCosts, hp_supplement: hpSupp,
+                           hp_by_name: hpByName, sku_alias: skuAlias, vendor_costs: vendorCosts, vendor_index: vendorIndex }, mcgExtra } });
     renderDashboard(allLines);
+    renderC3Disclosure(c3Preview);
     initScenarioView(document.getElementById('view-scenario'), () => allLines);
 
     document.getElementById('upload-screen').style.display = 'none';
@@ -1855,6 +1896,54 @@ window.runCalc = async () => {
   }
   hideLoading();
 };
+
+// ─── C3 disclosure (local preview; nothing leaves the browser) ──────
+async function buildC3Preview({ orderRows, lines, reportPreview, hasShipFile, catalog }) {
+  let catalogRev = null;
+  try { catalogRev = await catalogRevOf(catalog); } catch { catalogRev = null; }
+  const s = summarize(lines);
+  if (!reportPreview) {
+    return { source: hasShipFile ? 'shipments_export' : 'none', catalogRev, missingCostLines: s.missingCost,
+             missingCostRevenue: lines.filter(l => l.missingCost).reduce((a, l) => a + (l.lineRevenue || 0), 0) };
+  }
+  const dates = lines.map(l => l.date).filter(Boolean).sort();
+  const period = dates.length ? { from: dates[0], to: dates[dates.length - 1] } : null;
+  const classification = classifyShipping({ rows: orderRows, lines, reportAgg: reportPreview.agg, settings: DEFAULT_POLICY_SETTINGS, period });
+  const orderKeys = new Set(orderRows.map(r => String(r['Name'] || '').trim().replace(/^#/, '')).filter(Boolean));
+  const unmatched = unmatchedReportOrders(reportPreview.agg, orderKeys);
+  const lifecycle = shippingLifecycle({ coverage: classification.coverage, weekEnd: period?.to || null, asOf: new Date().toISOString(),
+                                        agingDays: DEFAULT_POLICY_SETTINGS.shipping_coverage_aging_days });
+  const missingCostRevenue = lines.filter(l => l.missingCost).reduce((a, l) => a + (l.lineRevenue || 0), 0);
+  const disclosures = shippingDisclosures({ catalogRev, missingCostLines: s.missingCost, missingCostRevenue, sourceVerified: false, lifecycle, publicationAllowed: false });
+  return { source: 'shipping_cost_report', catalogRev, facts: reportPreview.facts, classification, unmatched, lifecycle, disclosures,
+           livelyRootPassThrough: s.shipByVendor['Lively Root']?.paid || 0 };
+}
+
+function renderC3Disclosure(p) {
+  const card = document.getElementById('c3-disclosure');
+  if (!card || !p) return;
+  const body = document.getElementById('c3-disclosure-body');
+  const meta = document.getElementById('c3-disclosure-meta');
+  card.hidden = false;
+  if (p.source !== 'shipping_cost_report') {
+    meta.textContent = p.source === 'shipments_export' ? 'Revision 8 basis' : 'No ShipStation file';
+    body.innerHTML = `<div><strong>${p.source === 'shipments_export' ? 'Shipping expense uses the older ShipStation Shipments export (Revision 8 basis).' : 'No ShipStation file loaded: ShipStation shipping expense is missing.'}</strong>
+      Load the ShipStation Shipping Cost Report for the provisional C3 result.</div>
+      <div>Catalog version: <code>${esc(p.catalogRev || 'unknown')}</code> · Product-cost completeness: ${p.missingCostLines ? `incomplete (${p.missingCostLines} lines, ${fmt(p.missingCostRevenue)} revenue without cost)` : 'complete'}</div>`;
+    return;
+  }
+  const c = p.classification.counts, cov = p.classification.coverage, d = p.disclosures;
+  meta.textContent = d.labels.join(' · ');
+  body.innerHTML = `
+    <div><strong>Provisional.</strong> Shipping expense is the ShipStation Shipping Cost Report, summed per Shopify order. Publication is disabled. Do not read this as final profitability.</div>
+    <div><strong>Shipping source:</strong> ${esc(d.shippingSource.label)} (voided, refunded and recreated labels are not yet verified).</div>
+    <div><strong>Product-cost completeness:</strong> ${esc(d.productCost.status)} — ${d.productCost.missingCostLines} lines without cost, ${fmt(d.productCost.missingCostRevenue)} of revenue · catalog version <code>${esc(d.catalogVersion || 'unknown')}</code></div>
+    <div><strong>Order-level coverage:</strong> ${cov.numerator.toLocaleString()} of ${cov.denominator.toLocaleString()} expected orders have a Shipping Cost (${(cov.ratio * 100).toFixed(2)}%). ${esc(p.lifecycle.label)}</div>
+    <div>Excluded from coverage: Pure HP Dropship ${c.pureHpdExclusions}, Lively Root (Shopify Collective) ${cov.excluded['excluded:vendor_fulfilled_shopify_collective'] || 0}, cancelled before fulfilment ${cov.excluded['excluded:cancelled_before_fulfillment'] || 0}, cancelled (status unverified) ${c.cancelledStatusUnverified}, no shipping required ${cov.excluded['excluded:no_shipping_required'] || 0}, no SKU line ${cov.excluded['excluded:no_sku_line'] || 0}. Mixed HP Dropship orders: ${c.mixedHpdOrders}.</div>
+    <div>$0 customer shipping: prepaid subscription deliveries ${c.prepaidSubscriptionFulfillments}, MCG $${DEFAULT_POLICY_SETTINGS.mcg_free_shipping_threshold}+ promotion ${c.promotionalFreeShippingOrders}, vendor free shipping (before cut-off) ${c.vendorPolicyFreeShippingOrders}, other ${c.otherZeroShippingOrders}, unclassified ${c.unclassifiedZeroShippingOrders}.</div>
+    <div>Lively Root shipping passed through: ${fmt(p.livelyRootPassThrough)} (collected = expense). Report orders with no Shopify order in this file: ${p.unmatched.total} (below ${p.unmatched.belowRange}, above ${p.unmatched.aboveRange}, inside ${p.unmatched.insideRange}).</div>
+    <div>Report: ${p.facts.rows.toLocaleString()} rows, ${p.facts.orders.toLocaleString()} orders, ${fmt(p.facts.shippingCost)} Shipping Cost, ship dates ${esc(p.facts.firstShipDate)} → ${esc(p.facts.lastShipDate)}. Processed in this browser only.</div>`;
+}
 
 function getDateRange(lines) {
   const dates = lines.map(l => l.date).filter(Boolean).sort();

@@ -79,13 +79,15 @@ export const SETTABLE_KEYS = new Set([
   'store_timezone_confirmed', 'schedule_timezone', 'schedule_weekday', 'schedule_time',
   'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
   'lively_root_cost_source',
+  'vendor_first_paid_shipping_dates', 'mcg_free_shipping_threshold', 'shipping_coverage_aging_days', 'provisional_publication_enabled',
 ]);
 
 /** Changing these needs a stated reason; every change is audited either way. */
 export const REASON_REQUIRED = new Set(['publication_enabled', 'carrier_fee_priority_locked', 'store_timezone',
   'store_timezone_confirmed', 'schedule_timezone', 'schedule_weekday', 'schedule_time', 'ss_coverage_threshold',
   'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
-  'lively_root_cost_source']);
+  'lively_root_cost_source',
+  'vendor_first_paid_shipping_dates', 'mcg_free_shipping_threshold', 'shipping_coverage_aging_days', 'provisional_publication_enabled']);
 
 /** Changing one of these clears shipping_cost_report_source_verified (reconciliation must be repeated). */
 export const CLEARS_SHIPPING_VERIFICATION = new Set(['shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store']);
@@ -106,6 +108,16 @@ export function validateSetting(key, value) {
   if (key === 'shipping_report_timezone' && !(typeof value === 'string' && validZone(value))) return 'shipping_report_timezone must be an IANA time zone';
   if (key === 'shipping_report_store' && !(typeof value === 'string' && value.trim() && value.length <= 80)) return 'shipping_report_store must be a non-empty store name';
   if (key === 'shipping_cost_report_source_verified' && value !== false) return 'shipping_cost_report_source_verified can only be set true through the verification checklist (not available before C3)';
+  if (key === 'vendor_first_paid_shipping_dates') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return 'vendor_first_paid_shipping_dates must be an object of vendor → YYYY-MM-DD';
+    for (const [v, d] of Object.entries(value)) {
+      if (!['Air Plant Shop', 'Live to Give', 'Surfside Arrangement', 'LindaMakes', 'Calathea Collective', 'Lively Good'].includes(v)) return `vendor_first_paid_shipping_dates: unknown vendor ${String(v).slice(0, 40)}`;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(d)) || Number.isNaN(Date.parse(`${d}T00:00:00Z`))) return `vendor_first_paid_shipping_dates: ${v} needs a YYYY-MM-DD date`;
+    }
+  }
+  if (key === 'mcg_free_shipping_threshold' && !(typeof value === 'number' && value > 0 && value < 10000)) return 'mcg_free_shipping_threshold must be a positive dollar amount';
+  if (key === 'shipping_coverage_aging_days' && !(Number.isInteger(value) && value >= 1 && value <= 90)) return 'shipping_coverage_aging_days must be a whole number of days, 1–90';
+  if (key === 'provisional_publication_enabled' && value !== false) return 'provisional_publication_enabled stays false in C3 (publication controls are enabled in a later, separately approved commit)';
   if (key === 'lively_root_cost_source' && !['manual_list', 'sheet'].includes(value)) return "lively_root_cost_source must be 'manual_list' or 'sheet'";
   if (key === 'insurance_treatment' && value !== 'awaiting_confirmation') return 'insurance_treatment is locked at awaiting_confirmation until the Insurance Cost non-duplication test is complete';
   return null;

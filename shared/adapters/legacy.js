@@ -75,6 +75,7 @@ export function csvRowsToNormalizedOrders(rows, { store = 'Succulents Box' } = {
         discountSource:  (lineDiscount || 0) > 0 ? DISCOUNT_SOURCES.HISTORICAL_CSV_LINE_DISCOUNT : DISCOUNT_SOURCES.NONE,
         discountAllocations: [],
         requiresShipping: String(r['Lineitem requires shipping'] ?? ''),
+        ...(blankToNull(r['Lineitem fulfillment status']) !== null ? { fulfillmentStatus: String(r['Lineitem fulfillment status']).trim() } : {}),
       };
     });
     orders.push({
@@ -85,6 +86,8 @@ export function csvRowsToNormalizedOrders(rows, { store = 'Succulents Box' } = {
       createdAtLocal,
       businessDate:   businessDateOf(createdAtLocal),
       cancelledAt:    cancelledRow ? String(cancelledRow['Cancelled at'] ?? cancelledRow['Cancelled At']).trim() : null,
+      ...(blankToNull(f['Fulfillment Status']) !== null ? { fulfillmentStatus: String(f['Fulfillment Status']).trim() } : {}),
+      ...(blankToNull(f['Fulfilled at']) !== null ? { fulfilledAt: String(f['Fulfilled at']).trim() } : {}),
       subtotal:       moneyOrNull(f['Subtotal']),
       shipping:       moneyOrNull(f['Shipping']),
       taxes:          moneyOrNull(f['Taxes']),
@@ -121,6 +124,7 @@ const ORDER_LEVEL_BLANK = Object.freeze({
   'Cancelled at': '', 'Financial Status': '', 'Subtotal': '', 'Shipping': '', 'Taxes': '',
   'Total': '', 'Discount Code': '', 'Discount Amount': '', 'Refunded Amount': '',
   'Source': '', 'Note Attributes': '', 'Tags': '', 'Duties': '',
+  'Fulfillment Status': '', 'Fulfilled at': '',
 });
 
 /**
@@ -148,6 +152,8 @@ export function toLegacyShopifyRows(orders) {
         'Note Attributes':  formatCsvNoteAttributes(o.noteAttributes),
         'Tags':             (o.tags || []).join(', '),
         'Duties':           o.duties ? money(o.duties) : '',
+        'Fulfillment Status': o.fulfillmentStatus || '',
+        'Fulfilled at':     o.fulfilledAt || '',
       } : ORDER_LEVEL_BLANK;
       rows.push({
         'Name':                       o.orderName,
@@ -160,6 +166,7 @@ export function toLegacyShopifyRows(orders) {
         'Lineitem discount':          li ? money(li.lineDiscount) : '',
         'Lineitem requires shipping': li ? (li.requiresShipping === null || li.requiresShipping === undefined ? 'true' : String(li.requiresShipping)) : '',
         'Vendor':                     li ? (li.vendor ?? '') : '',
+        'Lineitem fulfillment status': li ? (li.fulfillmentStatus ?? '') : '',
       });
       keys.push({ orderName: o.orderName, lineIndex: li ? li.lineIndex : null });
     });
@@ -176,11 +183,19 @@ export function toLegacyShopifyRows(orders) {
 export function attachLineKeys(engineLines, rows, keys, { excludeCancelled = true } = {}) {
   const cancelled = new Set();
   for (const r of rows) if (String(r['Cancelled at'] ?? '').trim()) cancelled.add(String(r['Name']).trim());
+  // C3: a cancelled-after-shipping order yields ONE shipping-only engine line,
+  // emitted at the order's first SKU row.
+  const shippingOnly = new Set(engineLines.filter(l => l.isShippingOnly).map(l => l.orderNum));
+  const placed = new Set();
   const kept = [];
   rows.forEach((r, i) => {
     const sku = String(r['Lineitem sku'] ?? '').trim();
     if (!sku || sku.toLowerCase() === 'nan') return;
-    if (excludeCancelled && cancelled.has(String(r['Name']).trim())) return;
+    const name = String(r['Name']).trim();
+    if (excludeCancelled && cancelled.has(name)) {
+      if (shippingOnly.has(name) && !placed.has(name)) { placed.add(name); kept.push({ ...keys[i], sku: '' }); }
+      return;
+    }
     kept.push({ ...keys[i], sku });
   });
   if (kept.length !== engineLines.length) {

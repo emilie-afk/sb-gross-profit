@@ -15,13 +15,24 @@ import { calculate, summarize } from './calculator.js';
 import { toLegacyShopifyRows, attachLineKeys, toLegacyShipStationCosts, toLegacyHpdMap } from './adapters/legacy.js';
 import { DEFAULT_EXPENSE_POLICY } from './adapters/shipstation.js';
 import { applyAllocationContract } from './allocation.js';
-import { diagnoseShipping } from './shippingDiagnostic.js';
+import { diagnoseShipping, diagnoseShippingFromReport } from './shippingDiagnostic.js';
+import { classifyShipping, shippingLifecycle, publicationShippingStatus, shippingDisclosures } from './shippingPolicy.js';
+import { SHIPPING_RULES } from './calculator.js';
 import { computeMetrics, orderResults } from './metrics.js';
 import { buildNarrative, draftComparison } from './narrative.js';
 import { engineArgsFromCatalog } from './catalog.js';
 import { r2, addDays } from './normalized.js';
 
-export const ENGINE_VERSION = '2026.09.24-phase1';
+export const ENGINE_VERSION = '2026.09.25-c3';
+
+/**
+ * Where ShipStation expense comes from.
+ *   shipping_cost_report        Revision 9 C3: ShipStation Analytics Shipping Cost Report,
+ *                               Shipping Cost summed per Shopify order (Worker compute).
+ *   shipstation_mapping_export  Revision 8 compatibility only (golden, historical tests).
+ *                               The Worker's compute never selects it.
+ */
+export const SHIPPING_SOURCES = Object.freeze({ REPORT: 'shipping_cost_report', MAPPING_EXPORT: 'shipstation_mapping_export' });
 
 function check(name, expected, actual, { blocking = true, tolerance = 0.005 } = {}) {
   const delta = r2(actual - expected);
@@ -39,18 +50,28 @@ function check(name, expected, actual, { blocking = true, tolerance = 0.005 } = 
  * @param {object} [p.previous]         previous week's PUBLISHED snapshot { weekStart, snapshotId, status, totals }
  * @param {object} [p.previousDraft]    previous week's latest unpublished snapshot (admin preview only)
  */
-export function buildSnapshot({ weekStart, orders, shipments, hpdOrders = [], catalog, policy = DEFAULT_EXPENSE_POLICY, previous = null, previousDraft = null }) {
+export function buildSnapshot({ weekStart, orders, shipments = [], hpdOrders = [], catalog, policy = DEFAULT_EXPENSE_POLICY, previous = null, previousDraft = null,
+                                shippingSource = SHIPPING_SOURCES.MAPPING_EXPORT, shippingCostReport = null, c3 = {} }) {
+  if (!Object.values(SHIPPING_SOURCES).includes(shippingSource)) throw new Error(`Unknown shipping source ${shippingSource}`);
+  const fromReport = shippingSource === SHIPPING_SOURCES.REPORT;
+  if (fromReport && !(shippingCostReport instanceof Map)) throw new Error('shipping_cost_report needs the report aggregated per order (Map)');
   const { rows, keys } = toLegacyShopifyRows(orders);
-  const ssCosts = toLegacyShipStationCosts(shipments, policy);
+  const ssCosts = fromReport
+    ? new Map([...shippingCostReport].filter(([, v]) => v.costCents > 0).map(([k, v]) => [k, r2(v.costCents / 100)]))
+    : toLegacyShipStationCosts(shipments, policy);
   const hpdMap = hpdOrders.length ? toLegacyHpdMap(hpdOrders) : null;
   const a = engineArgsFromCatalog(catalog);
 
   const engineLines = calculate(rows, ssCosts, a.mcgCosts, a.productCosts, a.skuWeights, a.additionalCosts,
-    a.hpByName, a.skuAlias, hpdMap, a.mcgExtra, a.vendorCosts, a.vendorIndex);
+    a.hpByName, a.skuAlias, hpdMap, a.mcgExtra, a.vendorCosts, a.vendorIndex,
+    { shippingRules: fromReport ? SHIPPING_RULES.C3 : SHIPPING_RULES.LEGACY });
   const summary = summarize(engineLines);
   const keyed = attachLineKeys(engineLines, rows, keys);
   const contract = applyAllocationContract(keyed, orders);
-  const shipping = diagnoseShipping(contract.lines, shipments, hpdMap, policy, new Map(orders.map(o => [o.orderName, o])));
+  const ordersByName = new Map(orders.map(o => [o.orderName, o]));
+  const shipping = fromReport
+    ? diagnoseShippingFromReport(contract.lines, shippingCostReport, hpdMap, ordersByName)
+    : diagnoseShipping(contract.lines, shipments, hpdMap, policy, ordersByName);
   const { totals, breakdowns } = computeMetrics({ lines: contract.lines, summary, shipping });
   const orderRows = orderResults(contract.lines, shipping.orders);
 
@@ -60,7 +81,7 @@ export function buildSnapshot({ weekStart, orders, shipments, hpdOrders = [], ca
     .reduce((s, o) => s + (o.total || 0) - (o.taxes || 0) - ((o.refundedAmount || 0) > 0 ? o.refundedAmount : 0), 0));
   const product = contract.lines.filter(l => l.isProductLine);
   const giftCogs = r2(contract.lines.filter(l => l.isGiftCard).reduce((s, l) => s + (l.lineCogs || 0), 0));
-  const ssSplit = r2(summary.shipByVendor.ShipStation.paid + summary.shipByVendor['HP Dropship'].paid);
+  const ssSplit = r2(summary.shipByVendor.ShipStation.paid + summary.shipByVendor['HP Dropship'].paid + (summary.shipByVendor['Lively Root']?.paid || 0));
   const engineSsByOrder = new Map(contract.lines.filter(l => l.orderCat && l.orderCat !== 'Pure HP Dropship').map(l => [l.orderNum, l.shipPaidSS || 0]));
   const ssMismatch = shipping.orders.filter(o => engineSsByOrder.has(o.orderName) && Math.abs((engineSsByOrder.get(o.orderName) || 0) - o.shipStationExpense) > 0.005).length;
 
@@ -146,6 +167,26 @@ export function buildSnapshot({ weekStart, orders, shipments, hpdOrders = [], ca
     })),
     shipping: { coverage: shipping.coverage },
   };
+  if (fromReport) {
+    // C3 order-level classification, lifecycle and disclosures (never an amount).
+    const week = weekStart ? { from: weekStart, to: addDays(weekStart, 6) } : null;
+    const policyResult = classifyShipping({ rows, lines: engineLines, reportAgg: shippingCostReport, settings: c3.policySettings || {}, period: week });
+    const lifecycle = shippingLifecycle({ coverage: policyResult.coverage, weekEnd: week?.to || null, asOf: c3.asOf || null,
+      previousShippingExpense: c3.previousShippingExpense ?? null, shippingExpense: totals.shippingExpense,
+      agingDays: (c3.policySettings || {}).shipping_coverage_aging_days });
+    const sourceVerified = c3.sourceVerified === true;
+    const disclosures = shippingDisclosures({ catalogRev: catalog?.rev || null, missingCostLines: totals.missingCostLines,
+      missingCostRevenue: totals.missingCostRevenue, sourceVerified, lifecycle, publicationAllowed: c3.publicationAllowed === true });
+    snap.shipping.c3 = {
+      source: SHIPPING_SOURCES.REPORT, rules: SHIPPING_RULES.C3,
+      coverage: policyResult.coverage, counts: { ...policyResult.counts, unmatchedReportOrders: c3.unmatchedReportOrders ?? null },
+      zeroShippingClasses: policyResult.zeroShippingClasses, multiShipment: policyResult.multiShipment,
+      livelyRootPassThrough: r2(summary.shipByVendor['Lively Root']?.paid || 0),
+      lifecycle, disclosures,
+      publicationShippingStatus: publicationShippingStatus({ sourceVerified, provisionalEnabled: c3.provisionalEnabled === true, lifecycleStatus: lifecycle.status }),
+    };
+    snap.totals.labels = { ...snap.totals.labels, c3: snap.shipping.c3, headline: 'Provisional operating GP after shipping' };
+  }
   delete snap.totals._internal;
   snap.narrative = buildNarrative(snap, previous);
   snap.draftComparison = draftComparison(snap, previousDraft);

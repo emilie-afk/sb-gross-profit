@@ -129,3 +129,59 @@ export function diagnoseShipping(lines, shipments, hpdMap, policy = DEFAULT_EXPE
     },
   };
 }
+
+/**
+ * C3: the same per-order diagnostic, with the Shipping Cost Report as the
+ * ShipStation expense source. `reportAgg` maps order key → { costCents,
+ * rowCount }. A report row is order level: a partially shipped order with one
+ * costed label counts as covered (order-level coverage, not shipment level).
+ */
+export function diagnoseShippingFromReport(lines, reportAgg, hpdMap, ordersByName = null) {
+  const orders = [];
+  for (const li of lines) {
+    if (!li.orderCat) continue;
+    const orderName = li.orderNum;
+    const key = normalizeOrderNumber(orderName);
+    const cat = li.orderCat;
+    const lrPassThrough = li.shipPaidLR !== null && li.shipPaidLR !== undefined;
+    const ships = li.isShippingOnly ? true : (ordersByName ? orderRequiresShipping(ordersByName.get(orderName)) : true);
+    const requires = cat !== 'Pure HP Dropship' && !lrPassThrough && ships;
+    const agg = reportAgg.get(key) || null;
+    const cost = agg ? r2(agg.costCents / 100) : 0;
+    const hasValid = cost > 0;
+    const missingReason = requires && !hasValid ? (agg ? 'zero_or_blank_cost' : 'no_report_row') : null;
+    const hpd = hpdMap ? hpdMap.get(key) : null;
+    const hpdActual = !!(hpd && hpd.netTerms !== null && hpd.netTerms !== undefined);
+    const involvesHpd = HPD_CATEGORIES.has(cat);
+    let source, status;
+    if (lrPassThrough) { source = 'lively_root_pass_through'; status = 'pass_through'; }
+    else if (!ships && cat !== 'Pure HP Dropship') { source = 'no_shipment_required'; status = 'complete'; }
+    else if (cat === 'Pure HP Dropship') { source = hpdActual ? 'hpd_actual' : 'hpd_pass_through'; status = hpdActual ? 'complete' : 'pass_through'; }
+    else if (involvesHpd) {
+      if (!hasValid) { source = 'missing'; status = 'missing_shipstation_rate'; }
+      else { source = hpdActual ? 'mixed_shipping_cost_report_plus_hpd_actual' : 'mixed_shipping_cost_report_plus_hpd_pass_through'; status = hpdActual ? 'complete' : 'pass_through'; }
+    } else if (hasValid) { source = 'shipping_cost_report'; status = 'complete'; }
+    else { source = 'missing'; status = 'missing_shipstation_rate'; }
+    orders.push({
+      orderName, orderCat: cat, requiresShipStationRate: requires, hasValidShipStationRate: hasValid,
+      shippingExpenseSource: source, shippingExpenseStatus: status, missingReason,
+      shipStationExpense: lrPassThrough || cat === 'Pure HP Dropship' ? 0 : cost,
+      insuranceDisclosed: 0, shipmentCount: agg ? agg.rowCount : 0,
+      hpdActual: involvesHpd ? hpdActual : null,
+      shipCollected: li.shipCollected ?? null, shipPaid: li.shipPaid ?? null, shipPaidSS: li.shipPaidSS ?? null, shipPaidHP: li.shipPaidHP ?? null,
+    });
+  }
+  const required = orders.filter(o => o.requiresShipStationRate);
+  const covered = required.filter(o => o.hasValidShipStationRate);
+  return {
+    orders, unmatchedShipments: [],
+    coverage: {
+      ordersRequiringShipStationRate: required.length, ordersWithValidShipStationRate: covered.length,
+      shipStationExpenseCoverage: required.length ? covered.length / required.length : 1,
+      missingByReason: required.filter(o => !o.hasValidShipStationRate).reduce((m, o) => { m[o.missingReason] = (m[o.missingReason] || 0) + 1; return m; }, {}),
+      hpdOrdersActual: orders.filter(o => o.hpdActual === true).length,
+      hpdOrdersPassThrough: orders.filter(o => o.hpdActual === false).length,
+      insuranceDisclosedTotal: 0,
+    },
+  };
+}

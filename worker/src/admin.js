@@ -209,7 +209,8 @@ export async function publish(request, env) {
 }
 
 export async function settings(request, env) {
-  if (request.method === 'GET') return json({ settings: await getSettings(env.DB), publicationAllowedInEnvironment: env.PUBLICATION_ALLOWED === 'true' });
+  if (request.method === 'GET') return json({ settings: await getSettings(env.DB), publicationAllowedInEnvironment: env.PUBLICATION_ALLOWED === 'true',
+                                               automationEnabledInEnvironment: env.AUTOMATION_ENABLED === 'true' });
   const body = await readJson(request);
   const { reason = null, actorLabel: _label, actor: _legacy, ...changes } = body;
   const actor = actorFor('admin_secret', body);

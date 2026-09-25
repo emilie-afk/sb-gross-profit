@@ -31,6 +31,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
   // MANUAL_LR_COSTS (parity); 'sheet' = the Products Master "Lively Root" tab.
   // Switching to 'sheet' requires the latest Worker fetch to match the list.
   lively_root_cost_source: 'manual_list',
+  // C3 (Revision 9): audited shipping-policy configuration (migration 0009).
+  vendor_first_paid_shipping_dates: { 'Air Plant Shop': '2026-08-14', 'Live to Give': '2026-09-15', 'Surfside Arrangement': '2026-09-15' },
+  mcg_free_shipping_threshold: 89,
+  shipping_coverage_aging_days: 14,
+  // Fifth control. Locked false in C3 (validateSetting refuses true).
+  provisional_publication_enabled: false,
 });
 
 /**
@@ -51,9 +57,23 @@ export const CATALOG_FRESHNESS = Object.freeze(['current', 'intentionally_reused
  * @param {object} p.catalog         { accepted: boolean, rev, freshness: { status, reason, ... } }
  * @param {object} p.settings
  */
-export function evaluateGate({ totals, reconciliation, sources, catalog, settings, ordersInOtherTimezone = 0 }) {
+export function evaluateGate({ totals, reconciliation, sources, catalog, settings, ordersInOtherTimezone = 0, shippingC3 = null }) {
   const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
   const failures = [], warnings = [];
+
+  // C3 (Revision 9): Shipping Cost Report source. Shipping-source verification
+  // and order-level coverage are gated separately from product-cost completeness.
+  if (shippingC3) {
+    const provisional = s.provisional_publication_enabled === true;
+    const push = provisional ? warnings : failures;
+    if (s.shipping_cost_report_source_verified !== true) {
+      push.push({ code: 'shipping_source_unverified', message: 'Shipping expense comes from the ShipStation Shipping Cost Report, whose source verification is not complete; results are provisional' });
+    }
+    if (shippingC3.lifecycle?.status !== 'shipping_order_coverage_complete') {
+      push.push({ code: 'shipping_order_coverage_open', message: shippingC3.lifecycle?.label || 'Order-level shipping coverage is open' });
+    }
+    warnings.push({ code: 'partial_fulfillment_unverified', message: 'Coverage is order level; partial-shipment verification is unavailable' });
+  }
 
   if (sources?.shopify !== 'ok') failures.push({ code: 'source_shopify', message: `Shopify ingest is ${sources?.shopify || 'missing'}` });
   if (sources?.shipstation !== 'ok') failures.push({ code: 'source_shipstation', message: `ShipStation ingest is ${sources?.shipstation || 'missing'}` });
@@ -96,7 +116,8 @@ export function evaluateGate({ totals, reconciliation, sources, catalog, setting
     warnings.push({ code: 'insurance', message: 'Insurance treatment awaiting confirmation; insurance disclosed, not added to expense' });
   }
 
-  return { passed: failures.length === 0, failures, warnings };
+  return { passed: failures.length === 0, failures, warnings,
+           ...(shippingC3 ? { shippingSource: 'shipping_cost_report', shippingPublicationStatus: shippingC3.publicationShippingStatus ?? null } : {}) };
 }
 
 /**
@@ -117,6 +138,11 @@ export function canPublish(gate, settings, envAllowed) {
   if (s.store_timezone_confirmed !== true) return { allowed: false, reason: 'store_timezone_unconfirmed' };
   if (gate?.storeTimezone && gate.storeTimezone !== s.store_timezone) return { allowed: false, reason: 'store_timezone_changed' };
   if (!gate?.passed) return { allowed: false, reason: 'gate_failed' };
+  // C3: an unverified Shipping Cost Report source is publishable only as
+  // provisional, and only when provisional publication is enabled NOW.
+  if (gate?.shippingSource === 'shipping_cost_report' && s.shipping_cost_report_source_verified !== true && s.provisional_publication_enabled !== true) {
+    return { allowed: false, reason: 'shipping_source_unverified' };
+  }
   if (!enabled) return { allowed: false, reason: 'publication_disabled' };
   if (envAllowed !== true && envAllowed !== 'true') return { allowed: false, reason: 'publication_not_allowed_in_environment' };
   return { allowed: true, reason: null };
