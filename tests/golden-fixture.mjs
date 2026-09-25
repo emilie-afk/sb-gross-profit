@@ -65,4 +65,3 @@ const hashOf = snap => createHash('sha256').update(stable(snap)).digest('hex');
 export const goldenHash = () => hashOf({ ...goldenSnapshot(), engineVersion: REVISION8_ENGINE_VERSION });
 export const C3_ENGINE_VERSION = '2026.09.25-c3';
 export const goldenHashC3 = () => hashOf({ ...goldenSnapshotC3(), engineVersion: C3_ENGINE_VERSION });
-

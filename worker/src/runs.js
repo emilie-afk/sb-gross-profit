@@ -24,7 +24,7 @@ import { newId, nowIso } from './db.js';
  * C7 (scheduled cycles): a run with missing sources waits WITHOUT a snapshot.
  *
  *   created ──► waiting_for_sources ──► computing            (sources arrive)
- *                     │                                      
+ *                     │
  *                     └──► source_timeout ──► computing      (cutoff passed; a later valid upload resumes it)
  *   failed ──► waiting_for_sources                           (a resumed run whose inputs are gone again)
  */

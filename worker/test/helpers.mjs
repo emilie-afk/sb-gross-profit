@@ -168,4 +168,3 @@ export async function loaded(n = 60, extra = {}, { lock = true, refresh = true, 
   if (shippingReport && verified) await markShippingSourceVerifiedForTests(env);
   return { env, nodes, ship };
 }
-
