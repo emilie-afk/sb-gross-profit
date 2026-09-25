@@ -10,17 +10,17 @@ import { calculate } from '../js/calculator.js';
 const VC = await (await fetch('../data/vendor_costs.json')).json();
 const VI = await (await fetch('../data/vendor_index.json')).json();
 const r = (o) => Object.assign({
-  'Name':'#472351','Lineitem quantity':'1','Lineitem name':'P','Lineitem price':'0',
+  'Name':'#912351','Lineitem quantity':'1','Lineitem name':'P','Lineitem price':'0',
   'Lineitem sku':'X','Shipping':'0','Subtotal':'0','Total':'0','Taxes':'0',
   'Created at':'2026-07-05 10:00:00 -0700','Vendor':'','Source':'web',
   'Lineitem discount':'0','Cancelled at':'','Refunded Amount':'0'}, o);
 const rows = [
-  r({Name:'#472351','Lineitem sku':'CC-WC-PLANT-DAD',Vendor:'Calathea Collective','Lineitem name':'White Watering Can - Plant Dad','Lineitem price':'45.00','Lineitem discount':'4.50',Shipping:'9.00',Subtotal:'40.50',Total:'49.50'}),
-  r({Name:'#472352','Lineitem sku':'SUR-HEART-SMALL',Vendor:'Surfside Arrangement','Lineitem name':'Small Heart','Lineitem price':'80.00',Shipping:'12.00',Subtotal:'80',Total:'92'}),
-  r({Name:'#472353','Lineitem sku':'PL_FLF_4IN1',Vendor:'Lively Root','Lineitem name':'Fiddle Leaf Fig','Lineitem price':'67.08',Shipping:'15.00',Subtotal:'67.08',Total:'82.08'}),
-  r({Name:'#472354','Lineitem sku':'MYSTERY-1',Vendor:'Nobody','Lineitem name':'Mystery','Lineitem price':'20.00',Shipping:'5.00',Subtotal:'20',Total:'25'}),
+  r({Name:'#912351','Lineitem sku':'CC-WC-PLANT-DAD',Vendor:'Calathea Collective','Lineitem name':'White Watering Can - Plant Dad','Lineitem price':'45.00','Lineitem discount':'4.50',Shipping:'9.00',Subtotal:'40.50',Total:'49.50'}),
+  r({Name:'#912352','Lineitem sku':'SUR-HEART-SMALL',Vendor:'Surfside Arrangement','Lineitem name':'Small Heart','Lineitem price':'80.00',Shipping:'12.00',Subtotal:'80',Total:'92'}),
+  r({Name:'#912353','Lineitem sku':'PL_FLF_4IN1',Vendor:'Lively Root','Lineitem name':'Fiddle Leaf Fig','Lineitem price':'67.08',Shipping:'15.00',Subtotal:'67.08',Total:'82.08'}),
+  r({Name:'#912354','Lineitem sku':'MYSTERY-1',Vendor:'Nobody','Lineitem name':'Mystery','Lineitem price':'20.00',Shipping:'5.00',Subtotal:'20',Total:'25'}),
 ];
-const ship = new Map([['472351',7.5],['472352',11],['472353',14],['472354',6]]);
+const ship = new Map([['912351',7.5],['912352',11],['912353',14],['912354',6]]);
 const lines = calculate(rows, ship, {}, {}, {}, {}, {}, {}, null, {}, VC, VI);
 window.__lines = lines;
 initScenarioView(document.getElementById('view-scenario'), () => lines);

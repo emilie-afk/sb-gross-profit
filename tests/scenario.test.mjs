@@ -26,22 +26,22 @@ function calc(rows, { ship = new Map(), options = {}, hpd = null } = {}) {
 function baseOrders() {
   return [
     // Calathea watering can, $45, 10% historical discount already applied
-    row({ Name: '#472351', 'Lineitem sku': 'CC-WC-PLANT-DAD', Vendor: 'Calathea Collective',
+    row({ Name: '#912351', 'Lineitem sku': 'CC-WC-PLANT-DAD', Vendor: 'Calathea Collective',
           'Lineitem name': 'White Watering Can - Plant Dad', 'Lineitem price': '45.00',
           'Lineitem discount': '4.50', 'Lineitem quantity': '1',
           Shipping: '9.00', Subtotal: '40.50', Taxes: '0', Total: '49.50' }),
     // Surfside heart, no historical discount
-    row({ Name: '#472352', 'Lineitem sku': 'SUR-HEART-SMALL', Vendor: 'Surfside Arrangement',
+    row({ Name: '#912352', 'Lineitem sku': 'SUR-HEART-SMALL', Vendor: 'Surfside Arrangement',
           'Lineitem name': 'Small Heart', 'Lineitem price': '80.00', 'Lineitem quantity': '1',
           Shipping: '12.00', Subtotal: '80.00', Total: '92.00' }),
     // Lively Good fiddle leaf
-    row({ Name: '#472353', 'Lineitem sku': 'PL_FLF_4IN1', Vendor: 'Lively Root',
+    row({ Name: '#912353', 'Lineitem sku': 'PL_FLF_4IN1', Vendor: 'Lively Root',
           'Lineitem name': 'Fiddle Leaf Fig Tree', 'Lineitem price': '67.08',
           'Lineitem quantity': '1', Shipping: '15.00', Subtotal: '67.08', Total: '82.08' }),
   ];
 }
 
-const SS = new Map([['472351', 7.5], ['472352', 11.0], ['472353', 14.0]]);
+const SS = new Map([['912351', 7.5], ['912352', 11.0], ['912353', 14.0]]);
 
 // ── 1. Sitewide discount only ────────────────────────────────────────────────
 test('1 · sitewide discount applies to every eligible product', () => {
@@ -79,7 +79,7 @@ test('3 · two vendor overrides coexist', () => {
 
 // ── 4. Subscriptions are eligible ────────────────────────────────────────────
 test('4 · a subscription line receives the scenario discount', () => {
-  const rows = [row({ Name: '#472360', 'Lineitem sku': 'SUB2-1-3', Vendor: 'Succulents Box',
+  const rows = [row({ Name: '#912360', 'Lineitem sku': 'SUB2-1-3', Vendor: 'Succulents Box',
                       'Lineitem name': '3-Month Succulent Subscription', 'Lineitem price': '60.00',
                       'Lineitem quantity': '1', Shipping: '20.97', Subtotal: '60', Total: '80.97' })];
   const lines = calc(rows);
@@ -91,7 +91,7 @@ test('4 · a subscription line receives the scenario discount', () => {
 
 // ── 5. Gift cards excluded ───────────────────────────────────────────────────
 test('5 · gift cards are excluded from the scenario discount', () => {
-  const rows = [row({ Name: '#472361', 'Lineitem sku': 'GC50', Vendor: 'Succulents Box',
+  const rows = [row({ Name: '#912361', 'Lineitem sku': 'GC50', Vendor: 'Succulents Box',
                       'Lineitem name': 'Gift Card', 'Lineitem price': '50.00',
                       Subtotal: '50', Total: '50' })];
   const lines = calc(rows);
@@ -103,7 +103,7 @@ test('5 · gift cards are excluded from the scenario discount', () => {
 
 // ── 6. Route excluded ────────────────────────────────────────────────────────
 test('6 · Route shipping protection is excluded and stays pass-through', () => {
-  const rows = [row({ Name: '#472362', 'Lineitem sku': 'ROUTEINS', Vendor: 'Route',
+  const rows = [row({ Name: '#912362', 'Lineitem sku': 'ROUTEINS', Vendor: 'Route',
                       'Lineitem name': 'Shipping Protection by Route', 'Lineitem price': '1.85',
                       Subtotal: '1.85', Total: '1.85' })];
   const lines = calc(rows);
@@ -116,7 +116,7 @@ test('6 · Route shipping protection is excluded and stays pass-through', () => 
 
 // ── 7. Free sample keeps COGS ────────────────────────────────────────────────
 test('7 · influencer free sample has zero revenue but retains COGS', () => {
-  const rows = [row({ Name: '#472363', 'Lineitem sku': 'CC-WC-PLANT-DAD',
+  const rows = [row({ Name: '#912363', 'Lineitem sku': 'CC-WC-PLANT-DAD',
                       Vendor: 'Calathea Collective', 'Lineitem name': 'White Watering Can',
                       'Lineitem price': '45.00', Subtotal: '45.00', Total: '0',
                       'Discount Code': 'INFLUENCER' })];
@@ -131,7 +131,7 @@ test('7 · influencer free sample has zero revenue but retains COGS', () => {
 
 // ── 8. Pure HPD shipping ─────────────────────────────────────────────────────
 test('8 · a pure HPD order passes shipping through: contribution is zero', () => {
-  const rows = [row({ Name: '#472370', 'Lineitem sku': 'FH-MONSTERA',
+  const rows = [row({ Name: '#912370', 'Lineitem sku': 'FH-MONSTERA',
                       Vendor: 'House Plant Dropship', 'Lineitem name': 'Monstera 6in',
                       'Lineitem price': '59.00', Shipping: '18.95', Subtotal: '59', Total: '77.95' })];
   const lines = calc(rows);                                   // no ShipStation match at all
@@ -143,13 +143,13 @@ test('8 · a pure HPD order passes shipping through: contribution is zero', () =
 
 test('8b · a mixed HPD order uses ShipStation for the non-HPD shipment', () => {
   const rows = [
-    row({ Name: '#472371', 'Lineitem sku': 'FH-MONSTERA', Vendor: 'House Plant Dropship',
+    row({ Name: '#912371', 'Lineitem sku': 'FH-MONSTERA', Vendor: 'House Plant Dropship',
           'Lineitem name': 'Monstera', 'Lineitem price': '59.00', Shipping: '25.00',
           Subtotal: '99', Total: '124.00' }),
-    row({ Name: '#472371', 'Lineitem sku': 'MG-SUCC', Vendor: 'Succulents Box',
+    row({ Name: '#912371', 'Lineitem sku': 'MG-SUCC', Vendor: 'Succulents Box',
           'Lineitem name': 'Succulent', 'Lineitem price': '40.00', Shipping: '25.00' }),
   ];
-  const lines = calc(rows, { ship: new Map([['472371', 9.0]]) });
+  const lines = calc(rows, { ship: new Map([['912371', 9.0]]) });
   assert.equal(lines[0].shipPaidSS, 9.0);
   assert.equal(lines[0].shipPaidHP, 16.0);          // max(0, 25 − 9)
   assert.equal(lines[0].shipPaid, 25.0);
@@ -159,21 +159,21 @@ test('8b · a mixed HPD order uses ShipStation for the non-HPD shipment', () => 
 // ── 9 / 10 / 11 / 12. ShipStation handling ───────────────────────────────────
 test('9 · a shipment repeated across item rows is counted once', () => {
   const { costs } = parseShipStation([
-    ssRow({ 'Shipment #': 'S1', 'Order #': '472351', 'Shipping Paid': '7.50', 'Item SKU': 'A' }),
-    ssRow({ 'Shipment #': 'S1', 'Order #': '472351', 'Shipping Paid': '7.50', 'Item SKU': 'B' }),
-    ssRow({ 'Shipment #': 'S1', 'Order #': '472351', 'Shipping Paid': '7.50', 'Item SKU': 'C' }),
+    ssRow({ 'Shipment #': 'S1', 'Order #': '912351', 'Shipping Paid': '7.50', 'Item SKU': 'A' }),
+    ssRow({ 'Shipment #': 'S1', 'Order #': '912351', 'Shipping Paid': '7.50', 'Item SKU': 'B' }),
+    ssRow({ 'Shipment #': 'S1', 'Order #': '912351', 'Shipping Paid': '7.50', 'Item SKU': 'C' }),
   ]);
-  assert.equal(costs.get('472351'), 7.5);
+  assert.equal(costs.get('912351'), 7.5);
 });
 
 test('10 · multiple shipments for one order are summed', () => {
   const { costs, shipments } = parseShipStation([
-    ssRow({ 'Shipment #': 'S1', 'Order #': '472351', 'Shipping Paid': '7.50', 'Item SKU': 'A' }),
-    ssRow({ 'Shipment #': 'S1', 'Order #': '472351', 'Shipping Paid': '7.50', 'Item SKU': 'B' }),
-    ssRow({ 'Shipment #': 'S2', 'Order #': '472351', 'Shipping Paid': '4.25', 'Item SKU': 'C' }),
+    ssRow({ 'Shipment #': 'S1', 'Order #': '912351', 'Shipping Paid': '7.50', 'Item SKU': 'A' }),
+    ssRow({ 'Shipment #': 'S1', 'Order #': '912351', 'Shipping Paid': '7.50', 'Item SKU': 'B' }),
+    ssRow({ 'Shipment #': 'S2', 'Order #': '912351', 'Shipping Paid': '4.25', 'Item SKU': 'C' }),
   ]);
-  assert.equal(costs.get('472351'), 11.75);
-  assert.equal(shipments.get('472351').length, 2);
+  assert.equal(costs.get('912351'), 11.75);
+  assert.equal(shipments.get('912351').length, 2);
 });
 
 test('10b · Rate is the expense; Shipping Paid is only a fallback', () => {
@@ -181,16 +181,16 @@ test('10b · Rate is the expense; Shipping Paid is only a fallback', () => {
   // equals Shopify's Shipping), so booking it as expense would turn shipping
   // revenue into a cost.
   const both = parseShipStation([
-    { 'Shipment #': 'S1', 'Order #': '472351', 'Rate': '5.16', 'Shipping Paid': '5.99',
+    { 'Shipment #': 'S1', 'Order #': '912351', 'Rate': '5.16', 'Shipping Paid': '5.99',
       'Item SKU': 'A' },
   ]);
-  assert.equal(both.costs.get('472351'), 5.16);
+  assert.equal(both.costs.get('912351'), 5.16);
   assert.equal(both.costColumnUsed, 'Rate');
 
   const onlyPaid = parseShipStation([
-    { 'Shipment #': 'S1', 'Order #': '472351', 'Shipping Paid': '5.99', 'Item SKU': 'A' },
+    { 'Shipment #': 'S1', 'Order #': '912351', 'Shipping Paid': '5.99', 'Item SKU': 'A' },
   ]);
-  assert.equal(onlyPaid.costs.get('472351'), 5.99);
+  assert.equal(onlyPaid.costs.get('912351'), 5.99);
   assert.equal(onlyPaid.costColumnUsed, 'Shipping Paid');
 });
 
@@ -203,14 +203,14 @@ test('10c · a shipment with no rate is counted as a gap, not as free shipping',
   assert.equal(res.zeroCostShipments, 1);
 });
 
-test('11 · Shopify "#472351" joins ShipStation "472351"', () => {
-  assert.equal(normalizeOrderNumber('#472351'), '472351');
-  assert.equal(normalizeOrderNumber('472351'), '472351');
-  const rows = [row({ Name: '#472351', 'Lineitem sku': 'CC-WC-PLANT-DAD',
+test('11 · Shopify "#912351" joins ShipStation "912351"', () => {
+  assert.equal(normalizeOrderNumber('#912351'), '912351');
+  assert.equal(normalizeOrderNumber('912351'), '912351');
+  const rows = [row({ Name: '#912351', 'Lineitem sku': 'CC-WC-PLANT-DAD',
                       Vendor: 'Calathea Collective', 'Lineitem price': '45.00',
                       Shipping: '9.00', Subtotal: '45', Total: '54' })];
   const { costs } = parseShipStation([
-    ssRow({ 'Shipment #': 'S9', 'Order #': '472351', 'Shipping Paid': '7.50' })]);
+    ssRow({ 'Shipment #': 'S9', 'Order #': '912351', 'Shipping Paid': '7.50' })]);
   const lines = calc(rows, { ship: costs });
   assert.equal(lines[0].shipPaid, 7.5);
 });
@@ -227,10 +227,10 @@ test('12 · an order with no ShipStation match is reported, not invented', () =>
 // ── 13. Missing product cost ─────────────────────────────────────────────────
 test('13 · a missing cost is never treated as zero', () => {
   const rows = [
-    row({ Name: '#472380', 'Lineitem sku': 'UNKNOWN-SKU-1', Vendor: 'Some New Vendor',
+    row({ Name: '#912380', 'Lineitem sku': 'UNKNOWN-SKU-1', Vendor: 'Some New Vendor',
           'Lineitem name': 'Mystery item', 'Lineitem price': '30.00',
           Shipping: '0', Subtotal: '30', Total: '30' }),
-    row({ Name: '#472381', 'Lineitem sku': 'CC-WC-PLANT-DAD', Vendor: 'Calathea Collective',
+    row({ Name: '#912381', 'Lineitem sku': 'CC-WC-PLANT-DAD', Vendor: 'Calathea Collective',
           'Lineitem name': 'Watering Can', 'Lineitem price': '45.00',
           Shipping: '0', Subtotal: '45', Total: '45' }),
   ];
@@ -251,22 +251,22 @@ test('13 · a missing cost is never treated as zero', () => {
 test('14 · cancelled orders are excluded from profitability', () => {
   const rows = [
     ...baseOrders(),
-    row({ Name: '#472390', 'Lineitem sku': 'CC-WC-PLANT-DAD', Vendor: 'Calathea Collective',
+    row({ Name: '#912390', 'Lineitem sku': 'CC-WC-PLANT-DAD', Vendor: 'Calathea Collective',
           'Lineitem price': '45.00', Shipping: '9.00', Subtotal: '45', Total: '54',
           'Cancelled at': '2026-07-06 09:00:00 -0700' }),
   ];
   const lines = calc(rows, { ship: SS });
-  assert.equal(lines.some(l => l.orderNum === '#472390'), false);
+  assert.equal(lines.some(l => l.orderNum === '#912390'), false);
   assert.equal(lines.length, 3);
 });
 
 // ── 15. Order-level refund allocation ────────────────────────────────────────
 test('15 · an order-level refund is prorated across lines by net revenue share', () => {
   const rows = [
-    row({ Name: '#472400', 'Lineitem sku': 'CC-WC-PLANT-DAD', Vendor: 'Calathea Collective',
+    row({ Name: '#912400', 'Lineitem sku': 'CC-WC-PLANT-DAD', Vendor: 'Calathea Collective',
           'Lineitem price': '60.00', Shipping: '0', Subtotal: '100', Total: '100',
           'Refunded Amount': '25.00' }),
-    row({ Name: '#472400', 'Lineitem sku': 'SUR-HEART-SMALL', Vendor: 'Surfside Arrangement',
+    row({ Name: '#912400', 'Lineitem sku': 'SUR-HEART-SMALL', Vendor: 'Surfside Arrangement',
           'Lineitem price': '40.00', Shipping: '0' }),
   ];
   const lines = calc(rows);
@@ -346,9 +346,9 @@ test('20 · the standalone calculator works for a product with no sales', () => 
 test('21 · vendor and SKU aggregation reconcile to the overall scenario', () => {
   const rows = [
     ...baseOrders(),
-    row({ Name: '#472351', 'Lineitem sku': 'SUR-HEART-SMALL', Vendor: 'Surfside Arrangement',
+    row({ Name: '#912351', 'Lineitem sku': 'SUR-HEART-SMALL', Vendor: 'Surfside Arrangement',
           'Lineitem name': 'Small Heart', 'Lineitem price': '80.00', Shipping: '9.00' }),
-    row({ Name: '#472401', 'Lineitem sku': 'PL_FLF_4IN1', Vendor: 'Lively Root',
+    row({ Name: '#912401', 'Lineitem sku': 'PL_FLF_4IN1', Vendor: 'Lively Root',
           'Lineitem price': '67.08', Shipping: '0', Subtotal: '67.08', Total: '67.08' }),
   ];
   const lines = calc(rows, { ship: SS });
@@ -382,7 +382,7 @@ test('22 · the current-actual column does not move when scenario controls chang
 // ── 23. Scenario discount replaces the historical discount ───────────────────
 test('23 · the scenario discount replaces, and does not stack on, the historical one', () => {
   // Historical: $45 list, $4.50 discount → $40.50 net.
-  const rows = [row({ Name: '#472351', 'Lineitem sku': 'CC-WC-PLANT-DAD',
+  const rows = [row({ Name: '#912351', 'Lineitem sku': 'CC-WC-PLANT-DAD',
                       Vendor: 'Calathea Collective', 'Lineitem price': '45.00',
                       'Lineitem discount': '4.50', Shipping: '0',
                       Subtotal: '40.50', Total: '40.50' })];
@@ -422,7 +422,7 @@ test('advertising is charged on product revenue only, never on shipping collecte
 });
 
 test('operating margin is unavailable rather than NaN when revenue is zero', () => {
-  const rows = [row({ Name: '#472410', 'Lineitem sku': 'CC-WC-PLANT-DAD',
+  const rows = [row({ Name: '#912410', 'Lineitem sku': 'CC-WC-PLANT-DAD',
                       Vendor: 'Calathea Collective', 'Lineitem price': '45.00',
                       Subtotal: '45', Total: '0', 'Discount Code': 'sample' })];
   const lines = calc(rows);
@@ -445,7 +445,7 @@ test('shipping collected and expense stay at historical actuals in a scenario', 
 });
 
 test('vendor costs are resolved per vendor and never borrowed across vendors', () => {
-  const rows = [row({ Name: '#472420', 'Lineitem sku': 'CC-WC-PLANT-DAD',
+  const rows = [row({ Name: '#912420', 'Lineitem sku': 'CC-WC-PLANT-DAD',
                       Vendor: 'Surfside Arrangement', 'Lineitem name': 'Not a real pairing',
                       'Lineitem price': '45.00', Subtotal: '45', Total: '45' })];
   const lines = calc(rows);
@@ -456,7 +456,7 @@ test('vendor costs are resolved per vendor and never borrowed across vendors', (
 test('a vendor SKU containing "+" is one product, not a bundle', () => {
   // Regression from the July export: SUR-WHITEPOT-ROSETTE+DONKEY was being split
   // on '+' by the composite-bundle rule and reported as a missing cost.
-  const rows = [row({ Name: '#472430', 'Lineitem sku': 'SUR-WHITEPOT-ROSETTE+DONKEY',
+  const rows = [row({ Name: '#912430', 'Lineitem sku': 'SUR-WHITEPOT-ROSETTE+DONKEY',
                       Vendor: 'Surfside Arrangement',
                       'Lineitem name': 'White Pot - Rosettes + Donkey Tail',
                       'Lineitem price': '38.00', Subtotal: '38', Total: '38' })];
@@ -468,7 +468,7 @@ test('a vendor SKU containing "+" is one product, not a bundle', () => {
 
 test('a genuine composite MCG bundle still sums both halves', () => {
   const lines = calculate(
-    [row({ Name: '#472431', 'Lineitem sku': 'S3KY2997+EEZZ7650', Vendor: 'Succulents Box',
+    [row({ Name: '#912431', 'Lineitem sku': 'S3KY2997+EEZZ7650', Vendor: 'Succulents Box',
            'Lineitem name': 'Plant + pot', 'Lineitem price': '30.00',
            Subtotal: '30', Total: '30' })],
     new Map(), { 'S3KY2997': 6.0, 'EEZZ7650': 2.0 }, {}, {}, {}, {}, {}, null, {},
@@ -505,7 +505,7 @@ test('a species SKU containing "x" before digits is not a multipack', () => {
   // and priced it at ~$3,769, which also dragged the order into the top MCG
   // volume-discount tier.
   const lines = calculate(
-    [row({ Name: '#475400', 'Lineitem sku': 'S2Kx1125', Vendor: 'Seedville USA',
+    [row({ Name: '#915400', 'Lineitem sku': 'S2Kx1125', Vendor: 'Seedville USA',
            'Lineitem name': 'Crassula Ivory Towers - 2 inch', 'Lineitem price': '7.20',
            Subtotal: '7.20', Total: '7.20' })],
     new Map(), {}, {}, {}, {}, {}, {}, null, {}, null, null, {});
@@ -515,7 +515,7 @@ test('a species SKU containing "x" before digits is not a multipack', () => {
 
 test('a genuine multipack SKU still multiplies the tier', () => {
   const lines = calculate(
-    [row({ Name: '#475401', 'Lineitem sku': 'S2JY1492x2', Vendor: 'Succulents Box',
+    [row({ Name: '#915401', 'Lineitem sku': 'S2JY1492x2', Vendor: 'Succulents Box',
            'Lineitem name': 'Succulent 2-pack', 'Lineitem price': '14.40',
            Subtotal: '14.40', Total: '14.40' })],
     new Map(), {}, {}, {}, {}, {}, {}, null, {}, null, null, {});
