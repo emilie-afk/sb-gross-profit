@@ -81,6 +81,7 @@ and D1 metrics (rows read/written).
 | C5 | Memory / timeout | no `Exceeded Memory Limit` / CPU-limit errors in Worker logs | NOT RUN |
 | C6 | Duplicate-upload timing | recorded ms for `source_no_change` | NOT RUN |
 | C7 | Touched-week revisions | a changed rolling export drafts revisions for the touched earlier weeks, one per tick, none published | NOT RUN |
+| C9 | Automatic weekly catalog refresh | with a test cron on staging: the first attempt creates one `worker`/`cron` refresh, fetches the five public tabs once, fulfils it and the draft pins it; no admin call | NOT RUN |
 | C8 | Clean-up | real staging data removed afterwards (`wrangler d1 execute sb-gp-staging --remote --env staging` deleting source and snapshot rows, or drop and recreate the staging D1 and re-apply 0001–0011) | NOT RUN |
 
 Local rehearsal, as a reference only (not a substitute): run

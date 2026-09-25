@@ -132,15 +132,27 @@ export async function fetchCatalogSources(sources, { fetchImpl = fetch } = {}) {
   return { texts, provenance, failures };
 }
 
+/** C8: fetch failures worth retrying (the sheet host was unreachable or busy), by fixed code. */
+export const isTransientCode = c => c === 'network_error' || c === 'timeout' || c === 'http_429' || /^http_5\d\d$/.test(c);
+const allTransient = failures => { const v = Object.values(failures); return v.length > 0 && v.every(isTransientCode); };
+/** With transientHold, a purely transient failure leaves the refresh pending (the caller retries) instead of rejecting it. */
+const holdResult = (refreshId, failures, provenance, extra = {}) => {
+  const reasons = Object.keys(failures).sort().map(k => `${k}: ${failures[k]}`);
+  const refresh = { refreshId, status: 'pending', transient: true };
+  return { rowsSeen: 0, written: 0, duplicates: 0, diagnostics: { kind: 'worker_fetch', accepted: false, transient: true, reasons, refresh, provenance, ...extra },
+           response: { accepted: false, transient: true, catalogRev: null, reasons, refresh, provenance, ...extra } };
+};
+
 /** Fetch → build → validate → save → resolve the exact refresh. */
-export async function refreshCatalog(env, { refreshId = null, fetchImpl = fetch } = {}) {
+export async function refreshCatalog(env, { refreshId = null, fetchImpl = fetch, transientHold = false } = {}) {
   const sources = parseSources(env.CATALOG_SOURCES_JSON);
   const pre = await getSettings(env.DB);
-  if (pre.catalog_overlay_base_rev) return refreshCatalogOverlay(env, { refreshId, fetchImpl, sources, baseRev: pre.catalog_overlay_base_rev });
+  if (pre.catalog_overlay_base_rev) return refreshCatalogOverlay(env, { refreshId, fetchImpl, sources, baseRev: pre.catalog_overlay_base_rev, transientHold });
   return withRun(env, 'catalog', {}, async () => {
     const fetchedAt = nowIso();
     const { texts, provenance, failures } = await fetchCatalogSources(sources, { fetchImpl });
     const failed = Object.keys(failures).sort();
+    if (failed.length && transientHold && allTransient(failures)) return holdResult(refreshId, failures, provenance);
     if (failed.length) {
       const reasons = failed.map(k => `${k}: ${failures[k]}`);
       const refresh = await resolveRefresh(env.DB, refreshId, { rev: null, accepted: false, reasons });
@@ -192,6 +204,74 @@ export async function adminCatalogFetch(request, env) {
   return refreshCatalog(env, { refreshId });
 }
 
+// ─── C8: the Worker's own weekly catalog refresh (no admin HTTP call) ─────────
+
+export const AUTO_REFRESH_RETRY_MS = 60 * 60_000;
+export const CRON_REFRESH_ACTOR = Object.freeze({ cls: 'worker', label: 'cron' });
+
+/** One logical refresh per week: a deterministic id, so concurrent ticks share it. */
+export async function autoRefreshId(weekStart) {
+  return `crf_${(await sha256(`auto-catalog-refresh:${weekStart}`)).slice(0, 20)}`;
+}
+
+/**
+ * Create (once) and execute the week's catalog refresh from the public-sheet
+ * configuration. Idempotent and concurrency-safe:
+ *   • the refresh row has a deterministic id (INSERT … ON CONFLICT DO NOTHING);
+ *   • each execution first claims the row by compare-and-swap on its detail
+ *     (attempt counter), so two ticks never fetch for the same attempt;
+ *   • success fulfils it (readiness satisfied; the compute pins its catalog);
+ *     a rejected fetch rejects it and activates nothing (never an empty catalog);
+ *   • a purely transient failure keeps it pending and is retried at most once
+ *     per hour until `cutoffAt`, then it is rejected (`transient_retries_exhausted`);
+ *   • audited catalog reuse (or any fulfilled refresh for the week) makes it unnecessary.
+ * Returns codes only — never a URL, sheet id, gid or response content.
+ */
+export async function ensureWeeklyCatalogRefresh(env, { weekStart, at, cutoffAt, fetchImpl = fetch }) {
+  const db = env.DB;
+  const asOf = at.toISOString();
+  const reuse = await db.prepare('SELECT 1 AS x FROM catalog_reuse_acceptance WHERE week_start = ?1 LIMIT 1').bind(weekStart).first();
+  if (reuse) return { weekStart, action: 'none', reason: 'reuse_accepted' };
+  const done = await db.prepare("SELECT refresh_id FROM catalog_refresh WHERE week_start = ?1 AND status = 'fulfilled' LIMIT 1").bind(weekStart).first();
+  if (done) return { weekStart, action: 'none', reason: 'already_fulfilled', refreshId: done.refresh_id };
+  const refreshId = await autoRefreshId(weekStart);
+  await db.prepare(`INSERT INTO catalog_refresh (refresh_id, week_start, requested_at, requested_by_class, requested_by_label, status, detail)
+      VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6) ON CONFLICT(refresh_id) DO NOTHING`)
+    .bind(refreshId, weekStart, asOf, CRON_REFRESH_ACTOR.cls, CRON_REFRESH_ACTOR.label, JSON.stringify({ auto: true, attempts: 0 })).run();
+  const row = await db.prepare('SELECT status, detail FROM catalog_refresh WHERE refresh_id = ?1').bind(refreshId).first();
+  if (row.status !== 'pending') return { weekStart, action: 'none', reason: `refresh_${row.status}`, refreshId };
+  let d = {}; try { d = JSON.parse(row.detail || '{}') || {}; } catch { d = {}; }
+  if (d.attempts > 0 && d.lastAttemptAt && at.getTime() < Date.parse(d.lastAttemptAt) + AUTO_REFRESH_RETRY_MS) {
+    return { weekStart, action: 'none', reason: 'retry_not_due', refreshId, retryAfter: d.retryAfter || null };
+  }
+  if (d.attempts > 0 && cutoffAt && at.getTime() > Date.parse(cutoffAt)) return { weekStart, action: 'none', reason: 'past_cutoff', refreshId };
+  const next = { ...d, auto: true, attempts: (d.attempts || 0) + 1, lastAttemptAt: asOf };
+  const claim = await db.prepare("UPDATE catalog_refresh SET detail = ?2 WHERE refresh_id = ?1 AND status = 'pending' AND detail = ?3")
+    .bind(refreshId, JSON.stringify(next), row.detail).run();
+  if (claim.meta.changes !== 1) return { weekStart, action: 'none', reason: 'claimed_elsewhere', refreshId };
+
+  let out;
+  try { out = await (await refreshCatalog(env, { refreshId, fetchImpl, transientHold: true })).json(); }
+  catch (e) {
+    // Configuration problems (sources unset or invalid, no base) are not transient.
+    const reason = e instanceof ApiError ? e.code : 'fetch_failed';
+    await resolveRefresh(db, refreshId, { rev: null, accepted: false, reasons: [reason] });
+    return { weekStart, action: 'fetched', refreshId, status: 'rejected', reasons: [reason], attempt: next.attempts };
+  }
+  if (out.transient) {
+    const retryAfter = new Date(at.getTime() + AUTO_REFRESH_RETRY_MS).toISOString();
+    if (cutoffAt && Date.parse(retryAfter) > Date.parse(cutoffAt)) {
+      await resolveRefresh(db, refreshId, { rev: null, accepted: false, reasons: ['transient_retries_exhausted', ...out.reasons] });
+      return { weekStart, action: 'fetched', refreshId, status: 'rejected', reasons: ['transient_retries_exhausted'], attempt: next.attempts };
+    }
+    await db.prepare("UPDATE catalog_refresh SET detail = ?2 WHERE refresh_id = ?1 AND status = 'pending'")
+      .bind(refreshId, JSON.stringify({ ...next, retryAfter, lastOutcome: out.reasons })).run();
+    return { weekStart, action: 'fetched', refreshId, status: 'retrying', reasons: out.reasons, retryAfter, attempt: next.attempts };
+  }
+  return { weekStart, action: 'fetched', refreshId, status: out.refresh?.status || (out.accepted ? 'fulfilled' : 'rejected'),
+           catalogRev: out.accepted ? out.catalogRev : null, reasons: out.reasons || [], attempt: next.attempts };
+}
+
 // ─── C6d: live Products Master tabs on the pinned base ────────────────────────
 
 const rejectWith = async (env, refreshId, reasons, provenance = {}, extra = {}) => {
@@ -207,7 +287,7 @@ const rejectWith = async (env, refreshId, reasons, provenance = {}, extra = {}) 
  * resolve the refresh. Any missing tab, fetch failure or parse failure rejects
  * the refresh and leaves the current catalog in place.
  */
-async function refreshCatalogOverlay(env, { refreshId, fetchImpl, sources, baseRev }) {
+async function refreshCatalogOverlay(env, { refreshId, fetchImpl, sources, baseRev, transientHold = false }) {
   return withRun(env, 'catalog', {}, async () => {
     const fetchedAt = nowIso();
     const missing = OVERLAY_SOURCES.filter(k => !sources[k]);
@@ -217,6 +297,7 @@ async function refreshCatalogOverlay(env, { refreshId, fetchImpl, sources, baseR
     const only = Object.fromEntries(OVERLAY_SOURCES.map(k => [k, sources[k]]));
     const { texts, provenance, failures } = await fetchCatalogSources(only, { fetchImpl });
     const failed = Object.keys(failures).sort();
+    if (failed.length && transientHold && allTransient(failures)) return holdResult(refreshId, failures, provenance, { mode: 'vendor_overlay' });
     if (failed.length) return rejectWith(env, refreshId, failed.map(k => `${k}: ${failures[k]}`), provenance);
     const settings = await getSettings(env.DB);
     let built, lr = null;

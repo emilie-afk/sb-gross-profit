@@ -690,7 +690,7 @@ secret), kept out of this repository.
 - the rolling Shopify export;
 - the updated-order scan (satisfied by the same rolling upload);
 - accepted Shipping Cost Report data covering every ship date of the week (C8; see below);
-- a successful catalog refresh, or an audited reuse approval (`POST /v1/admin/cycles/<week>/accept-catalog-reuse { reason }`);
+- a successful catalog refresh, or an audited reuse approval (`POST /v1/admin/cycles/<week>/accept-catalog-reuse { reason }`). **C8:** the Worker creates and runs the week's refresh itself at the first scheduled attempt (below);
 - a closed reporting period.
 
 Optional: the mapping export (never satisfies shipping readiness) and HPD actuals.
@@ -719,6 +719,13 @@ An upload, a catalog refresh or a reuse approval for the week also triggers an a
 | `computing` | one transaction: snapshot + rows + run + gate + both transitions | `validated` or `blocked` | one draft |
 | `computing` | compute error | `failed` (resumable) | none |
 | `validated` | publish (controls on, report accepted) | `published` | — |
+
+**Weekly catalog refresh (C8):** at the first scheduled attempt for a week, the Cron tick creates the week's one catalog refresh (deterministic id; actor `worker`/`cron`) and executes it through the internal catalog-fetch operation, using `CATALOG_SOURCES_JSON` (the public Products Master tabs). No admin action or admin HTTP call is involved in a normal week.
+- Success fulfils the refresh, the same attempt counts it, and the compute pins that catalog.
+- A rejected fetch (sign-in page, empty or shrunken content, parse failure, missing configuration) rejects it and activates nothing. The week keeps waiting; audited reuse is the explicit fallback.
+- A purely transient failure (network, timeout, HTTP 429/5xx) keeps it pending (`catalog_refresh:retrying`) and is retried at most once per hour through the Tuesday 15:30 ICT cutoff, then rejected (`transient_retries_exhausted`).
+- Concurrent ticks share the one refresh row and claim each attempt by compare-and-swap, so a fetch runs once per attempt.
+- Events, D1 detail and API output carry source names, codes and hashes only — never a sheet URL, id, gid or content.
 
 **Cutoff boundary (C8):** every attempt evaluates the uploads, review decisions and catalog results recorded **at or before the tick instant** (the Cron `scheduledTime`). At the Tuesday 15:30 ICT attempt, a report received at 15:29:59.999 or exactly 15:30:00.000 is counted and the draft is computed; only if a required source is still missing after that evaluation does the run become `source_timeout`. An upload recorded after the instant is not counted by that attempt and is not marked as seen, so the next tick resumes the same run.
 

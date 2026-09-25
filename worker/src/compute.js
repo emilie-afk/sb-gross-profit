@@ -167,14 +167,19 @@ const catalogCapturedAt = async (db, rev) =>
  * The week's latest catalog refresh as of `now`: a refresh requested later is
  * not visible, and a decision recorded after `now` still counts as pending.
  */
-export async function latestRefresh(db, weekStart, now = Date.now()) {
+export async function latestRefresh(db, weekStart, now = Date.now(), { ownRefreshId = null } = {}) {
   const asOf = new Date(now).toISOString();
   const r = await db.prepare('SELECT * FROM catalog_refresh WHERE week_start = ?1 AND requested_at <= ?2 ORDER BY requested_at DESC, refresh_id DESC LIMIT 1').bind(weekStart, asOf).first();
   if (!r) return null;
-  const decided = r.status !== 'pending' && (!r.resolved_at || r.resolved_at <= asOf);
+  const detail = JSON.parse(r.detail || '{}');
+  // C8: the Worker's own refresh, executed as the first step of this attempt,
+  // belongs to this attempt even though it resolved a few seconds after its instant.
+  const decided = r.status !== 'pending' && (!r.resolved_at || r.resolved_at <= asOf || r.refresh_id === ownRefreshId);
   const status = decided ? r.status : 'pending';
+  // The Worker's own weekly refresh retries hourly to the cutoff: never "expired"; "retrying" between attempts.
+  if (detail.auto && status === 'pending') return { ...r, effective_status: detail.retryAfter ? 'retrying' : 'pending', detail };
   const expired = status === 'pending' && now - Date.parse(r.requested_at) > REFRESH_TIMEOUT_MINUTES * 60_000;
-  return { ...r, effective_status: expired ? 'expired' : status, detail: JSON.parse(r.detail || '{}') };
+  return { ...r, effective_status: expired ? 'expired' : status, detail };
 }
 
 async function weekAnchor(db, weekStart) {
@@ -373,7 +378,7 @@ export function basisRecord(b) {
  * Has every required input for a week arrived AFTER the week closed, and has
  * the week's catalog refresh finished (either way)?
  */
-export async function readiness(db, weekStart, settings, { now = Date.now() } = {}) {
+export async function readiness(db, weekStart, settings, { now = Date.now(), ownRefreshId = null } = {}) {
   const win = weekWindowUtc(weekStart, settings.store_timezone);
   // C8: everything is evaluated THROUGH `now` (the tick instant): an upload,
   // review decision or catalog result recorded after it is not counted yet.
@@ -387,7 +392,7 @@ export async function readiness(db, weekStart, settings, { now = Date.now() } = 
                        ...(s.satisfiesShippingReadiness === false ? { satisfiesShippingReadiness: false } : {}) };
   }
   sources.shipping_cost_report = await shippingReportBasis(db, weekStart, win, now);
-  const refresh = await latestRefresh(db, weekStart, now);
+  const refresh = await latestRefresh(db, weekStart, now, { ownRefreshId });
   // C7: a successful refresh for the week, or an administrator's audited
   // acceptance of reusing the pinned catalog. A rejected or expired refresh
   // without that acceptance keeps the week waiting.
@@ -697,7 +702,7 @@ const isStale = (env, run) => Date.now() - Date.parse(run.updated_at) > staleMs(
 const WAITING = new Set(['waiting_for_sources', 'source_timeout']);
 const scheduleOf = settings => ({ timeZone: settings.schedule_timezone, weekday: Number(settings.schedule_weekday), time: settings.schedule_time });
 
-export async function computeScheduledWeek(env, { weekStart, actor, now = null }) {
+export async function computeScheduledWeek(env, { weekStart, actor, now = null, ownRefreshId = null }) {
   // Fifth control: the scheduled path is off unless the Worker environment
   // explicitly allows automation. worker/wrangler.toml sets it "false".
   if (env.AUTOMATION_ENABLED !== 'true') throw new ApiError(409, 'automation_disabled', 'Scheduled computation is disabled in this environment (AUTOMATION_ENABLED is not "true")');
@@ -711,7 +716,7 @@ export async function computeScheduledWeek(env, { weekStart, actor, now = null }
   // the next tick retries.
   const marker = await db.prepare('SELECT sources_changed_at, changes_seen_at FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first();
   const seenBefore = marker?.sources_changed_at && marker.sources_changed_at <= at.toISOString() ? marker.sources_changed_at : (marker?.changes_seen_at || null);
-  const ready = await readiness(db, weekStart, settings, { now: at.getTime() });
+  const ready = await readiness(db, weekStart, settings, { now: at.getTime(), ownRefreshId });
   if (!ready.due) throw new ApiError(409, 'too_early', `The scheduled run for ${weekStart} is due at ${ready.scheduledAt}`, { scheduledAt: ready.scheduledAt });
 
   let cycle = await db.prepare('SELECT * FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first();

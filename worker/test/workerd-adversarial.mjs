@@ -21,6 +21,7 @@
  *   H  (C7) Cron ticks + scheduled calls + collector uploads in parallel → one cycle/run/snapshot
  *   I  (C7) an upload, a tick and a scheduled call while the owner commits → owner completes; one snapshot
  *   J  (C7) source_timeout, then a late upload resumes the same run via the Cron tick
+ *   K  (C8) the Worker's own catalog refresh under overlapping ticks → one refresh, one fetch round
  * Synthetic data only.
  */
 import { Miniflare } from 'miniflare';
@@ -57,12 +58,15 @@ for (let i = 0; i < 30; i++) {
 }
 
 /** A fresh Worker + real D1 whose hook calls `ctx.on(point, data)`. */
-async function world({ partial = false } = {}) {
+async function world({ partial = false, catalogHost = null } = {}) {
   const ctx = { on: async () => {} };
   const mf = new Miniflare({ modules: true, script: bundle, compatibilityDate: '2024-09-01', d1Databases: ['DB'],
     serviceBindings: { TEST_HOOK: async req => { await ctx.on(new URL(req.url).pathname.slice(1), await req.json()); return new Response('ok'); } },
+    // C8 K: the Worker's own catalog fetch goes to a synthetic sheet host.
+    ...(catalogHost ? { outboundService: req => catalogHost.fetch(req.url) } : {}),
     bindings: { ...S, ALLOWED_ORIGINS: 'https://sb-profit.netlify.app', COOKIE_SAMESITE: 'Strict', PUBLICATION_ALLOWED: 'false', AUTOMATION_ENABLED: 'true',
-                D1_QUOTA_BYTES: '5000000000', TEST_HOOKS_ENABLED: 'true', TEST_STALE_MS: String(STALE_MS) } });
+                D1_QUOTA_BYTES: '5000000000', TEST_HOOKS_ENABLED: 'true', TEST_STALE_MS: String(STALE_MS),
+                ...(catalogHost ? { CATALOG_SOURCES_JSON: JSON.stringify(catalogHost.sources) } : {}) } });
   const db = await mf.getD1Database('DB');
   for (const f of fs.readdirSync(REPO + '/worker/migrations').sort()) {
     const sql = fs.readFileSync(path.join(REPO, 'worker/migrations', f), 'utf8').split('\n').filter(l => !l.trim().startsWith('--')).join('\n');
@@ -74,8 +78,17 @@ async function world({ partial = false } = {}) {
     return { status: r.status, json: j };
   };
   await call('POST', '/v1/admin/settings', { body: { carrier_fee_priority_locked: true, reason: 'adversarial test only' }, headers: A });
-  const rf = (await call('POST', '/v1/admin/catalog-refresh', { body: { weekStart: W }, headers: A })).json.refreshId;
-  await call('POST', '/v1/ingest/catalog', { body: { ...catalog, meta: { refreshId: rf } }, headers: I });
+  if (catalogHost) {
+    // No refresh registered for the week: the Cron tick must create and run it.
+    await call('POST', '/v1/ingest/catalog', { body: catalog, headers: I });
+    const { vendor_costs: _v, vendor_index: _i, ...baseTables } = catalog.tables;
+    const b = await call('POST', '/v1/admin/catalog/base', { body: { tables: baseTables, reason: 'adversarial test base only' }, headers: A });
+    assert.equal(b.status, 200, JSON.stringify(b.json));
+    await call('POST', '/v1/admin/settings', { body: { catalog_overlay_base_rev: b.json.baseCatalogRev, reason: 'adversarial test overlay only' }, headers: A });
+  } else {
+    const rf = (await call('POST', '/v1/admin/catalog-refresh', { body: { weekStart: W }, headers: A })).json.refreshId;
+    await call('POST', '/v1/ingest/catalog', { body: { ...catalog, meta: { refreshId: rf } }, headers: I });
+  }
   await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'week', nodes, weekStart: W }), headers: I });
   await call('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: ship, weekStart: W }, headers: I });
   // C3: the expense source (every order has a row, so coverage is complete).
@@ -107,6 +120,9 @@ async function world({ partial = false } = {}) {
   const schedule = async (label, at) => { if (at) await asOf(at); return call('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label, ...(at ? { at } : {}) }, headers: A }); };
   const fetcher = await mf.getWorker();
   const tick = async at => { await asOf(at); return fetcher.scheduled({ scheduledTime: new Date(at) }); };
+  // Unshifted variants, for concurrent calls at different instants (shifting is done once, before them).
+  const rawTick = at => fetcher.scheduled({ scheduledTime: new Date(at) });
+  const rawSchedule = (label, at) => call('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label, at }, headers: A });
   const q = async (sql, ...p) => (await db.prepare(sql).bind(...p).all()).results;
   const digest = async () => JSON.stringify(await Promise.all(['reporting_run', 'run_transition', 'snapshot', 'snapshot_totals', 'snapshot_order', 'schedule_cycle']
     .map(t => q(`SELECT * FROM ${t} ORDER BY 1, 2`))));
@@ -119,7 +135,7 @@ async function world({ partial = false } = {}) {
              orphans: snaps.filter(s => s.snapshot_id !== runs[0]?.snapshot_id).length, dupSeq,
              contiguous: tr.every((t, i) => t.seq === i), state: runs[0]?.state, stuck: runs.filter(r => ['created', 'computing'].includes(r.state)).length };
   };
-  return { mf, db, ctx, schedule, digest, consistent, q, updates, report, tick };
+  return { mf, db, ctx, schedule, digest, consistent, q, updates, report, tick, rawTick, rawSchedule, asOf };
 }
 const expectDone = (c, label) => assert.deepEqual([c.cycles, c.runs, c.snapshots, c.orphans, c.dupSeq, c.contiguous, c.state, c.stuck],
   [1, 1, 1, 0, 0, true, 'validated', 0], `${label}: ${JSON.stringify(c)}`);
@@ -304,5 +320,39 @@ log('H  ticks, scheduled calls and uploads in parallel (3 runs): one cycle, one 
   assert.equal((await w.q("SELECT run_id FROM reporting_run WHERE trigger = 'schedule'"))[0].run_id, runId);
   log('J  source_timeout on real D1; a later upload resumed the SAME run through the cron tick into one validated draft');
   await w.mf.dispose();
+}
+// K (C8): the Worker's own weekly catalog refresh under concurrency on real D1.
+// Ticks whose instants are > 10 min apart can hold the lease at the same time;
+// with scheduled admin calls alongside, there is still one refresh, one fetch
+// round, one run and one snapshot.
+{
+  const { syntheticSheets } = await import(REPO + '/tests/fixtures-catalog.mjs');
+  const { OVERLAY_SOURCES } = await import(REPO + '/shared/catalogOverlay.js');
+  for (let i = 0; i < 3; i++) {
+    const sheets = syntheticSheets({ scale: true });
+    const url = k => `https://docs.google.com/spreadsheets/d/SYNTHETIC${i}/export?format=csv&gid=${1000 + OVERLAY_SOURCES.indexOf(k)}`;
+    const host = { calls: 0, sources: Object.fromEntries(OVERLAY_SOURCES.map(k => [k, url(k)])),
+      fetch: async u => { const k = OVERLAY_SOURCES.find(s => url(s) === u); if (!k) return new Response('nope', { status: 404 });
+                          host.calls++; await new Promise(r => setTimeout(r, 20)); return new Response(sheets[k], { headers: { 'content-type': 'text/csv' } }); } };
+    const w = await world({ catalogHost: host });
+    const T = Date.parse('2026-09-21T08:30:00Z');
+    await w.asOf('2026-09-21T08:30:00Z');
+    await Promise.all([0, 11, 22, 33, 0, 11].map(m => w.rawTick(new Date(T + m * 60_000).toISOString()))
+      .concat([w.rawSchedule('cron:K1', '2026-09-21T08:30:00Z'), w.rawSchedule('cron:K2', '2026-09-21T08:41:00Z')]));
+    // A racer that attempted while another tick was still fetching waited; the next due retry computes.
+    for (const iso of ['2026-09-21T09:15:00Z', '2026-09-21T09:30:00Z']) await w.tick(iso);
+    const cyc = (await w.q('SELECT status, missing FROM schedule_cycle'))[0];
+    const refs = await w.q("SELECT status, requested_by_class, requested_by_label FROM catalog_refresh WHERE week_start = ?1", W);
+    assert.deepEqual(refs, [{ status: 'fulfilled', requested_by_class: 'worker', requested_by_label: 'cron' }], `K#${i}: ${JSON.stringify(refs)}`);
+    assert.equal(host.calls, OVERLAY_SOURCES.length, `K#${i}: one fetch round (${host.calls})`);
+    const c = await w.consistent();
+    assert.deepEqual([c.cycles, c.runs, c.snapshots, c.orphans, c.dupSeq, c.stuck], [1, 1, 1, 0, 0, 0], `K#${i}: ${JSON.stringify(c)} ${JSON.stringify(cyc)}`);
+    const run = (await w.q("SELECT gate, catalog_rev FROM reporting_run WHERE trigger = 'schedule'"))[0];
+    assert.equal(JSON.parse(run.gate).catalog.basis, 'week_refresh');
+    const text = JSON.stringify(await Promise.all(['catalog_refresh', 'ingest_run', 'automation_event', 'cost_catalog'].map(t => w.q(`SELECT * FROM ${t}`))));
+    assert.ok(!text.includes(`SYNTHETIC${i}`) && !text.includes('docs.google'), 'no sheet address in D1');
+    await w.mf.dispose();
+  }
+  log('K  (C8) ticks with overlapping leases + scheduled calls: one worker/cron catalog refresh, one fetch round, one run and one snapshot on real D1; no sheet address stored');
 }
 console.log('WORKERD ADVERSARIAL: PASS');

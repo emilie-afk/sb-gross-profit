@@ -46,7 +46,8 @@ export async function makeEnv(extra = {}) {
  * Tests simulate ticks in the past, while the Worker stamps uploads with the
  * real clock. asOf(env, iso) moves every timestamp later than `iso` to just
  * before it, keeping their order, so "uploaded, then ticked" stays true.
- * Boundary tests set exact timestamps themselves instead.
+ * Boundary tests set exact timestamps themselves instead. For concurrent calls
+ * at different instants, shift once (at the earliest) before firing them.
  */
 const CLOCK_COLUMNS = [['ingest_run', ['started_at', 'finished_at']], ['shipping_cost_source_version', ['imported_at', 'decided_at']],
   ['shipping_cost_activation', ['activated_at']], ['catalog_refresh', ['requested_at', 'resolved_at']], ['catalog_reuse_acceptance', ['at']],

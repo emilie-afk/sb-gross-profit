@@ -251,17 +251,20 @@ export const REFRESH_ID_RE = /^crf_[0-9a-f]{20}$/;
 export async function resolveRefresh(db, refreshId, { rev, accepted, reasons }) {
   if (refreshId === undefined || refreshId === null || refreshId === '') return { status: 'none', note: 'no refreshId in this push; no refresh resolved' };
   if (typeof refreshId !== 'string' || !REFRESH_ID_RE.test(refreshId)) return { status: 'invalid', note: 'malformed refreshId; no refresh resolved' };
-  const r = await db.prepare('SELECT status, requested_at FROM catalog_refresh WHERE refresh_id = ?1').bind(refreshId).first();
+  const r = await db.prepare('SELECT status, requested_at, detail FROM catalog_refresh WHERE refresh_id = ?1').bind(refreshId).first();
   if (!r) return { refreshId, status: 'unknown', note: 'no such refresh; nothing resolved' };
   if (r.status !== 'pending') return { refreshId, status: r.status, note: 'already resolved; unchanged' };
-  if (Date.now() - Date.parse(r.requested_at) > REFRESH_TIMEOUT_MINUTES * 60_000) {
+  let prior = {}; try { prior = JSON.parse(r.detail || '{}') || {}; } catch { prior = {}; }
+  // C8: the Worker's own weekly refresh retries transient failures hourly up to
+  // the cutoff, so the 45-minute build-hook expiry does not apply to it.
+  if (!prior.auto && Date.now() - Date.parse(r.requested_at) > REFRESH_TIMEOUT_MINUTES * 60_000) {
     await db.prepare("UPDATE catalog_refresh SET status = 'expired', resolved_at = ?2, detail = ?3 WHERE refresh_id = ?1 AND status = 'pending'")
       .bind(refreshId, nowIso(), JSON.stringify({ lateCandidateRev: rev, note: `arrived after ${REFRESH_TIMEOUT_MINUTES} minutes` })).run();
     return { refreshId, status: 'expired', note: 'refresh timed out before this push; not fulfilled' };
   }
   const status = accepted ? 'fulfilled' : 'rejected';
   const u = await db.prepare('UPDATE catalog_refresh SET status = ?2, catalog_rev = ?3, resolved_at = ?4, detail = ?5 WHERE refresh_id = ?1 AND status = ?6')
-    .bind(refreshId, status, accepted ? rev : null, nowIso(), JSON.stringify({ reasons: reasons || [], candidateRev: rev }), 'pending').run();
+    .bind(refreshId, status, accepted ? rev : null, nowIso(), JSON.stringify({ ...prior, reasons: reasons || [], candidateRev: rev }), 'pending').run();
   if (u.meta.changes === 1) {
     const w = await db.prepare('SELECT week_start FROM catalog_refresh WHERE refresh_id = ?1').bind(refreshId).first();
     await markCyclesChanged(db, [w?.week_start]);

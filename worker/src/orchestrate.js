@@ -6,6 +6,8 @@
  *                         and no cron trigger is configured there).
  *
  * Each tick, under a compare-and-swap lease so ticks never overlap:
+ *   0. C8: from the first attempt through the cutoff, the week's catalog refresh
+ *      is created once and executed by the Worker itself (ensureWeeklyCatalogRefresh).
  *   1. The current cycle (the last closed reporting week) is attempted at its
  *      first slot, on every due retry (every 15 min to +3 h, hourly to +24 h),
  *      and whenever a source for it changed since the last attempt. Missing
@@ -28,6 +30,7 @@ import { actorFor } from './actor.js';
 import { computeScheduledWeek, computeWeek, readiness, chooseCatalog, shippingReportBases } from './compute.js';
 import { catalogMeta } from './store.js';
 import { reviseTouched } from './admin.js';
+import { ensureWeeklyCatalogRefresh } from './catalogFetch.js';
 import { lastClosedWeek, retryTimeline, RETRY_POLICY } from '../../shared/schedule.js';
 
 export const CRON_ACTOR = Object.freeze({ cls: 'worker', label: 'cron' });
@@ -75,9 +78,10 @@ export async function scheduledTick(env, at = new Date()) {
     const sched = scheduleOf(settings), tz = settings.store_timezone;
     const week = lastClosedWeek(at, tz);
     const timeline = retryTimeline(week, sched, tz);
+    let ownRefreshId = null;
     const attempt = async w => {
       try {
-        const r = await computeScheduledWeek(env, { weekStart: w, actor: CRON_ACTOR, now: at });
+        const r = await computeScheduledWeek(env, { weekStart: w, actor: CRON_ACTOR, now: at, ...(w === week && ownRefreshId ? { ownRefreshId } : {}) });
         const state = r.state || r.run?.state;
         await event(db, w, 'compute', state || 'unknown', { missing: r.missing || [], existing: !!r.existing, inProgress: !!r.inProgress,
           snapshotStatus: r.status || null, nextRetryAt: r.nextRetryAt || null }, r.run?.run_id || null);
@@ -88,7 +92,23 @@ export async function scheduledTick(env, at = new Date()) {
       }
     };
     const cycle = await db.prepare('SELECT * FROM schedule_cycle WHERE week_start = ?1').bind(week).first();
-    if (attemptDue(cycle, at, timeline)) await attempt(week);
+    // C8: from the first scheduled attempt through the cutoff, the Worker itself
+    // runs the week's catalog refresh (one per week; transient failures retried
+    // at most hourly). Its result belongs to this attempt.
+    if (at.getTime() >= Date.parse(timeline.firstAttemptAt) && at.getTime() <= Date.parse(timeline.cutoffAt) && cycle?.status !== 'computed') {
+      try {
+        const cr = await ensureWeeklyCatalogRefresh(env, { weekStart: week, at, cutoffAt: timeline.cutoffAt });
+        if (cr.action === 'fetched') {
+          ownRefreshId = cr.refreshId;
+          await event(db, week, 'catalog_refresh', cr.status, { attempt: cr.attempt, reasons: cr.reasons || [], retryAfter: cr.retryAfter || null, catalogRev: cr.catalogRev || null });
+        }
+        out.catalogRefresh = { status: cr.status || null, action: cr.action, reason: cr.reason || null };
+      } catch (e) {
+        await event(db, week, 'catalog_refresh', 'error', { code: e.code || 'error' });
+        out.catalogRefresh = { error: e.code || 'error' };
+      }
+    }
+    if (attemptDue(cycle, at, timeline) || ownRefreshId) await attempt(week);
     else await event(db, week, 'tick', 'not_due', { status: cycle?.status || 'none', nextRetryAt: cycle?.next_retry_at || timeline.firstAttemptAt });
 
     const late = (await db.prepare(`SELECT week_start FROM schedule_cycle WHERE status = 'source_timeout' AND week_start <> ?1

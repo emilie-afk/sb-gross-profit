@@ -128,7 +128,7 @@ because a later migration only adds columns and tables that older code ignores.
 1. Deploy production with all five controls false and **no cron trigger**. Bind the database (`production`). Register the base catalog.
 2. Point the Windows collector at production (`workerUrl`, `sb-gp-ingest`). Let the Monday 15:05 run upload the Shopify rolling export and the Shipping Cost Report.
 3. Accept the report version after review. Because C8 needs an accepted basis, the week stays `pending_review` until then.
-4. Run the catalog fetch for the week (`POST /v1/admin/catalog/fetch { weekStart }`) or accept reuse with a reason.
+4. Run the catalog fetch for the week (`POST /v1/admin/catalog/fetch { weekStart }`) or accept reuse with a reason. (With automation off there is no tick; once step 7.2 is enabled the Worker runs this refresh itself at the first attempt.)
 5. Compute manually: `POST /v1/admin/runs { weekStart }`. With automation off, a scheduled call is refused (`automation_disabled`).
 6. Compare with the manual dashboard calculation for the same week: revenue, COGS, shipping expense, GP, margin, missing-cost lines. Apply the materiality rule: a difference under $50 or 0.1% of revenue, whichever is lower, may be accepted if documented. Anything larger stops the rollout.
 7. Record the result (aggregates only) and get approval before section 7.
@@ -136,7 +136,7 @@ because a later migration only adds columns and tables that older code ignores.
 ## 7. Final control-enablement sequence (each step needs its own approval)
 
 1. **Collection automation:** the Windows task stays enabled against production (already done in the shadow run).
-2. **Worker orchestration:** add `[triggers] crons = ["*/15 * * * *"]` (UTC; hits 08:30, 08:45, …), set `AUTOMATION_ENABLED = "true"`, then deploy. Watch one full cycle: waiting, retries and one draft. **Open item:** decide what triggers the week's catalog refresh automatically. Today an admin runs `POST /v1/admin/catalog/fetch`, or accepts reuse (see the C8 report).
+2. **Worker orchestration:** add `[triggers] crons = ["*/15 * * * *"]` (UTC; hits 08:30, 08:45, …), set `AUTOMATION_ENABLED = "true"`, then deploy. Watch one full cycle: the Worker's own catalog refresh (`worker`/`cron`, one per week), waiting, retries and one draft.
 3. **Shipping source verification:** `shipping_cost_report_source_verified = true`, only after the verification checklist or a formally accepted limitation.
 4. **Provisional dashboard updates:** `provisional_publication_enabled = true` (audited reason).
 5. **Publication:** `publication_enabled = true` (audited) **and** `PUBLICATION_ALLOWED = "true"`, then deploy. This needs the final explicit approval. The Carrier Fee priority lock and the store-time-zone confirmation are also required, and neither switch overrides them.
