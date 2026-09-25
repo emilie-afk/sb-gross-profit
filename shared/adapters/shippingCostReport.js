@@ -99,7 +99,7 @@ export function sanitizeShippingCostReport(rawRows) {
  * @param {object[]} rows      sanitized rows (exactly the 15 columns)
  * @param {object}   opts      { requestedFrom, requestedTo (YYYY-MM-DD), expectedStore }
  */
-export function parseShippingCostReport(rows, { requestedFrom, requestedTo, expectedStore = null } = {}) {
+export function parseShippingCostReport(rows, { requestedFrom, requestedTo, expectedStore = null, invalidOrderNumbers = 'reject' } = {}) {
   const fail = msg => { const e = new Error(msg); e.code = 'report_invalid'; throw e; };
   const headers = rows.length ? Object.keys(rows[0]) : [];
   const extra = headers.filter(h => !SHIPPING_COST_REPORT_COLUMNS.includes(h));
@@ -112,16 +112,24 @@ export function parseShippingCostReport(rows, { requestedFrom, requestedTo, expe
 
   const flags = new Map();
   const flag = (code, n = 1) => flags.set(code, (flags.get(code) || 0) + n);
+  // 'reject' (Worker ingest, C2): one bad Order # refuses the file.
+  // 'collect' (dashboard preview): such rows are set aside, never costed, and listed.
+  const invalid = [];
   const parsed = rows.map((r, i) => {
     const d = parseShipDate(r['Ship Date']);
     if (!d) fail(`Row ${i + 1}: Ship Date is not M/D/YYYY`);
     if (!d.midnight) flag('ship_date_time_not_midnight');
     if (d.date < requestedFrom || d.date > requestedTo) fail(`Row ${i + 1}: Ship Date outside the requested period`);
     const order = String(r['Order #'] ?? '').trim();
-    if (!ORDER_RE.test(order)) fail(`Row ${i + 1}: Order # is not a Shopify order number`);
     const cost = toCents(r['Shipping Cost']);
     if (cost === null) fail(`Row ${i + 1}: Shipping Cost is not a decimal amount`);
     if (cost < 0) fail(`Row ${i + 1}: Shipping Cost is negative`);
+    if (!ORDER_RE.test(order)) {
+      if (invalidOrderNumbers !== 'collect') fail(`Row ${i + 1}: Order # is not a Shopify order number`);
+      invalid.push({ rowSeq: i, orderNumber: order.slice(0, 40), shipDate: d.date, shippingCostCents: cost,
+                     provider: String(r['Provider'] ?? ''), service: String(r['Service'] ?? '') });
+      return null;
+    }
     if (cost === 0) flag('zero_shipping_cost');
     const other = {};
     for (const c of REVIEW_MONEY_COLUMNS) {
@@ -139,12 +147,15 @@ export function parseShippingCostReport(rows, { requestedFrom, requestedTo, expe
       weight: String(r['Weight'] ?? ''), weightUnit: String(r['Weight Unit'] ?? ''), store: String(r['Store'] ?? ''),
     };
   });
+  const good = parsed.filter(Boolean);
+  const all = [...good.map(r => r.shipDate), ...invalid.map(r => r.shipDate)].sort();
   return {
-    rows: parsed,
-    rowCount: parsed.length,
-    shippingCostCents: parsed.reduce((s, r) => s + r.shippingCostCents, 0),
-    firstShipDate: parsed.reduce((m, r) => (r.shipDate < m ? r.shipDate : m), parsed[0].shipDate),
-    lastShipDate: parsed.reduce((m, r) => (r.shipDate > m ? r.shipDate : m), parsed[0].shipDate),
+    rows: good,
+    invalidOrderRows: invalid,
+    rowCount: good.length,
+    shippingCostCents: good.reduce((s, r) => s + r.shippingCostCents, 0),
+    firstShipDate: all[0],
+    lastShipDate: all[all.length - 1],
     reviewFlags: Object.fromEntries(flags),
   };
 }
@@ -190,10 +201,13 @@ export function previewShippingCostReport(parsedRows) {
     const o = {}; for (const c of SHIPPING_COST_REPORT_COLUMNS) o[c] = r[c] ?? r[`﻿${c}`] ?? ''; return o; });
   const dates = rows.map(r => parseShipDate(r['Ship Date'])?.date).filter(Boolean).sort();
   if (!dates.length) { const e = new Error('The report has no dated rows'); e.code = 'report_invalid'; throw e; }
-  const p = parseShippingCostReport(rows, { requestedFrom: dates[0], requestedTo: dates[dates.length - 1] });
+  const p = parseShippingCostReport(rows, { requestedFrom: dates[0], requestedTo: dates[dates.length - 1], invalidOrderNumbers: 'collect' });
   const agg = aggregateByOrder(p.rows);
   const costs = new Map([...agg].filter(([, a]) => a.costCents > 0).map(([k, a]) => [k, fromCents(a.costCents)]));
-  return { kind, rows, agg, costs,
-           facts: { rows: p.rowCount, orders: agg.size, shippingCost: fromCents(p.shippingCostCents), firstShipDate: p.firstShipDate,
+  const invalidCents = p.invalidOrderRows.reduce((s, r) => s + r.shippingCostCents, 0);
+  // `parsedRows` / `invalidOrderRows` carry only order key, ship date, cost, provider, service and review amounts.
+  return { kind, rows, agg, costs, parsedRows: p.rows, invalidOrderRows: p.invalidOrderRows,
+           facts: { rows: p.rowCount + p.invalidOrderRows.length, orders: agg.size, invalidOrderRows: p.invalidOrderRows.length,
+                    shippingCost: fromCents(p.shippingCostCents + invalidCents), firstShipDate: p.firstShipDate,
                     lastShipDate: p.lastShipDate, reviewFlags: p.reviewFlags, droppedColumns: kind === 'raw' ? [...SHIPPING_COST_REPORT_DROPPED] : [] } };
 }

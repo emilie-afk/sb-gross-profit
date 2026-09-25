@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { calculate, summarize, cancelledAfterShippingEvidence, CANCELLED_AFTER_SHIPPING_CATEGORY } from '../shared/calculator.js';
-import { classifyShipping, shippingLifecycle, publicationShippingStatus, shippingDisclosures, unmatchedReportOrders, revisedCategory,
+import { classifyShipping, shippingLifecycle, publicationShippingStatus, shippingDisclosures, revisedCategory,
          LIFECYCLE, EXPECTATION, ZERO_SHIPPING, COVERAGE_COMPLETE_LABEL, RESERVED_SHIPPING_COMPLETE, PUBLICATION_SHIPPING_STATUS, DEFAULT_POLICY_SETTINGS } from '../shared/shippingPolicy.js';
 import { evaluateGate, canPublish, DEFAULT_SETTINGS } from '../shared/gate.js';
 import { previewShippingCostReport, shippingCostReportKind } from '../shared/adapters/shippingCostReport.js';
@@ -142,11 +142,6 @@ test('a Heat Pack delay needs Shopify evidence; the later cost stays on the orig
   assert.equal(orderOf(c, '#994002').multiShipment, 'multiple_shipments_reason_unverified', 'no Heat Pack evidence: reason unverified');
   const lines = calc([...heat, ...plain], new Map([['994001', 10.2], ['994002', 10.2]]));
   assert.equal(lines.find(l => l.orderNum === '#994001' && l.orderCat).shipPaid, 10.2, 'both labels are the original order\'s expense');
-});
-
-test('report orders with no Shopify order are counted by position, never matched by guess', () => {
-  const u = unmatchedReportOrders(agg([['100001', 400], ['500000', 500], ['900009', 600], ['300000', 100]]), new Set(['300000', '400000', '600000']));
-  assert.deepEqual([u.total, u.belowRange, u.insideRange, u.aboveRange, u.costCents], [3, 1, 1, 1, 1500]);
 });
 
 // ─── Lifecycle, publication status, disclosures ─────────────────────────────

@@ -297,6 +297,12 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
         <div id="upload-error" class="error-msg" style="display:none"></div>
         <div class="period-match" id="period-match"></div>
+        <div class="hint" style="margin:6px 0 10px;font-size:12px;color:var(--muted)">
+          Shopify export period (optional, as requested in Shopify):
+          <input type="date" id="export-from" aria-label="Shopify export period from"> →
+          <input type="date" id="export-to" aria-label="Shopify export period to">
+          · used to explain unmatched ShipStation orders; otherwise the first and last order dates in the export are used.
+        </div>
         <button class="calc-btn" id="calc-btn" onclick="runCalc()" disabled>Calculate Gross Profit</button>
 
         <!-- Saved files -->
@@ -456,6 +462,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <div class="gp-table-wrap"><table class="gp-table" style="min-width:720px" id="ship-profile-table"></table></div>
           </div>
           <div class="gp-card" id="carrier-split"></div>
+          <div class="gp-card" id="ship-cost-bridge" hidden></div>
+          <div class="gp-card" id="unmatched-shipping" hidden></div>
           <div id="ship-grid" hidden></div>
         </section>
 
@@ -1314,8 +1322,9 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 <script type="module">
 import { parseCSV, parseShipStation, parseAdditionalCosts, parseHpdLog, calculate, summarize, SUB_RENEWAL_CHANNEL } from './js/calculator.js';
 import { previewShippingCostReport, shippingCostReportKind, SHIPPING_COST_REPORT_COLUMNS } from './js/shippingCostReport.js';
-import { classifyShipping, unmatchedReportOrders, shippingLifecycle, shippingDisclosures, DEFAULT_POLICY_SETTINGS } from './js/shippingPolicy.js';
+import { classifyShipping, shippingLifecycle, shippingDisclosures, DEFAULT_POLICY_SETTINGS } from './js/shippingPolicy.js';
 import { toCsvText } from './shared/adapters/shopifyCsv.js';
+import { unmatchedShippingOrders, exportPeriodOf, shippingCostBridge, filterUnmatched, unmatchedCsv, UNMATCHED_REASON, EXCLUDED_PENDING_MATCH } from './js/unmatchedShipping.js';
 import { catalogRevOf } from './shared/catalog.js';
 import { initScenarioView, renderScenarioView } from './js/scenarioUI.js';
 import { SCREENS, initTheme, toggleTheme, initRouter, showScreen, currentScreen,
@@ -1869,6 +1878,9 @@ window.runCalc = async () => {
                            hp_by_name: hpByName, sku_alias: skuAlias, vendor_costs: vendorCosts, vendor_index: vendorIndex }, mcgExtra } });
     renderDashboard(allLines);
     renderC3Disclosure(c3Preview);
+    _unmatchedState = { search: '', reason: '', sortKey: 'shipDate', sortDir: 'asc', open: new Set() };
+    renderShippingCostBridge(c3Preview);
+    renderUnmatchedShipping(c3Preview);
     initScenarioView(document.getElementById('view-scenario'), () => allLines);
 
     document.getElementById('upload-screen').style.display = 'none';
@@ -1910,12 +1922,18 @@ async function buildC3Preview({ orderRows, lines, reportPreview, hasShipFile, ca
   const period = dates.length ? { from: dates[0], to: dates[dates.length - 1] } : null;
   const classification = classifyShipping({ rows: orderRows, lines, reportAgg: reportPreview.agg, settings: DEFAULT_POLICY_SETTINGS, period });
   const orderKeys = new Set(orderRows.map(r => String(r['Name'] || '').trim().replace(/^#/, '')).filter(Boolean));
-  const unmatched = unmatchedReportOrders(reportPreview.agg, orderKeys);
+  // C3 correction: every report order that joins no uploaded Shopify order, with a
+  // date-based reason, excluded from GP pending a match; and the cost bridge.
+  const reqFrom = document.getElementById('export-from')?.value, reqTo = document.getElementById('export-to')?.value;
+  const exportPeriod = exportPeriodOf(orderRows, reqFrom && reqTo ? { from: reqFrom, to: reqTo } : null);
+  const unmatchedList = unmatchedShippingOrders({ reportRows: reportPreview.parsedRows, invalidOrderRows: reportPreview.invalidOrderRows,
+                                                  shopifyOrderKeys: orderKeys, exportPeriod });
+  const bridge = shippingCostBridge({ reportRows: reportPreview.parsedRows, invalidOrderRows: reportPreview.invalidOrderRows, lines, orderRows, unmatched: unmatchedList });
   const lifecycle = shippingLifecycle({ coverage: classification.coverage, weekEnd: period?.to || null, asOf: new Date().toISOString(),
                                         agingDays: DEFAULT_POLICY_SETTINGS.shipping_coverage_aging_days });
   const missingCostRevenue = lines.filter(l => l.missingCost).reduce((a, l) => a + (l.lineRevenue || 0), 0);
   const disclosures = shippingDisclosures({ catalogRev, missingCostLines: s.missingCost, missingCostRevenue, sourceVerified: false, lifecycle, publicationAllowed: false });
-  return { source: 'shipping_cost_report', catalogRev, facts: reportPreview.facts, classification, unmatched, lifecycle, disclosures,
+  return { source: 'shipping_cost_report', catalogRev, facts: reportPreview.facts, classification, lifecycle, disclosures, unmatchedList, bridge,
            livelyRootPassThrough: s.shipByVendor['Lively Root']?.paid || 0 };
 }
 
@@ -1941,9 +1959,100 @@ function renderC3Disclosure(p) {
     <div><strong>Order-level coverage:</strong> ${cov.numerator.toLocaleString()} of ${cov.denominator.toLocaleString()} expected orders have a Shipping Cost (${(cov.ratio * 100).toFixed(2)}%). ${esc(p.lifecycle.label)}</div>
     <div>Excluded from coverage: Pure HP Dropship ${c.pureHpdExclusions}, Lively Root (Shopify Collective) ${cov.excluded['excluded:vendor_fulfilled_shopify_collective'] || 0}, cancelled before fulfilment ${cov.excluded['excluded:cancelled_before_fulfillment'] || 0}, cancelled (status unverified) ${c.cancelledStatusUnverified}, no shipping required ${cov.excluded['excluded:no_shipping_required'] || 0}, no SKU line ${cov.excluded['excluded:no_sku_line'] || 0}. Mixed HP Dropship orders: ${c.mixedHpdOrders}.</div>
     <div>$0 customer shipping: prepaid subscription deliveries ${c.prepaidSubscriptionFulfillments}, MCG $${DEFAULT_POLICY_SETTINGS.mcg_free_shipping_threshold}+ promotion ${c.promotionalFreeShippingOrders}, vendor free shipping (before cut-off) ${c.vendorPolicyFreeShippingOrders}, other ${c.otherZeroShippingOrders}, unclassified ${c.unclassifiedZeroShippingOrders}.</div>
-    <div>Lively Root shipping passed through: ${fmt(p.livelyRootPassThrough)} (collected = expense). Report orders with no Shopify order in this file: ${p.unmatched.total} (below ${p.unmatched.belowRange}, above ${p.unmatched.aboveRange}, inside ${p.unmatched.insideRange}).</div>
+    <div>Lively Root shipping passed through: ${fmt(p.livelyRootPassThrough)} (collected = expense). Unmatched report orders: ${p.unmatchedList.summary.total.orders} (${cents(p.unmatchedList.summary.total.costCents)}), ${EXCLUDED_PENDING_MATCH.toLowerCase()} — see Shipping Analysis.</div>
     <div>Report: ${p.facts.rows.toLocaleString()} rows, ${p.facts.orders.toLocaleString()} orders, ${fmt(p.facts.shippingCost)} Shipping Cost, ship dates ${esc(p.facts.firstShipDate)} → ${esc(p.facts.lastShipDate)}. Processed in this browser only.</div>`;
 }
+
+// ─── Shipping Analysis: cost bridge and unmatched ShipStation orders ──────────
+const cents = c => fmt((c || 0) / 100);
+let _unmatchedState = { search: '', reason: '', sortKey: 'shipDate', sortDir: 'asc', open: new Set() };
+
+function renderShippingCostBridge(p) {
+  const el = document.getElementById('ship-cost-bridge');
+  if (!el) return;
+  if (!p || p.source !== 'shipping_cost_report') { el.hidden = true; return; }
+  const b = p.bridge;
+  el.hidden = false;
+  const line = (label, v, sign = '', cls = '') => `<tr${cls ? ` class="${cls}"` : ''}><td>${sign ? `<span class="t3">${sign}</span> ` : ''}${esc(label)}</td><td class="num mono">${cents(v)}</td></tr>`;
+  el.innerHTML = `
+    <div class="gp-card-head"><h3>ShipStation cost bridge</h3>
+      <span class="meta">${b.residualCents === 0 ? 'Reconciles, no residual' : `Residual ${cents(b.residualCents)}`} · reporting period: all uploaded Shopify orders</span></div>
+    <div class="gp-table-wrap"><table class="gp-table" style="min-width:520px"><tbody>
+      ${line('Raw Shipping Cost Report cost', b.rawCents)}
+      ${line(`Unmatched orders — ${EXCLUDED_PENDING_MATCH}`, b.unmatchedCents, '−')}
+      ${b.exclusions.map(e => line(`${e.label} (${e.orders})`, e.costCents, '−')).join('')}
+      ${line('ShipStation cost included in GP', b.engineShipStationCents, '=', 'is-total')}
+    </tbody></table></div>`;
+}
+
+function renderUnmatchedShipping(p) {
+  const el = document.getElementById('unmatched-shipping');
+  if (!el) return;
+  if (!p || p.source !== 'shipping_cost_report') { el.hidden = true; return; }
+  el.hidden = false;
+  const u = p.unmatchedList, S = u.summary, R = UNMATCHED_REASON, st = _unmatchedState;
+  const card = (label, v, sub) => `<div class="gp-kpi gp-kpi-sm"><div class="label">${esc(label)}</div><div class="value">${v}</div><div class="s1">${sub}</div></div>`;
+  const by = r => S.byReason[r];
+  const list = filterUnmatched(u.orders, st);
+  const arrow = k => (st.sortKey === k ? (st.sortDir === 'asc' ? ' ↑' : ' ↓') : '');
+  const period = u.exportPeriod;
+  const rows = list.map(o => {
+    const multi = o.rowCount > 1, open = st.open.has(o.orderNumber);
+    const main = `<tr data-order="${esc(o.orderNumber)}">
+      <td>${multi ? `<button class="gp-btn-ghost" onclick="toggleUnmatched('${esc(o.orderNumber)}')" aria-expanded="${open}" aria-label="Show packages">${open ? '▾' : '▸'}</button> ` : ''}<span class="mono">${esc(o.orderNumber)}</span></td>
+      <td>${esc(o.firstShipDate === o.lastShipDate ? o.firstShipDate : `${o.firstShipDate} → ${o.lastShipDate}`)}</td>
+      <td class="num mono">${cents(o.costCents)}</td><td class="num">${o.rowCount}</td>
+      <td>${esc(o.providers.join(' / '))}</td><td>${esc(o.services.join(' / '))}</td>
+      <td><div>${esc(o.reason)}</div><div class="t3" style="font-size:12px">${esc(o.status)} · ${esc(o.detail)}</div></td></tr>`;
+    const detail = multi && open ? o.rows.map((r, i) => `<tr class="unmatched-detail"><td class="t3" style="padding-left:40px">Package ${i + 1}</td><td>${esc(r.shipDate)}</td>
+      <td class="num mono">${cents(r.costCents)}</td><td></td><td>${esc(r.provider)}</td><td>${esc(r.service)}</td><td></td></tr>`).join('') : '';
+    return main + detail;
+  }).join('');
+  el.innerHTML = `
+    <div class="gp-card-head"><h3>Unmatched Shipping Orders</h3>
+      <span class="meta">${EXCLUDED_PENDING_MATCH} · not in GP · export period ${esc(period.from || '?')} → ${esc(period.to || '?')} (${period.basis === 'requested_export_period' ? 'requested' : period.basis === 'shopify_order_dates' ? 'from Shopify order dates' : 'unknown'})</span>
+      <div class="right"><button class="gp-btn gp-btn-sm" onclick="downloadUnmatchedCSV()">Download CSV</button></div></div>
+    <div class="gp-card-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="gp-kpi-row">
+        ${card('Unmatched orders', S.total.orders.toLocaleString(), 'Report orders with no Shopify order')}
+        ${card('Unmatched shipping cost', cents(S.total.costCents), EXCLUDED_PENDING_MATCH)}
+        ${card('Before export period', `${by(R.BEFORE).orders.toLocaleString()} · ${cents(by(R.BEFORE).costCents)}`, 'Shipped before the period began')}
+        ${card('After export period', `${by(R.AFTER).orders.toLocaleString()} · ${cents(by(R.AFTER).costCents)}`, 'Every package shipped after it ended')}
+        ${card('Requires review', `${by(R.REVIEW).orders.toLocaleString()} · ${cents(by(R.REVIEW).costCents)}`, 'Both sides of the period, or review amounts')}
+        ${card('Not found in Shopify export', `${by(R.NOT_FOUND).orders.toLocaleString()} · ${cents(by(R.NOT_FOUND).costCents)}`, 'Shipped inside the period; created earlier or missing')}
+        ${card('Invalid order number', `${by(R.INVALID).orders.toLocaleString()} · ${cents(by(R.INVALID).costCents)}`, 'Not a Shopify order number')}
+      </div>
+      <div class="t3" style="font-size:12px">Categories total ${Object.values(S.byReason).reduce((a, v) => a + v.orders, 0).toLocaleString()} orders · ${cents(Object.values(S.byReason).reduce((a, v) => a + v.costCents, 0))} — ${S.reconciles ? 'reconciles to the unmatched total' : 'DOES NOT reconcile'}.</div>
+      <div class="gp-filter-row">
+        <input class="gp-input" id="unmatched-search" placeholder="Search order #" value="${esc(st.search)}" oninput="setUnmatched({ search: this.value })" aria-label="Search unmatched orders">
+        <select class="gp-select" id="unmatched-reason" onchange="setUnmatched({ reason: this.value })" aria-label="Match reason">
+          <option value="">All reasons</option>${Object.values(R).map(r => `<option value="${esc(r)}"${st.reason === r ? ' selected' : ''}>${esc(r)} (${S.byReason[r].orders})</option>`).join('')}
+        </select>
+        <span class="meta">${list.length.toLocaleString()} of ${S.total.orders.toLocaleString()} shown</span>
+      </div>
+      <div class="gp-table-wrap"><table class="gp-table" style="min-width:880px" id="unmatched-table">
+        <thead><tr><th>ShipStation order #</th>
+          <th><button class="gp-btn-ghost" onclick="sortUnmatched('shipDate')">Ship date${arrow('shipDate')}</button></th>
+          <th class="num"><button class="gp-btn-ghost" onclick="sortUnmatched('cost')">Shipping cost${arrow('cost')}</button></th>
+          <th class="num">Rows / packages</th><th>Provider</th><th>Service</th><th>Match status / reason</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="7" class="t3">No unmatched orders</td></tr>'}</tbody></table></div>
+      <div class="t3" style="font-size:12px">Reasons use ship dates and the Shopify export period, never order-number ranges. No customer details are read or kept.</div>
+    </div>`;
+  const input = document.getElementById('unmatched-search');
+  if (input && st.search) { input.focus(); input.setSelectionRange(st.search.length, st.search.length); }
+}
+window.setUnmatched = patch => { Object.assign(_unmatchedState, patch); renderUnmatchedShipping(c3Preview); };
+window.sortUnmatched = key => { const st = _unmatchedState; st.sortDir = st.sortKey === key && st.sortDir === 'asc' ? 'desc' : 'asc'; st.sortKey = key; renderUnmatchedShipping(c3Preview); };
+window.toggleUnmatched = order => { const o = _unmatchedState.open; o.has(order) ? o.delete(order) : o.add(order); renderUnmatchedShipping(c3Preview); };
+window.downloadUnmatchedCSV = () => {
+  if (!c3Preview?.unmatchedList) return;
+  const csv = unmatchedCsv(filterUnmatched(c3Preview.unmatchedList.orders, _unmatchedState));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.download = 'unmatched_shipping_orders.csv';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
 
 function getDateRange(lines) {
   const dates = lines.map(l => l.date).filter(Boolean).sort();

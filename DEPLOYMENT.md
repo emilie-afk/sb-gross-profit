@@ -475,6 +475,18 @@ uploaded. A "Provisional result" panel shows the catalog version, missing-cost
 lines and revenue, product-cost completeness, shipping-source verification,
 order-level coverage and the zero-shipping classes.
 
+Unmatched Shipping Orders (Shipping Analysis): every report order that joins no
+uploaded Shopify order is listed (order #, ship date, Shipping Cost, report
+rows, Provider, Service, reason) and is **excluded pending order match** — never
+assigned to the period's GP. Reasons use ship dates against the Shopify export
+period (the requested one when entered, otherwise the export's first and last
+order dates), never order-number ranges: Before / After Shopify export period,
+Not found in Shopify export, Invalid order number, Requires review. A bridge
+shows raw report cost − unmatched − documented exclusions = ShipStation cost in
+GP, with no residual. In the Worker, a later Shopify ingest that delivers the
+order touches that order's week, so `/v1/admin/revise-touched` drafts a
+revision; published snapshots are never changed.
+
 ### Cost catalog: refresh, freshness, versioning
 
 **Worker direct fetch (C6, replaces the Netlify build hook).** The Worker reads

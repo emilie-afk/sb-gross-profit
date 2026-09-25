@@ -34,7 +34,8 @@ export async function reportForWeek(db, weekStart, orders) {
   const covers = segs.length > 0 && segs[0].segFrom <= weekStart && segs[segs.length - 1].segTo >= weekEnd;
   const shippedInWeek = [...all.values()].filter(a => a.firstShipDate >= weekStart && a.firstShipDate <= weekEnd && !keys.has(a.orderKey)).map(a => a.orderKey);
   const known = new Set((await selectIn(db, 'SELECT order_number FROM shopify_order WHERE order_number IN (SELECT value FROM json_each(?1))', shippedInWeek)).map(r => r.order_number));
-  const unmatched = shippedInWeek.filter(k => !known.has(k)).length;
+  const unmatchedKeys = shippedInWeek.filter(k => !known.has(k));
+  const unmatched = { orders: unmatchedKeys.length, costCents: unmatchedKeys.reduce((s, k) => s + (all.get(k)?.costCents || 0), 0) };
   const last = await db.prepare(`SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id
     WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1`).bind(weekStart).first();
   return { byOrder, covers, unmatched, previousShippingExpense: last ? last.e : null };

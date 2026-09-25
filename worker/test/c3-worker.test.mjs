@@ -96,3 +96,44 @@ test('cancelled after shipping flows through the snapshot contract with every re
   assert.equal(snap.shipping.c3.counts.cancelledAfterShippingOrders, 1);
   assert.deepEqual([snap.shipping.c3.coverage.numerator, snap.shipping.c3.coverage.denominator], [2, 2]);
 });
+
+test('an unmatched report cost is never assigned to the current week; a later Shopify match drafts a revision of the order\'s own week', async () => {
+  const { env, nodes } = await loaded(10, { PUBLICATION_ALLOWED: 'true' });
+  await admin(env, 'POST', '/v1/admin/settings', { publication_enabled: true, reason: 'test go-live' });
+  const PREV = '2026-09-07';
+  const { gqlOrder } = await import('../../tests/fixtures-normalized.mjs');
+  const { viaNormalized, ingest, catalog } = await import('./helpers.mjs');
+  // PREV week: one order, costed and published.
+  const prevOrder = gqlOrder({ name: '#800001', createdAt: '2026-09-09T17:00:00Z', subtotal: 20, shipping: 5, total: 25, lines: [{ sku: 'MG-ALOE', price: 10, qty: 2, vendor: 'Succulents Box' }] });
+  const rf = (await admin(env, 'POST', '/v1/admin/catalog-refresh', { weekStart: PREV })).json.refreshId;
+  const cat = catalog(); cat.meta.refreshId = rf; await ingest(env, '/v1/ingest/catalog', cat);
+  await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes: [prevOrder], weekStart: PREV }));
+  await ingestReport(env, [{ order: '800001', date: '2026-09-10', cost: 5.10 }], { from: PREV, to: '2026-09-13', exportedAt: '2026-09-14T15:00:00Z' });
+  const p = await admin(env, 'POST', '/v1/admin/runs', { weekStart: PREV });
+  assert.equal((await admin(env, 'POST', '/v1/admin/publish', { snapshotId: p.json.snapshotId })).status, 200);
+  const published = (await admin(env, 'GET', `/v1/snapshot/${PREV}`)).json;
+
+  // WEEK's report has a label (shipped this week) for #800002, an order Shopify has not delivered yet.
+  const weekRows = nodes.map((o, i) => ({ order: o.name.slice(1), date: `2026-09-${15 + (i % 5)}`, cost: i % 20 === 0 ? 5.40 : 5.10 }));
+  await ingestReport(env, [...weekRows, { order: '800002', date: '2026-09-15', cost: 7.77 }]);
+  const w1 = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
+  const s1 = (await admin(env, 'GET', `/v1/snapshot/${WEEK}?includeDrafts=1`)).json;
+  assert.deepEqual(s1.totals.labels.c3.unmatchedReport, { orders: 1, costCents: 777, status: 'Excluded pending order match' });
+  assert.equal(s1.totals.shipStationExpense, Math.round((5.40 + 9 * 5.10) * 100) / 100, 'the unmatched $7.77 is not in this week');
+
+  // A later Shopify export delivers #800002, created in PREV.
+  const late = gqlOrder({ name: '#800002', createdAt: '2026-09-11T17:00:00Z', subtotal: 20, shipping: 5, total: 25, lines: [{ sku: 'MG-ALOE', price: 10, qty: 2, vendor: 'Succulents Box' }] });
+  const up = await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [late], weekStart: WEEK }));
+  assert.deepEqual(up.json.weeksTouched, { [PREV]: 1 });
+  const rv = await admin(env, 'POST', '/v1/admin/revise-touched', { weekStart: WEEK });
+  assert.equal(rv.json.revised.length, 1);
+  assert.deepEqual([rv.json.revised[0].weekStart, rv.json.revised[0].published], [PREV, false]);
+  const draft = (await admin(env, 'GET', `/v1/snapshot/${PREV}?includeDrafts=1&revision=2`)).json;
+  assert.equal(draft.revision, 2);
+  assert.equal(draft.totals.shipStationExpense, Math.round((5.10 + 7.77) * 100) / 100, 'the cost joins its own order week');
+  assert.deepEqual((await admin(env, 'GET', `/v1/snapshot/${PREV}`)).json.totals, published.totals, 'the published snapshot is unchanged');
+  await admin(env, 'POST', `/v1/admin/runs/${w1.json.runId}/compute`, { reason: 'after the match' });
+  const s2 = (await admin(env, 'GET', `/v1/snapshot/${WEEK}?includeDrafts=1`)).json;
+  assert.equal(s2.totals.labels.c3.unmatchedReport.orders, 0);
+  assert.equal(s2.totals.shipStationExpense, s1.totals.shipStationExpense, 'the current week still excludes it');
+});

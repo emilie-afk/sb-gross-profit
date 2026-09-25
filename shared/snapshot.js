@@ -179,7 +179,13 @@ export function buildSnapshot({ weekStart, orders, shipments = [], hpdOrders = [
       missingCostRevenue: totals.missingCostRevenue, sourceVerified, lifecycle, publicationAllowed: c3.publicationAllowed === true });
     snap.shipping.c3 = {
       source: SHIPPING_SOURCES.REPORT, rules: SHIPPING_RULES.C3,
-      coverage: policyResult.coverage, counts: { ...policyResult.counts, unmatchedReportOrders: c3.unmatchedReportOrders ?? null },
+      coverage: policyResult.coverage,
+      counts: { ...policyResult.counts,
+                unmatchedReportOrders: typeof c3.unmatchedReportOrders === 'object' && c3.unmatchedReportOrders ? c3.unmatchedReportOrders.orders : (c3.unmatchedReportOrders ?? null) },
+      // Report orders first shipped in this week that match no ingested Shopify order:
+      // never assigned to this week; they join their own order week once Shopify has them.
+      ...(typeof c3.unmatchedReportOrders === 'object' && c3.unmatchedReportOrders
+        ? { unmatchedReport: { ...c3.unmatchedReportOrders, status: 'Excluded pending order match' } } : {}),
       zeroShippingClasses: policyResult.zeroShippingClasses, multiShipment: policyResult.multiShipment,
       livelyRootPassThrough: r2(summary.shipByVendor['Lively Root']?.paid || 0),
       lifecycle, disclosures,

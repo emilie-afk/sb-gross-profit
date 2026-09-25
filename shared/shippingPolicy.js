@@ -234,23 +234,6 @@ export function classifyShipping({ rows, lines, reportAgg = new Map(), settings 
 }
 
 /**
- * Report orders with no Shopify order in scope, by where their order number
- * falls relative to the scope's order numbers (aggregates only).
- */
-export function unmatchedReportOrders(reportAgg, orderKeys) {
-  const keys = [...orderKeys].filter(k => /^\d+$/.test(k)).sort();
-  const out = { total: 0, belowRange: 0, aboveRange: 0, insideRange: 0, costCents: 0 };
-  for (const a of reportAgg.values()) {
-    if (orderKeys.has(a.orderKey)) continue;
-    out.total++; out.costCents += a.costCents;
-    if (!keys.length || a.orderKey < keys[0]) out.belowRange++;
-    else if (a.orderKey > keys[keys.length - 1]) out.aboveRange++;
-    else out.insideRange++;
-  }
-  return out;
-}
-
-/**
  * Where a week sits. Complete = every expected order has a cost, or the aging
  * limit has passed (remaining orders are listed as aged without cost).
  */
