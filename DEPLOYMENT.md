@@ -4,20 +4,24 @@
 
 ### Added by this change
 
+The Products Master spreadsheet ID and tab gids are private and are never written
+in this repository. Values are set in Netlify (for `build.py`) and, for the
+Worker, configured through the `CATALOG_SOURCES_JSON` secret.
+
 | Variable | Purpose | Value |
 | --- | --- | --- |
-| `LIVELY_GOOD_SHEET_URL` | Lively Good cost tab | `https://docs.google.com/spreadsheets/d/1jpwqcSxBVrv2gZQBelMy6E7SxXkQtp1ekWSuaiRtECY/export?format=csv&gid=1033375869` |
-| `CALATHEA_COLLECTIVE_SHEET_URL` | Calathea Collective cost tab | `https://docs.google.com/spreadsheets/d/1jpwqcSxBVrv2gZQBelMy6E7SxXkQtp1ekWSuaiRtECY/export?format=csv&gid=1052830815` |
-| `SURFSIDE_ARRANGEMENT_SHEET_URL` | Surfside Arrangement cost tab | `https://docs.google.com/spreadsheets/d/1jpwqcSxBVrv2gZQBelMy6E7SxXkQtp1ekWSuaiRtECY/export?format=csv&gid=1014182066` |
-| `LINDAMAKES_SHEET_URL` | LindaMakes cost tab (added 2026-09-23) | `https://docs.google.com/spreadsheets/d/1jpwqcSxBVrv2gZQBelMy6E7SxXkQtp1ekWSuaiRtECY/export?format=csv&gid=671512915` |
+| `LIVELY_GOOD_SHEET_URL` | Lively Good cost tab | `https://docs.google.com/spreadsheets/d/<PRODUCTS_MASTER_SPREADSHEET_ID>/export?format=csv&gid=<LIVELY_GOOD_TAB_GID>` |
+| `CALATHEA_COLLECTIVE_SHEET_URL` | Calathea Collective cost tab | `https://docs.google.com/spreadsheets/d/<PRODUCTS_MASTER_SPREADSHEET_ID>/export?format=csv&gid=<CALATHEA_COLLECTIVE_TAB_GID>` |
+| `SURFSIDE_ARRANGEMENT_SHEET_URL` | Surfside Arrangement cost tab | `https://docs.google.com/spreadsheets/d/<PRODUCTS_MASTER_SPREADSHEET_ID>/export?format=csv&gid=<SURFSIDE_ARRANGEMENT_TAB_GID>` |
+| `LINDAMAKES_SHEET_URL` | LindaMakes cost tab (added 2026-09-23) | `https://docs.google.com/spreadsheets/d/<PRODUCTS_MASTER_SPREADSHEET_ID>/export?format=csv&gid=<LINDAMAKES_TAB_GID>` |
 | `VENDOR_IMPORT_STRICT` | *Optional.* Set to `1` to fail the build when a configured vendor tab imports zero costs. Default behaviour is a prominent build warning. | `1` or unset |
 
 ### Reused unchanged
 
-`L2G_SHEET_URL` keeps its existing value:
+`L2G_SHEET_URL` keeps its existing value (shape shown; real values are not stored here):
 
 ```
-https://docs.google.com/spreadsheets/d/1jpwqcSxBVrv2gZQBelMy6E7SxXkQtp1ekWSuaiRtECY/export?format=csv&gid=1872945984
+https://docs.google.com/spreadsheets/d/<PRODUCTS_MASTER_SPREADSHEET_ID>/export?format=csv&gid=<LIVE_TO_GIVE_TAB_GID>
 ```
 
 The Live to Give tab still uses the headers the old parser expected
@@ -277,7 +281,7 @@ follow both themes rather than staying dark-on-light.
 
 ## LindaMakes (added 2026-09-23)
 
-A fifth vendor tab, `gid=671512915`. 396 unique SKUs, every one prefixed `LM-`;
+A fifth Products Master vendor tab (`<LINDAMAKES_TAB_GID>`). 396 unique SKUs, every one prefixed `LM-`;
 no duplicates, no invalid or non-positive costs, and one blank-SKU note row that
 is skipped. Set `LINDAMAKES_SHEET_URL` in Netlify and redeploy — env var changes
 alone do not rebuild.
