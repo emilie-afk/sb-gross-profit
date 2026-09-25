@@ -15,7 +15,7 @@ const goLive = env => admin(env, 'POST', '/v1/admin/settings', { publication_ena
 const one = async (env, sql, ...p) => env.DB.prepare(sql).bind(...p).first();
 const all = async (env, sql, ...p) => (await env.DB.prepare(sql).bind(...p).all()).results;
 const updated = env => ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [], weekStart: WEEK }));
-const schedule = (env, label = 'make:S4') => admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: label });
+const schedule = (env, label = 'ops:S4') => admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: label });
 
 // ─── Confirmed store time zone ────────────────────────────────────────────────
 
@@ -94,7 +94,7 @@ test('Pacific DST weeks come from the confirmed IANA zone through the readiness 
 test('two simultaneous scheduled computes create one cycle, one run and one snapshot', async () => {
   const { env } = await loaded(20);
   await updated(env);
-  const [a, b] = await Promise.all([schedule(env, 'make:S4a'), schedule(env, 'make:S4b')]);
+  const [a, b] = await Promise.all([schedule(env, 'ops:S4a'), schedule(env, 'ops:S4b')]);
   assert.deepEqual([a.status, b.status], [200, 200], JSON.stringify([a.json, b.json]));
   assert.equal(a.json.runId, b.json.runId);
   assert.equal([a.json, b.json].filter(x => x.existing).length, 1);
@@ -182,7 +182,7 @@ test('catalog pushes resolve only a valid, pending, unexpired refresh they name'
   assert.equal((await ingest(env, '/v1/ingest/catalog', shrunk)).json.refresh.status, 'rejected');
 });
 
-test('build.py reads the refresh id from the Netlify INCOMING_HOOK_BODY exactly as Make sends it', () => {
+test('build.py reads the refresh id from the Netlify INCOMING_HOOK_BODY exactly as a build-hook caller sends it', () => {
   const py = `
 import json, sys
 sys.path.insert(0, ${JSON.stringify(REPO)})

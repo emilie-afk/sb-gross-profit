@@ -651,7 +651,7 @@ def push_catalog():
         'builtAt': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
         'commit': os.environ.get('COMMIT_REF', ''),
     }}
-    # Make S5 triggers this build through a Netlify build hook whose JSON body
+    # A build-hook caller may trigger this build with a Netlify build hook whose JSON body
     # carries the Worker's catalog refresh id. Netlify exposes that body as
     # INCOMING_HOOK_BODY; echoing the id lets the Worker verify THIS build's
     # catalog reached it (Revision 6). Anything that is not a refresh id is ignored.

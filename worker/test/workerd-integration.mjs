@@ -174,7 +174,7 @@ const sched = label => call3('POST', '/v1/admin/runs', { body: { weekStart: W, t
 const counts = async () => db3.prepare(`SELECT (SELECT COUNT(*) FROM schedule_cycle) AS cycles,
     (SELECT COUNT(*) FROM reporting_run WHERE trigger = 'schedule') AS runs, (SELECT COUNT(*) FROM snapshot) AS snaps,
     (SELECT COUNT(*) FROM reporting_run WHERE state IN ('created','computing')) AS stuck`).first();
-const [s1, s2] = await Promise.all([sched('make:S4a'), sched('make:S4b')]);
+const [s1, s2] = await Promise.all([sched('ops:S4a'), sched('ops:S4b')]);
 assert.deepEqual([s1.status, s2.status], [200, 200], JSON.stringify([s1.json, s2.json]));
 assert.equal(s1.json.runId, s2.json.runId);
 assert.ok(s1.json.existing || s2.json.existing, 'one request must report existing=true');
@@ -186,7 +186,7 @@ console.log('simultaneous scheduled computes on real D1: cycles', c3.cycles, '/ 
 for (const state of ['computing', 'failed']) {
   await db3.batch([db3.prepare('DELETE FROM snapshot'),
     db3.prepare("UPDATE reporting_run SET state = ?1, snapshot_id = NULL, updated_at = '2026-01-01T00:00:00.000Z' WHERE trigger = 'schedule'").bind(state)]);
-  const [x, y] = await Promise.all([sched('make:retry1'), sched('make:retry2')]);
+  const [x, y] = await Promise.all([sched('ops:retry1'), sched('ops:retry2')]);
   assert.deepEqual([x.status, y.status], [200, 200], JSON.stringify([x.json, y.json]));
   assert.equal(x.json.runId, s1.json.runId); assert.equal(y.json.runId, s1.json.runId);
   assert.equal([x.json, y.json].filter(r => r.resumed).length, 1, 'exactly one request resumes');

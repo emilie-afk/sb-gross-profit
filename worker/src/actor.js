@@ -4,14 +4,14 @@
  * `actor_class` is assigned by the SERVER from the authentication path of the
  * request. It is the only actor value the audit trail vouches for:
  *
- *   admin_secret    a caller holding X-Admin-Secret (Make S0/S4 or a person — the
- *                   shared secret cannot tell them apart)
- *   ingest_secret   a caller holding X-Ingest-Secret (Make S1–S3, build.py, backfill)
+ *   admin_secret    a caller holding X-Admin-Secret (an operator or an admin script —
+ *                   the shared secret cannot tell them apart)
+ *   ingest_secret   a caller holding X-Ingest-Secret (Windows collector, build.py, backfill)
  *   reader_session  a signed-in dashboard session (reads only today)
  *   worker          the Worker itself (state changes it makes on its own)
  *   migration       a D1 migration
  *
- * `actor_label` is an OPTIONAL, caller-supplied operational tag (e.g. "make:S4"
+ * `actor_label` is an OPTIONAL, caller-supplied operational tag (e.g. "collector"
  * or "duc"). It is stored for context only and is NOT verified identity.
  * Labels are short and may not contain an email address.
  */

@@ -354,11 +354,11 @@ test('a scheduled compute waits for its slot and for every required source, and 
   assert.equal(ready.scheduledAt, '2026-09-21T08:30:00.000Z');
   assert.equal(ready.sources.hpd.required, false);
 
-  const r1 = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: 'make:S4' });
+  const r1 = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: 'ops:S4' });
   assert.equal(r1.status, 200, JSON.stringify(r1.json));
   assert.equal(r1.json.runId, notReady.json.runId, 'the waiting run resumes in place');
-  const r2 = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: 'make:S4' });
-  assert.deepEqual([r2.json.runId, r2.json.existing], [r1.json.runId, true]);        // a Make retry does not double-compute
+  const r2 = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: 'ops:S4' });
+  assert.deepEqual([r2.json.runId, r2.json.existing], [r1.json.runId, true]);        // a retried call does not double-compute
 
   const plan = (await call(env, 'GET', '/v1/ingest/week-plan?at=2026-09-21T08:30:00Z', { headers: { 'X-Ingest-Secret': env.INGEST_SECRET } })).json;
   assert.deepEqual([plan.weekStart, plan.scheduledAtLocal, plan.due], [WEEK, '2026-09-21 15:30 Asia/Ho_Chi_Minh', true]);

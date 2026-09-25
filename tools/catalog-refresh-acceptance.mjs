@@ -2,7 +2,7 @@
 /**
  * Deploy-preview acceptance: the REAL catalog-refresh path
  *
- *   Make-shaped request → Netlify build hook → INCOMING_HOOK_BODY → build.py
+ *   build-hook request → Netlify build hook → INCOMING_HOOK_BODY → build.py
  *   → Worker /v1/ingest/catalog → catalog_refresh resolved
  *
  * Run against a STAGING Worker + D1 and a Netlify branch deploy whose build
@@ -46,7 +46,7 @@ async function api(method, path, { body, secret = 'admin' } = {}) {
 const newRefresh = async () => (await api('POST', '/v1/admin/catalog-refresh', { body: { weekStart: WEEK, actorLabel: 'acceptance' } })).json.refreshId;
 const refresh = async id => (await api('GET', `/v1/admin/catalog-refresh/${id}`)).json;
 
-/** Exactly what Make S0 sends: POST, Content-Type application/json, raw JSON body. */
+/** The build-hook request: POST, Content-Type application/json, raw JSON body. */
 async function triggerHook(rawBody, title) {
   const u = `${HOOK}?trigger_branch=${encodeURIComponent(branch)}&trigger_title=${encodeURIComponent(title)}`;
   const r = await fetch(u, { method: 'POST', headers: rawBody === null ? {} : { 'Content-Type': 'application/json' }, body: rawBody === null ? undefined : rawBody });
@@ -81,7 +81,7 @@ await publicationOff('before');
 
 // 1. The normal cycle: the pushed catalog resolves exactly this refresh.
 const r1 = await newRefresh();
-await runCase('Make payload → INCOMING_HOOK_BODY → build.py → refresh fulfilled', JSON.stringify({ refreshId: r1, weekStart: WEEK }), async p => {
+await runCase('hook payload → INCOMING_HOOK_BODY → build.py → refresh fulfilled', JSON.stringify({ refreshId: r1, weekStart: WEEK }), async p => {
   const s = await refresh(r1);
   check('the push echoed the same refreshId', p.refresh?.refreshId === r1, JSON.stringify(p.refresh));
   check('the refresh is resolved (fulfilled, or rejected if the sheets failed validation)', ['fulfilled', 'rejected'].includes(s.status), s.status);

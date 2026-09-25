@@ -2,7 +2,7 @@
 #
 # This file is public (the repository is public). It holds NO secrets.
 # Secrets are set with `wrangler secret put <NAME>` and live only in Cloudflare:
-#   INGEST_SECRET            Make ingestion routes          (>= 32 chars)
+#   INGEST_SECRET            collector ingestion routes     (>= 32 chars)
 #   ADMIN_SECRET             admin / compute routes         (>= 32 chars, different)
 #   SESSION_SIGNING_KEY      dashboard session HMAC key     (>= 32 chars, different)
 #   DASHBOARD_PASSWORD_HASH  output of tools/hash-password.mjs (never the password)
@@ -30,6 +30,9 @@ PUBLICATION_ALLOWED = "false"
 # Fifth control: scheduled computation. Leave "false" until the automation commit is approved.
 AUTOMATION_ENABLED = "false"
 D1_QUOTA_BYTES = "5000000000"
+# C8 isolation guard: this Worker only serves a D1 database bound to "production"
+# (POST /v1/admin/environment/bind once after the migrations).
+SB_ENVIRONMENT = "production"
 # Staging only: SESSION_TTL_SECONDS = "60" lets tools/proxy-smoke.mjs --expired-wait test
 # session expiry. Leave unset in production (12 hours).
 
@@ -53,3 +56,4 @@ PUBLICATION_ALLOWED = "false"
 AUTOMATION_ENABLED = "false"
 D1_QUOTA_BYTES = "5000000000"
 SESSION_TTL_SECONDS = "60"
+SB_ENVIRONMENT = "staging"

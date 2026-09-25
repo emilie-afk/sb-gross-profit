@@ -1,8 +1,8 @@
 /**
  * auth.js — three credential classes, never interchangeable
  * ========================================================
- *   ingest   X-Ingest-Secret   Make scenarios      /v1/ingest/*
- *   admin    X-Admin-Secret    operator, Make S4   /v1/admin/*
+ *   ingest   X-Ingest-Secret   Windows collector   /v1/ingest/*
+ *   admin    X-Admin-Secret    operator            /v1/admin/*
  *   session  sb_session cookie dashboard browser   /v1/weeks, /v1/snapshot/*, /v1/history, /v1/compare
  *
  * The dashboard password is stored only as a PBKDF2-SHA256 hash

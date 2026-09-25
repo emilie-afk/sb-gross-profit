@@ -310,7 +310,8 @@ of the first sale rather than changing any historical figure.
 
 ## Weekly automation Worker (Phase 1 — not published)
 
-Make.com → Cloudflare Worker (`worker/`) → D1. The Worker ingests normalized
+Windows collector → Cloudflare Worker (`worker/`) → D1, with the Worker's own
+Cron orchestration (off until enabled). The Worker ingests sanitized
 sources, computes weekly snapshots with the same `shared/` engine the dashboard
 uses, and serves them to signed-in readers.
 
@@ -329,8 +330,8 @@ unchanged. Nothing here has been deployed.
 ```
 cd worker && npm install
 npx wrangler d1 create sb-gp                       # put the id in wrangler.toml
-npx wrangler d1 migrations apply sb-gp --remote    # 0001–0006
-npx wrangler secret put INGEST_SECRET              # Make ingest routes
+npx wrangler d1 migrations apply sb-gp --remote    # 0001–0011 (see docs/c8-deployment-package.md)
+npx wrangler secret put INGEST_SECRET              # collector ingest routes
 npx wrangler secret put ADMIN_SECRET               # admin/compute routes (different value)
 npx wrangler secret put SESSION_SIGNING_KEY        # session HMAC key (different value)
 cd .. && node tools/hash-password.mjs | npx wrangler secret put DASHBOARD_PASSWORD_HASH --config worker/wrangler.toml
@@ -338,8 +339,8 @@ cd worker && npx wrangler deploy
 ```
 
 Each secret is at least 32 random characters (`openssl rand -base64 48`). Store
-copies in the password manager and in the Make data store `sb-gp-secrets`
-(ingest and admin only). The dashboard password hash is not the password.
+copies in the password manager; the Windows host keeps the ingest secret in
+Credential Manager (`sb-gp-ingest`). The dashboard password hash is not the password.
 
 ### Schedule and time zones
 
@@ -349,7 +350,7 @@ The two zones are D1 settings, and every change to them is audited with a reason
 | --- | --- | --- |
 | `store_timezone` | `America/Los_Angeles` | reporting weeks run Monday 00:00 to the next Monday 00:00 (exclusive), shown as Monday–Sunday |
 | `store_timezone_confirmed` | `true` | confirmed from Shopify store settings, "Pacific Time (US)"; set by migration 0006 with an audit row (`actor_class = migration`) |
-| `schedule_timezone`, `schedule_weekday`, `schedule_time` | `Asia/Ho_Chi_Minh`, `1`, `15:30` | the Monday 3:30 PM run (08:30 UTC), stored explicitly rather than taken from Make's organization time zone |
+| `schedule_timezone`, `schedule_weekday`, `schedule_time` | `Asia/Ho_Chi_Minh`, `1`, `15:30` | the Monday 3:30 PM run (08:30 UTC), stored explicitly in D1 |
 
 Daylight saving always comes from the IANA zone, never a fixed UTC−7/−8 offset.
 
@@ -379,7 +380,7 @@ The confirmation is a **publication safeguard**:
 - **Other computes.** Manual computes, revisions, restatements and backfill keep the two-step guarded transitions.
 - **Tests.** `worker/test/revision8.test.mjs` and `worker/test/workerd-adversarial.mjs` (real D1) use test-only hook points. They are active only when both the `TEST_HOOK` binding and `TEST_HOOKS_ENABLED = "true"` are present, and `worker/wrangler.toml` has neither.
 
-The full cycle is in `docs/make-scenarios.md`.
+The full cycle is in "Weekly orchestration (C7)" below.
 
 ### Dashboard → Worker: same-origin proxy (required before integration)
 
@@ -419,8 +420,8 @@ It checks, in order:
 
 | Class | Header / cookie | Used by | Can |
 | --- | --- | --- | --- |
-| Ingest | `X-Ingest-Secret` | Make S1–S3, `build.py`, `tools/backfill.mjs push` | write source rows and catalog; read the week plan |
-| Admin | `X-Admin-Secret` | Make S0/S4, a person | compute, revise, restate costs, settings (audited), backfill, publish (when unlocked) |
+| Ingest | `X-Ingest-Secret` | Windows collector, `build.py`, `tools/backfill.mjs push` | write source rows and catalog; read the week plan |
+| Admin | `X-Admin-Secret` | a person or an admin script | compute, revise, restate costs, settings (audited), backfill, publish (when unlocked) |
 | Reader session | `sb_session` (HttpOnly, Secure, SameSite=Strict, 12 h) | dashboard via `/api/v1` | read published snapshots, history, compare |
 
 **Audit actors.** Every audit record stores two fields:
@@ -431,9 +432,9 @@ It checks, in order:
   - `reader_session`
   - `worker`, for changes the Worker makes itself
   - `migration`
-- `actor_label`, an optional short tag the caller sends as `actorLabel`, such as `make:S4` or `duc`. It is context only, **not verified identity**, and email addresses are refused.
+- `actor_label`, an optional short tag the caller sends as `actorLabel`, such as `collector` or `duc`. It is context only, **not verified identity**, and email addresses are refused.
 
-A request that sends the old `actor` field is refused. A shared secret cannot tell Make from a person, so "who" is only as precise as the credential. This applies to `settings_audit`, `cost_restatement`, `catalog_reuse_acceptance`, `run_transition` and `catalog_refresh` (`requested_by_class` / `requested_by_label`), and to the matching API responses.
+A request that sends the old `actor` field is refused. A shared secret cannot tell a script from a person, so "who" is only as precise as the credential. This applies to `settings_audit`, `cost_restatement`, `catalog_reuse_acceptance`, `run_transition` and `catalog_refresh` (`requested_by_class` / `requested_by_label`), and to the matching API responses.
 
 The browser never receives a D1 credential and never calls D1. CORS allows
 only `ALLOWED_ORIGINS`. Ten failed logins per 15 minutes from one address are
@@ -595,8 +596,9 @@ The build-push path below still works and is retired after acceptance.
 | `CATALOG_PUSH_URL` | the Worker base URL, `https://sb-gp-worker.<account>.workers.dev` (`build.py` appends `/v1/ingest/catalog`) |
 | `SB_INGEST_SECRET` | the ingest secret |
 
-Make S0 first registers a catalog refresh, then triggers the Netlify build hook
-with `{ refreshId }`. `build.py` reads the id from `INCOMING_HOOK_BODY` and
+On this path an administrator (or `tools/catalog-refresh-acceptance.mjs`) first
+registers a catalog refresh, then triggers the Netlify build hook with
+`{ refreshId }`. `build.py` reads the id from `INCOMING_HOOK_BODY` and
 sends it back with the catalog push, and the Worker marks the refresh
 `fulfilled` or `rejected`. Each run records on its gate:
 
@@ -732,11 +734,12 @@ A manual or revision compute of a week without a usable basis is refused (`409 s
 - `GET /v1/automation/status?weekStart=` (dashboard session, through the proxy; shown on the Reports screen) returns the schedule, last attempt, next retry, sources received / missing / pending review, the Shipping Cost Report basis (versions used and newer pending: sha256 prefix, period, received time, state), timeout state, run state, catalog revision and completeness, and shipping verification. It returns codes, hashes and timestamps only.
 - `GET /v1/admin/cycles/<week>` adds the run id and the automation events.
 
-### Make, ShipStation job, backfill
+### Collector, backfill
 
-- Make scenarios S0–S4: `docs/make-scenarios.md`.
-- ShipStation export on the Windows host (Monday 08:05 UTC):
-  `automation/shipstation-export/README.md`.
+- Make is retired (`docs/make-scenarios.md` is an archive notice only).
+- Windows collector (Monday 15:05 ICT = 08:05 UTC, one task):
+  `automation/collector/README.md`; per-source details in
+  `automation/shipstation-export/README.md` and `automation/shopify-export/README.md`.
 - Backfill from 2026-01-01 runs in three steps:
   1. `tools/backfill.mjs validate`, which must report MATCH for every week.
   2. `push`.

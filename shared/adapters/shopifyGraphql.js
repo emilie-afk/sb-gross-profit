@@ -1,17 +1,18 @@
 /**
  * shopifyGraphql.js — Shopify Admin GraphQL orders → normalized source model
  * ==========================================================================
- * Make runs SHOPIFY_ORDERS_QUERY and posts the raw `nodes` to the Worker, which
- * normalizes them here. Shopify's own discount allocations and refund lines are
+ * Retired ingest path: the Worker refuses `format: graphql` (no Shopify API
+ * integration). The adapter is kept for tests and the manual/backfill
+ * `normalized` path, which normalizes GraphQL-shaped fixtures here. Shopify's own discount allocations and refund lines are
  * the truth for this path and are never recreated (Revision 5 contract).
  *
  * The query selects no customer, address, email, phone or order note. If a
  * response arrives carrying any of those, normalizeShopifyOrders() throws
- * CustomerDataError rather than silently dropping them: it means the query in
- * Make has drifted from the approved one.
+ * CustomerDataError rather than silently dropping them: it means the query has
+ * drifted from the approved one.
  *
  * Field names follow the Admin API as of the 2025-01+ versions. Pin the API
- * version in the Make connection and re-run the adapter tests after changing it.
+ * version wherever the query is run and re-run the adapter tests after changing it.
  */
 import {
   SOURCE_SYSTEMS, DISCOUNT_SOURCES, REFUND_SOURCES, DEFAULT_STORE_TIMEZONE,

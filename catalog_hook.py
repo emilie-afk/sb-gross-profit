@@ -1,8 +1,8 @@
 """
 catalog_hook.py — read the catalog-refresh id from a Netlify build-hook payload.
 
-Make S0 POSTs {"refreshId": "crf_…", "weekStart": "YYYY-MM-DD"} to the Netlify
-build hook. Netlify exposes the raw request body to the build as the
+A build-hook caller (the acceptance script or an operator) POSTs
+{"refreshId": "crf_…", "weekStart": "YYYY-MM-DD"} to the Netlify build hook. Netlify exposes the raw request body to the build as the
 INCOMING_HOOK_BODY environment variable. build.py echoes the id back with the
 catalog push so the Worker resolves exactly that refresh.
 

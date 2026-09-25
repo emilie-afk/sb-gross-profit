@@ -3,7 +3,7 @@
  * =====================
  * Credential classes (never interchangeable):
  *   /v1/ingest/*            X-Ingest-Secret     Windows collector, backfill tool
- *   /v1/admin/*             X-Admin-Secret      operator, Make S4
+ *   /v1/admin/*             X-Admin-Secret      operator (the Cron handler calls the Worker in-process)
  *   /v1/auth/*              password → session  dashboard
  *   /v1/weeks, /v1/snapshot/*, /v1/history, /v1/compare
  *                           session (published only) or X-Admin-Secret (?includeDrafts=1)
@@ -20,6 +20,7 @@ import { createAndCompute, recompute, revise, restateCosts, listRestatements, we
 import { adminCatalogFetch, adminCatalogBase } from './catalogFetch.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
 import { scheduledTick, automationStatus, acceptCycleCatalogReuse, adminCycleStatus } from './orchestrate.js';
+import { environmentGuard, bindEnvironment } from './environment.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -27,7 +28,13 @@ async function route(request, env) {
   const m = request.method;
   let g;
 
-  if (p === '/v1/health' && m === 'GET') return json({ ok: true, engineVersion: ENGINE_VERSION });
+  if (p === '/v1/health' && m === 'GET') return json({ ok: true, engineVersion: ENGINE_VERSION, environment: env.SB_ENVIRONMENT || null });
+
+  // C8: a Worker never touches a D1 database bound to another environment.
+  const bindCall = p === '/v1/admin/environment/bind' && m === 'POST';
+  if (bindCall) { requireSecret(request, env, 'admin'); return bindEnvironment(request, env); }
+  const writes = m !== 'GET' && (p.startsWith('/v1/ingest/') || p.startsWith('/v1/admin/'));
+  await environmentGuard(env, { write: writes });
 
   // ── Auth ──
   if (p === '/v1/auth/login' && m === 'POST') return login(request, env);
@@ -108,7 +115,8 @@ export default {
    * does nothing unless AUTOMATION_ENABLED = "true". Tests call it directly.
    */
   async scheduled(event, env, ctx) {
-    const p = scheduledTick(env, new Date(event?.scheduledTime ?? Date.now()));
+    const p = environmentGuard(env, { write: true })
+      .then(() => scheduledTick(env, new Date(event?.scheduledTime ?? Date.now())), e => ({ skipped: e.code || 'environment_guard' }));
     if (ctx?.waitUntil) ctx.waitUntil(p.catch(() => {}));
     return p;
   },

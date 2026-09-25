@@ -24,13 +24,13 @@ SB_WORKER_URL=… SB_ADMIN_SECRET=… SB_INGEST_SECRET=… NETLIFY_BUILD_HOOK=ht
   node tools/catalog-refresh-acceptance.mjs --branch weekly-automation-phase1 [--expiry]
 ```
 
-The script sends the hook request exactly as Make S0 does: `POST`,
+The script sends the build-hook request: `POST`,
 `Content-Type: application/json`, raw body `{"refreshId":"crf_…","weekStart":"…"}`.
 It then waits for the build's catalog push (`GET /v1/admin/catalog-pushes`).
 
 | # | Check | How | Result |
 | --- | --- | --- | --- |
-| A1 | Make's payload reaches the build as `INCOMING_HOOK_BODY` | Build log shows `Catalog push: answering catalog refresh crf_…`; the push echoes the same id | NOT RUN |
+| A1 | The hook payload reaches the build as `INCOMING_HOOK_BODY` | Build log shows `Catalog push: answering catalog refresh crf_…`; the push echoes the same id | NOT RUN |
 | A2 | `build.py` extracts the right id | push `refresh.refreshId` equals the id sent | NOT RUN |
 | A3 | The push resolves **that** refresh | `GET /v1/admin/catalog-refresh/<id>` shows `fulfilled`, with `catalogRev` equal to the pushed revision | NOT RUN |
 | A4 | Identical accepted content fulfils a new refresh | second refresh `fulfilled`, same `catalogRev` | NOT RUN |

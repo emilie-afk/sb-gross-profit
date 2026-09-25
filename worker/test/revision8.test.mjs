@@ -15,7 +15,7 @@ const STALE_MS = 150;                                      // test-only stale li
 const stall = () => new Promise(r => setTimeout(r, STALE_MS + 60));  // the owner stalls past it: time passes, the run is untouched
 const one = (env, sql, ...p) => env.DB.prepare(sql).bind(...p).first();
 const all = async (env, sql, ...p) => (await env.DB.prepare(sql).bind(...p).all()).results;
-const schedule = (env, label = 'make:S4') => admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: label });
+const schedule = (env, label = 'ops:S4') => admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: label });
 
 /** A week ready for its scheduled run, with test hooks routed to `on(point, data)`. */
 async function ready(on) {
@@ -121,16 +121,16 @@ test('D: the old owner resumes after a new owner completed → one cycle, one ru
     firstToken = d.token;
     // The original owner stalls past the stale limit; a new owner takes over and finishes.
     await stall();
-    winner = await schedule(env, 'make:S4-new-owner');
+    winner = await schedule(env, 'ops:S4-new-owner');
     afterWinner = await digest(env);
   });
-  const loser = await schedule(env, 'make:S4-old-owner');
+  const loser = await schedule(env, 'ops:S4-old-owner');
   assert.deepEqual([winner.status, winner.json.resumed, winner.json.state], [200, true, 'validated']);
   assert.deepEqual([loser.status, loser.json.error], [409, 'ownership_lost']);
   assert.equal(await digest(env), afterWinner, 'the losing owner changed nothing');
   const c = await consistent(env);
   assert.deepEqual([c.cycles, c.runs, c.snapshots, c.orphanSnapshots, c.contiguousSeq, c.state], [1, 1, 1, 0, true, 'validated']);
-  const again = await schedule(env, 'make:S4-old-owner-retry');
+  const again = await schedule(env, 'ops:S4-old-owner-retry');
   assert.deepEqual([again.json.existing, again.json.runId], [true, winner.json.runId]);
 });
 
@@ -141,7 +141,7 @@ test('E: a takeover racing the commit → exactly one owner completes and D1 sta
       if (point !== 'schedule:before_final_txn' || first) return;
       first = d.token;
       await stall();
-      racer = schedule(env, 'make:S4-racer');                      // not awaited: races the commit
+      racer = schedule(env, 'ops:S4-racer');                      // not awaited: races the commit
       if (variant === 'takeover_claims_first') {
         for (let i = 0; i < 200; i++) {                            // let the takeover reach its claim first
           if ((await one(env, 'SELECT claim_token FROM schedule_cycle')).claim_token !== d.token) break;
@@ -149,7 +149,7 @@ test('E: a takeover racing the commit → exactly one owner completes and D1 sta
         }
       }
     });
-    const original = await schedule(env, 'make:S4-original');
+    const original = await schedule(env, 'ops:S4-original');
     const other = await racer;
     const completed = [original, other].filter(r => r.status === 200 && !r.json.existing);
     assert.equal(completed.length, 1, `${variant}: ${JSON.stringify([original.json, other.json])}`);
