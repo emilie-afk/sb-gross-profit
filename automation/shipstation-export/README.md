@@ -33,6 +33,8 @@ By default it exports the Shipping Cost Report for the rolling eight weeks endin
 
 ## Schedule
 
+> **C7:** schedule the combined job in `automation/collector` (ShipStation, then Shopify, one browser at a time, with catch-up after missed starts) instead of scheduling this job on its own. The commands below still work for manual and test runs.
+
 The Worker's weekly cycle runs on **Monday 15:30 Ho Chi Minh time (08:30 UTC)** and waits for this upload before computing. This job must run before that and after the store's week has closed. The week closes at Monday 00:00 in Los Angeles, which is 07:00 UTC in summer and 08:00 UTC in winter. The job therefore runs at **Monday 08:05 UTC** in every season.
 
 | This PC's Windows time zone | Task Scheduler trigger |

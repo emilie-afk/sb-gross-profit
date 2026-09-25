@@ -1,0 +1,13 @@
+{
+  "name": "sb-collector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One weekly collector for the SB GP pipeline (Windows host): ShipStation, then Shopify, never two browsers at once",
+  "type": "module",
+  "scripts": {
+    "collect": "node src/run.mjs --config config.local.json"
+  },
+  "dependencies": {
+    "playwright": "1.56.0"
+  }
+}

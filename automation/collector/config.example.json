@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to config.local.json (gitignored). Points at the two collectors' own config.local.json files; each keeps its own browser profile and Credential Manager entries. No credentials here.",
+  "shipstationConfig": "../shipstation-export/config.local.json",
+  "shopifyConfig": "../shopify-export/config.local.json",
+  "workerUrl": "https://sb-gp-worker-staging.<account>.workers.dev",
+  "ingestCredentialTarget": "sb-gp-ingest",
+  "timeZone": "America/Los_Angeles",
+  "localDir": null
+}

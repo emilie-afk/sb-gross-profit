@@ -64,6 +64,8 @@ The updated-order scan is this same rolling eight-week export. A refund or cance
 
 ## Schedule
 
+> **C7:** schedule the combined job in `automation/collector` (ShipStation, then Shopify, one browser at a time, with catch-up after missed starts) instead of scheduling this job on its own. The commands below still work for manual and test runs.
+
 Run it after the store's week closes. That is Monday 07:00 UTC in summer and 08:00 UTC in winter, so schedule it for **Monday 15:05 Ho Chi Minh time (08:05 UTC)**, alongside the ShipStation job:
 
 ```

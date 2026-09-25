@@ -40,6 +40,7 @@ const hash16 = s => crypto.createHash('sha256').update(String(s)).digest('hex').
  * @param {(payload: object) => Promise<object>} d.upload
  * @param {() => Date} [d.now]
  * @param {(ms: number) => Promise<void>} [d.sleep]
+ * @param {() => Promise<string>} [d.onWaiting]  C7: called once after the export is requested, before the Gmail wait
  */
 export async function runCollector(d) {
   const { config, week, paths, runId, browser } = d;
@@ -96,6 +97,9 @@ export async function runCollector(d) {
     if (stepResult?.download) {
       file = { status: 200, contentType: '', body: stepResult.download, via: 'direct_download' };
     } else {
+      // C7: while Shopify prepares the emailed export, the orchestrator uploads
+      // any ready ShipStation result (HTTP only; no second browser).
+      if (d.onWaiting) { try { manifest.whileWaiting = (await d.onWaiting()) || 'done'; } catch (e) { manifest.whileWaiting = `error: ${safeError(e)}`; } }
       const deadline = Date.parse(requestedAt) + gcfg.timeoutMinutes * 60_000;
       const seen = new Map();
       let link = null, polls = 0;

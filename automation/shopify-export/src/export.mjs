@@ -87,20 +87,17 @@ export function playwrightBrowser({ config, paths, headed, launchOptions = {}, b
   };
 }
 
-async function main() {
-  const args = argv();
-  const config = JSON.parse(fs.readFileSync(args.config || 'config.local.json', 'utf8'));
+/** One Shopify collection (used by the CLI and by the C7 collector orchestrator). */
+export async function runShopifyJob({ config, week, headed = false, onWaiting = null }) {
   assertCollectorConfig(config);
   const paths = localPaths(config);
   for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
   workerEndpoint(config.workerUrl, INGEST_PATH);                               // fail fast on a bad URL
   purgeOlderThan(paths.quarantine, RETENTION_MS); purgeOlderThan(paths.downloads, RETENTION_MS);
-  const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone || 'America/Los_Angeles');
   const runId = `shx_${new Date().toISOString().replace(/[:.]/g, '-')}`;
-
-  const m = await runCollector({
-    config, week, paths, runId,
-    browser: playwrightBrowser({ config, paths, headed: !!args.headed }),
+  return runCollector({
+    config, week, paths, runId, onWaiting,
+    browser: playwrightBrowser({ config, paths, headed }),
     credential: target => readWindowsCredential(target),
     gmailClient: async () => {
       const client = readWindowsCredential(config.gmail.clientCredentialTarget || 'sb-gmail-oauth-client');
@@ -113,6 +110,13 @@ async function main() {
       return uploadToWorker({ workerUrl: config.workerUrl, ingestSecret, path: INGEST_PATH, payload });
     },
   });
+}
+
+async function main() {
+  const args = argv();
+  const config = JSON.parse(fs.readFileSync(args.config || 'config.local.json', 'utf8'));
+  const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone || 'America/Los_Angeles');
+  const m = await runShopifyJob({ config, week, headed: !!args.headed });
   console.log(`${m.status} (exit ${m.exitCode})`);
   process.exitCode = m.exitCode;
 }

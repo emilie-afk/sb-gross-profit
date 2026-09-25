@@ -24,6 +24,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { detectAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
 import { readWindowsCredential } from './credentials.mjs';
@@ -56,18 +57,19 @@ async function runSteps(page, steps, vars, downloadsDir) {
   return file;
 }
 
-async function main() {
-  const args = argv();
-  const configPath = args.config || 'config.local.json';
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+/**
+ * One ShipStation collection. With `deferUpload` the sanitized payload is
+ * returned as `pending` instead of uploaded, so the C7 collector orchestrator
+ * can upload it while it waits for Shopify's export email (one browser at a
+ * time). finishShipStationUpload() completes it and rewrites the manifest.
+ */
+export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, headed = false, deferUpload = false }) {
   assertNoSecretsInConfig(config);
   const paths = localPaths(config);
   for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
   const { delivery } = resolveDelivery(config);                          // Worker by default; Drive only if explicit
   if (delivery === 'worker') workerEndpoint(config.workerUrl);            // fail fast on a bad URL
   purgeOlderThan(paths.quarantine, 72 * 3600_000);                        // also runs daily from purge.mjs
-  const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone);
-  const kind = typeof args.kind === 'string' ? args.kind : DEFAULT_KIND;
   if (!KINDS[kind]) throw new Error(`--kind must be one of ${Object.keys(KINDS).join(', ')}`);
   assertKindEnabled(kind, config);                                         // mapping export: dormant unless re-enabled
   const steps = config.kinds?.[kind]?.exportSteps || (kind === 'shipstation_mapping_export' ? config.exportSteps : null) || [];
@@ -78,11 +80,10 @@ async function main() {
   const finish = (status, exitCode, extra = {}) => {
     Object.assign(manifest, { status, exitCode, finishedAt: new Date().toISOString(), ...extra });
     fs.writeFileSync(path.join(paths.runs, `${runId}.json`), JSON.stringify(manifest, null, 2));
-    console.log(`${status} (exit ${exitCode})`);
-    process.exitCode = exitCode;
+    return { status, exitCode, manifest, paths };
   };
 
-  const context = await chromium.launchPersistentContext(paths.profile, { headless: !args.headed, acceptDownloads: true });
+  const context = await chromium.launchPersistentContext(paths.profile, { headless: !headed, acceptDownloads: true });
   try {
     const page = context.pages()[0] || await context.newPage();
     await page.goto(config.appUrl, { waitUntil: 'domcontentloaded' });
@@ -122,20 +123,40 @@ async function main() {
       fs.rmSync(file);
       return finish('ok', EXIT.OK, { ...facts, delivery, file: outName });
     }
-    const { password: ingestSecret } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
-    const ingest = await uploadToWorker({ workerUrl: config.workerUrl, ingestSecret, path: prep.path, payload: prep.payload });
-    if (!ingest.ok) {
-      const q = path.join(paths.quarantine, outName);                      // ≤72h, never synced; sanitized content only for the report
-      if (prep.sanitizedText) fs.writeFileSync(q, prep.sanitizedText); else fs.renameSync(file, q);
-      return finish('upload_failed', UPLOAD_EXIT, { ...facts, delivery, ingest, quarantined: outName });
-    }
-    if (fs.existsSync(file)) fs.rmSync(file);
-    return finish('ok', EXIT.OK, { ...facts, delivery, ingest });
+    Object.assign(manifest, facts, { delivery });
+    const pending = { config, prep, outName, file, manifest, paths, finish };
+    if (deferUpload) { manifest.status = 'prepared'; fs.writeFileSync(path.join(paths.runs, `${runId}.json`), JSON.stringify(manifest, null, 2)); return { status: 'prepared', exitCode: null, manifest, pending }; }
+    return finishShipStationUpload(pending);
   } catch (e) {
-    return finish('export_failed', EXIT.EXPORT_FAILED, { error: e.message.slice(0, 300) });
+    return finish('export_failed', EXIT.EXPORT_FAILED, { error: e.message.replace(/https?:\/\/\S+/g, '<url>').slice(0, 300) });
   } finally {
     await context.close();
   }
 }
 
-main().catch(e => { console.error(e.message); process.exitCode = EXIT.CONFIG; });
+/** Upload a prepared ShipStation payload; on failure quarantine the sanitized file (72 h). */
+export async function finishShipStationUpload({ config, prep, outName, file, paths, finish }, { uploadImpl = uploadToWorker } = {}) {
+  const { password: ingestSecret } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
+  const ingest = await uploadImpl({ workerUrl: config.workerUrl, ingestSecret, path: prep.path, payload: prep.payload });
+  if (!ingest.ok) {
+    const q = path.join(paths.quarantine, outName);                      // ≤72h, never synced; sanitized content only for the report
+    if (prep.sanitizedText) fs.writeFileSync(q, prep.sanitizedText); else if (fs.existsSync(file)) fs.renameSync(file, q);
+    return finish('upload_failed', UPLOAD_EXIT, { ingest, quarantined: outName });
+  }
+  if (fs.existsSync(file)) fs.rmSync(file);
+  return finish('ok', EXIT.OK, { ingest });
+}
+
+async function main() {
+  const args = argv();
+  const config = JSON.parse(fs.readFileSync(args.config || 'config.local.json', 'utf8'));
+  const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone);
+  const kind = typeof args.kind === 'string' ? args.kind : DEFAULT_KIND;
+  const r = await runShipStationJob({ config, week, kind, headed: !!args.headed });
+  console.log(`${r.status} (exit ${r.exitCode})`);
+  process.exitCode = r.exitCode;
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main().catch(e => { console.error(e.message); process.exitCode = EXIT.CONFIG; });
+}
