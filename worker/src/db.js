@@ -78,7 +78,7 @@ export const SETTABLE_KEYS = new Set([
   'carrier_fee_priority_locked', 'insurance_treatment', 'store_timezone',
   'store_timezone_confirmed', 'schedule_timezone', 'schedule_weekday', 'schedule_time',
   'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
-  'lively_root_cost_source',
+  'lively_root_cost_source', 'catalog_overlay_base_rev',
   'vendor_first_paid_shipping_dates', 'mcg_free_shipping_threshold', 'shipping_coverage_aging_days', 'provisional_publication_enabled',
 ]);
 
@@ -86,7 +86,7 @@ export const SETTABLE_KEYS = new Set([
 export const REASON_REQUIRED = new Set(['publication_enabled', 'carrier_fee_priority_locked', 'store_timezone',
   'store_timezone_confirmed', 'schedule_timezone', 'schedule_weekday', 'schedule_time', 'ss_coverage_threshold',
   'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
-  'lively_root_cost_source',
+  'lively_root_cost_source', 'catalog_overlay_base_rev',
   'vendor_first_paid_shipping_dates', 'mcg_free_shipping_threshold', 'shipping_coverage_aging_days', 'provisional_publication_enabled']);
 
 /** Changing one of these clears shipping_cost_report_source_verified (reconciliation must be repeated). */
@@ -119,6 +119,7 @@ export function validateSetting(key, value) {
   if (key === 'shipping_coverage_aging_days' && !(Number.isInteger(value) && value >= 1 && value <= 90)) return 'shipping_coverage_aging_days must be a whole number of days, 1–90';
   if (key === 'provisional_publication_enabled' && value !== false) return 'provisional_publication_enabled stays false in C3 (publication controls are enabled in a later, separately approved commit)';
   if (key === 'lively_root_cost_source' && !['manual_list', 'sheet'].includes(value)) return "lively_root_cost_source must be 'manual_list' or 'sheet'";
+  if (key === 'catalog_overlay_base_rev' && !(value === null || (typeof value === 'string' && /^cat_[0-9a-f]{16}$/.test(value)))) return 'catalog_overlay_base_rev must be null or a catalog rev (cat_ + 16 hex)';
   if (key === 'insurance_treatment' && value !== 'awaiting_confirmation') return 'insurance_treatment is locked at awaiting_confirmation until the Insurance Cost non-duplication test is complete';
   return null;
 }

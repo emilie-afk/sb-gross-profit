@@ -272,6 +272,34 @@ export async function saveCatalog(db, { rev, candidate, validation, source, meta
   return { duplicate: false, status: validation.accepted ? 'accepted' : 'rejected' };
 }
 
+/**
+ * C6d: register a pinned BASE catalog (the existing non-vendor cost tables).
+ * Stored with status 'base': never the active catalog and never chosen for a
+ * week by itself; the vendor overlay reads it. Identical content is a duplicate.
+ */
+export async function saveBaseCatalog(db, { rev, base, counts, meta }) {
+  const exists = await db.prepare('SELECT status FROM cost_catalog WHERE catalog_rev = ?1').bind(rev).first();
+  if (exists) return { duplicate: true, status: exists.status };
+  const stmts = [db.prepare(`INSERT INTO cost_catalog (catalog_rev, captured_at, source, status, reject_reasons, table_counts, vendor_counts, vendor_total, meta)
+    VALUES (?1, ?2, 'base_upload', 'base', '[]', ?3, '{}', 0, ?4)`).bind(rev, nowIso(), J(counts), J(meta || {}))];
+  const tables = { ...(base.tables || {}), __mcgExtra: base.mcgExtra || {}, __overrides: base.overrides || {} };
+  for (const [name, value] of Object.entries(tables)) {
+    const s = JSON.stringify(value ?? {});
+    for (let p = 0, i = 0; i === 0 || i < s.length; p++, i += PART_CHARS) {
+      stmts.push(db.prepare('INSERT INTO cost_catalog_part (catalog_rev, table_name, part, payload) VALUES (?1, ?2, ?3, ?4)').bind(rev, name, p, s.slice(i, i + PART_CHARS)));
+      if (s.length === 0) break;
+    }
+  }
+  await atomic(db, stmts);
+  return { duplicate: false, status: 'base' };
+}
+
+/** Catalog meta (never tables) for one revision, or null. */
+export async function catalogMeta(db, rev) {
+  const r = await db.prepare('SELECT status, source, meta FROM cost_catalog WHERE catalog_rev = ?1').bind(rev).first();
+  return r ? { status: r.status, source: r.source, meta: P(r.meta, {}) } : null;
+}
+
 export async function latestAcceptedCatalogMeta(db) {
   return db.prepare("SELECT * FROM cost_catalog WHERE status = 'accepted' ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1").first();
 }

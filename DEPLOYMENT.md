@@ -513,6 +513,43 @@ and reverse-cost results.
 - Route statement reconciliation (Payments and Reimbursements CSVs) remains
   deferred; those formats are not available.
 
+### Live Products Master tabs on a pinned base (C6d)
+
+Only the five public Products Master tabs are refreshed live (Live to Give,
+Lively Good = Lively Root, Calathea Collective, Surfside Arrangement,
+LindaMakes). Every other cost table comes from a pinned **base** catalog, the
+existing cost files, and is never replaced or zeroed.
+
+1. Register the base once: `POST /v1/admin/catalog/base { tables, reason, label? }`
+   with the non-vendor tables (`mcg_total`, `product_costs`, `sku_weights`,
+   `sb_costs`, `hp_supplement`, optional `hp_by_name`, `sku_alias`). It is stored
+   with status `base`, is content-addressed (the same files always give the same
+   rev) and never becomes the active catalog.
+2. Choose it: `POST /v1/admin/settings { catalog_overlay_base_rev: "<rev>", reason }`
+   (audited; migration 0010 starts it at `null`, which keeps the C6 full build).
+3. `POST /v1/admin/catalog/fetch { weekStart }` then fetches **only** the five tab
+   URLs from `CATALOG_SOURCES_JSON` (public CSV exports, no authentication),
+   builds the vendor tables with the build.py port, and overlays them with
+   build.py's semantics: `vendor_costs` / `vendor_index` from the tabs; Live to
+   Give costs set per SKU in `product_costs`; Lively Root costs into `mcg_total`
+   only when `lively_root_cost_source = 'sheet'`. A check proves no other base
+   entry was removed, zeroed or changed.
+4. The usual guards apply before it can become active: all five tabs configured
+   and fetched (a missing tab, an HTML or empty response, or a parse failure
+   rejects the refresh and keeps the current catalog), vendor minimums, the ~10%
+   decrease guard against the last accepted catalog, invalid and conflicting
+   cost counts in the catalog meta, and one pinned revision per run (an earlier
+   week keeps its revision; moving it needs `POST /v1/admin/restate-costs`).
+
+The catalog meta records `completeness`: the five sources resolved live, the
+twelve still standing in from the base (MCG sheet and pots, SKU aliases, Air
+Plant Shop, HP sheet, MCG extra, product-cost JSONs, weights, Drive product
+export) and base tables that are empty. Every snapshot computed on it keeps
+**"Product-cost catalog incomplete"** (`disclosures.productCost.sources`) until
+those sources are resolved, even in a week where every line has a cost. Sheet
+IDs, gids and URLs stay in `CATALOG_SOURCES_JSON` and never reach a response,
+D1, a log or this repository.
+
 ### Cost catalog: refresh, freshness, versioning
 
 **Worker direct fetch (C6, replaces the Netlify build hook).** The Worker reads

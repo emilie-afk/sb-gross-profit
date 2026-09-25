@@ -265,18 +265,26 @@ export function publicationShippingStatus({ sourceVerified, provisionalEnabled, 
  * The disclosure block shown with every C3 result. Product-cost completeness
  * and shipping-source verification are separate statuses.
  */
-export function shippingDisclosures({ catalogRev, missingCostLines, missingCostRevenue, sourceVerified, lifecycle, publicationAllowed = false }) {
+export function shippingDisclosures({ catalogRev, missingCostLines, missingCostRevenue, sourceVerified, lifecycle, publicationAllowed = false, catalogCompleteness = null }) {
+  // C6d: a catalog whose cost sources are not all refreshed live stays
+  // "incomplete" even when every line in the week happens to have a cost.
+  const sourcesIncomplete = !!catalogCompleteness && catalogCompleteness.status !== 'complete';
+  const incomplete = missingCostLines > 0 || sourcesIncomplete;
+  const lineLabel = missingCostLines > 0 ? `Product-cost catalog incomplete: ${missingCostLines} lines without cost` : null;
   return {
     provisional: true,
     catalogVersion: catalogRev || null,
-    productCost: { status: missingCostLines > 0 ? 'incomplete' : 'complete', missingCostLines, missingCostRevenue: r2(missingCostRevenue || 0),
-                   label: missingCostLines > 0 ? `Product-cost catalog incomplete: ${missingCostLines} lines without cost` : 'Product costs complete' },
+    productCost: { status: incomplete ? 'incomplete' : 'complete', missingCostLines, missingCostRevenue: r2(missingCostRevenue || 0),
+                   label: lineLabel || (sourcesIncomplete ? catalogCompleteness.label : 'Product costs complete'),
+                   ...(catalogCompleteness ? { sources: { status: catalogCompleteness.status, baseCatalogRev: catalogCompleteness.baseCatalogRev || null,
+                     resolvedLive: catalogCompleteness.resolvedLive || [], unresolvedSources: catalogCompleteness.unresolvedSources || [],
+                     label: catalogCompleteness.label } } : {}) },
     shippingSource: { source: 'shipstation_shipping_cost_report', status: sourceVerified ? 'verified' : 'unverified',
                       label: sourceVerified ? 'Shipping source verified' : 'Shipping source unverified' },
     shippingCoverage: lifecycle,
     publication: publicationAllowed ? 'enabled' : 'disabled',
     labels: ['Provisional', sourceVerified ? 'Shipping source verified' : 'Shipping source unverified',
-             missingCostLines > 0 ? 'Product-cost catalog incomplete' : 'Product costs complete',
+             incomplete ? 'Product-cost catalog incomplete' : 'Product costs complete',
              ...(missingCostLines > 0 ? [`${missingCostLines} lines missing product cost`] : []),
              publicationAllowed ? 'Publication enabled' : 'Publication disabled'],
   };

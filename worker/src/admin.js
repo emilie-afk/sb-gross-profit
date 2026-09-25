@@ -231,6 +231,11 @@ export async function settings(request, env) {
     let cmp = null; try { cmp = JSON.parse(last?.diagnostics || '{}').livelyRoot?.comparison || null; } catch { cmp = null; }
     if (!cmp?.identical) throw new ApiError(409, 'lively_root_not_verified', 'The latest catalog fetch does not show the Lively Root tab matching the fixed list', { comparison: cmp });
   }
+  // C6d: the overlay base must be a registered base catalog.
+  if (changes.catalog_overlay_base_rev) {
+    const b = await env.DB.prepare('SELECT status FROM cost_catalog WHERE catalog_rev = ?1').bind(changes.catalog_overlay_base_rev).first();
+    if (!b || b.status !== 'base') throw new ApiError(409, 'overlay_base_missing', 'catalog_overlay_base_rev must name a registered base catalog (POST /v1/admin/catalog/base)');
+  }
   const why = reason ? String(reason).trim() : null;
   const writes = Object.entries(changes).map(([k, v]) => [k, v, why]);
   // A new store time zone is unconfirmed until confirmed IN THE SAME operation.

@@ -7,7 +7,7 @@
  */
 import { ApiError } from './http.js';
 import { newId, nowIso, getSettings, jsonInsert, atomic } from './db.js';
-import { loadOrdersForWeek, loadShipmentsForOrders, loadHpdForOrders, loadCatalog, latestAcceptedCatalogMeta } from './store.js';
+import { loadOrdersForWeek, loadShipmentsForOrders, loadHpdForOrders, loadCatalog, latestAcceptedCatalogMeta, catalogMeta } from './store.js';
 import { createRun, createRunStatements, getRun, transition, ownsCycle } from './runs.js';
 import { WORKER } from './actor.js';
 import { buildSnapshot, ENGINE_VERSION, SHIPPING_SOURCES } from '../../shared/snapshot.js';
@@ -352,6 +352,7 @@ export async function computeWeek(env, { weekStart, runId = null, trigger = 'man
     if (acceptance) await acceptCatalogReuse(db, run, info, acceptance, actor, ownership);
     if (!info.rev) throw new ApiError(409, 'no_catalog', 'No accepted cost catalog; push one before computing');
     const catalog = await loadCatalog(db, info.rev);
+    const catalogCompleteness = (await catalogMeta(db, info.rev))?.meta?.completeness || null;   // C6d: set on vendor-overlay catalogs
     const orders = await loadOrdersForWeek(db, weekStart);
     if (!orders.length) throw new ApiError(409, 'week_empty', `No orders ingested for the week of ${weekStart}`);
     const orderNumbers = [...new Set(orders.map(o => o.orderNumber))];
@@ -368,7 +369,7 @@ export async function computeWeek(env, { weekStart, runId = null, trigger = 'man
                                  previous: prev.published, previousDraft: prev.draft,
                                  shippingSource: SHIPPING_SOURCES.REPORT, shippingCostReport: report.byOrder,
                                  c3: { asOf: nowIso(), policySettings: settings, previousShippingExpense: report.previousShippingExpense,
-                                       unmatchedReportOrders: report.unmatched, sourceVerified: settings.shipping_cost_report_source_verified === true,
+                                       unmatchedReportOrders: report.unmatched, sourceVerified: settings.shipping_cost_report_source_verified === true, catalogCompleteness,
                                        provisionalEnabled: settings.provisional_publication_enabled === true,
                                        publicationAllowed: settings.publication_enabled === true && env.PUBLICATION_ALLOWED === 'true' } });
     const sources = { ...(await sourceStatus(db, weekStart, { orders, shipments, hpd })), shipstation: report.covers ? 'ok' : 'pending' };

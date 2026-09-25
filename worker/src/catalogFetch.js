@@ -21,12 +21,14 @@
  */
 import { ApiError, json, readJson } from './http.js';
 import { newId, nowIso, getSettings } from './db.js';
-import { saveCatalog, latestAcceptedCatalogMeta } from './store.js';
+import { saveCatalog, latestAcceptedCatalogMeta, loadCatalog, saveBaseCatalog } from './store.js';
 import { withRun, resolveRefresh, REFRESH_ID_RE } from './ingest.js';
 import { actorFor } from './actor.js';
 import { mondayOrThrow } from './admin.js';
 import { validateCatalog, catalogRevOf } from '../../shared/catalog.js';
-import { buildCatalogTables, URL_SOURCES, JSON_SOURCES, DRIVE_SOURCES } from '../../shared/catalogBuild.js';
+import { buildCatalogTables, parseLivelyRootTab, URL_SOURCES, JSON_SOURCES, DRIVE_SOURCES } from '../../shared/catalogBuild.js';
+import { OVERLAY_SOURCES, overlayVendorTabs, catalogCompleteness, validateBaseCatalog } from '../../shared/catalogOverlay.js';
+import { pyCsvRows } from '../../shared/pyCompat.js';
 
 export const ALLOWED_SOURCE_HOSTS = Object.freeze(['docs.google.com', 'drive.google.com', 'sheets.googleapis.com', 'www.googleapis.com']);
 export const MAX_SOURCE_BYTES = 8 * 1024 * 1024;
@@ -133,6 +135,8 @@ export async function fetchCatalogSources(sources, { fetchImpl = fetch } = {}) {
 /** Fetch → build → validate → save → resolve the exact refresh. */
 export async function refreshCatalog(env, { refreshId = null, fetchImpl = fetch } = {}) {
   const sources = parseSources(env.CATALOG_SOURCES_JSON);
+  const pre = await getSettings(env.DB);
+  if (pre.catalog_overlay_base_rev) return refreshCatalogOverlay(env, { refreshId, fetchImpl, sources, baseRev: pre.catalog_overlay_base_rev });
   return withRun(env, 'catalog', {}, async () => {
     const fetchedAt = nowIso();
     const { texts, provenance, failures } = await fetchCatalogSources(sources, { fetchImpl });
@@ -186,4 +190,84 @@ export async function adminCatalogFetch(request, env) {
       .bind(refreshId, weekStart, nowIso(), actor.cls, actor.label).run();
   }
   return refreshCatalog(env, { refreshId });
+}
+
+// ─── C6d: live Products Master tabs on the pinned base ────────────────────────
+
+const rejectWith = async (env, refreshId, reasons, provenance = {}, extra = {}) => {
+  const refresh = await resolveRefresh(env.DB, refreshId, { rev: null, accepted: false, reasons });
+  return { rowsSeen: 0, written: 0, duplicates: 0, diagnostics: { kind: 'worker_fetch', mode: 'vendor_overlay', accepted: false, reasons, refresh, provenance, ...extra },
+           response: { mode: 'vendor_overlay', accepted: false, catalogRev: null, reasons, refresh, provenance } };
+};
+
+/**
+ * catalog_overlay_base_rev is set: fetch ONLY the five public Products Master
+ * tabs, overlay them on the pinned base (never replacing or zeroing MCG/HPD or
+ * any other base entry), validate against the last accepted catalog, save and
+ * resolve the refresh. Any missing tab, fetch failure or parse failure rejects
+ * the refresh and leaves the current catalog in place.
+ */
+async function refreshCatalogOverlay(env, { refreshId, fetchImpl, sources, baseRev }) {
+  return withRun(env, 'catalog', {}, async () => {
+    const fetchedAt = nowIso();
+    const missing = OVERLAY_SOURCES.filter(k => !sources[k]);
+    if (missing.length) return rejectWith(env, refreshId, [`overlay_sources_missing: ${missing.join(', ')}`]);
+    const baseRow = await env.DB.prepare('SELECT status FROM cost_catalog WHERE catalog_rev = ?1').bind(baseRev).first();
+    if (!baseRow || baseRow.status !== 'base') return rejectWith(env, refreshId, [`overlay_base_missing: ${baseRev}`]);
+    const only = Object.fromEntries(OVERLAY_SOURCES.map(k => [k, sources[k]]));
+    const { texts, provenance, failures } = await fetchCatalogSources(only, { fetchImpl });
+    const failed = Object.keys(failures).sort();
+    if (failed.length) return rejectWith(env, refreshId, failed.map(k => `${k}: ${failures[k]}`), provenance);
+    const settings = await getSettings(env.DB);
+    let built, lr = null;
+    try {
+      built = buildCatalogTables(texts, { livelyRootSource: 'manual_list' });            // vendor tables only are used
+      if (settings.lively_root_cost_source === 'sheet') lr = parseLivelyRootTab(pyCsvRows(texts.LIVELY_GOOD_SHEET_URL));
+    } catch (e) { return rejectWith(env, refreshId, [`parse_failed: ${e.code || 'error'}`], provenance); }
+    const base = await loadCatalog(env.DB, baseRev);
+    let overlay;
+    try { overlay = overlayVendorTabs(base, built, { livelyRootSource: settings.lively_root_cost_source, livelyRootCosts: lr?.costs || null }); }
+    catch (e) { return rejectWith(env, refreshId, [`overlay_failed: ${e.code || 'error'}`], provenance); }
+    const candidate = overlay.candidate;
+    const prev = await latestAcceptedCatalogMeta(env.DB);
+    const previous = prev ? { tableCounts: JSON.parse(prev.table_counts), vendorCounts: JSON.parse(prev.vendor_counts) } : null;
+    const validation = validateCatalog(candidate, previous, { shrinkTolerance: Number(settings.catalog_shrink_tolerance) });
+    const rev = await catalogRevOf(candidate);
+    const completeness = catalogCompleteness({ baseCatalogRev: baseRev, base });
+    const vendorStats = built.report.vendorStats;
+    const costIssues = Object.fromEntries(vendorStats.map(v => [v.vendor, { invalid: v.invalid_costs || 0, conflicting: v.conflicting_duplicates || 0, zeroOrNegative: v.zero_or_negative || 0 }]));
+    const meta = { kind: 'vendor_overlay', fetchedAt, baseCatalogRev: baseRev, provenance, livelyRoot: built.report.livelyRoot, vendorStats, costIssues,
+                   overlay: overlay.report, completeness, warnings: built.report.warnings.filter(w => !/ not set /.test(w)).slice(0, 50) };
+    const saved = await saveCatalog(env.DB, { rev, candidate, validation, source: 'worker_fetch_overlay', meta });
+    const accepted = saved.duplicate ? saved.status === 'accepted' : validation.accepted;
+    const refresh = await resolveRefresh(env.DB, refreshId, { rev, accepted, reasons: validation.reasons });
+    return { rowsSeen: 1, written: saved.duplicate ? 0 : 1, duplicates: saved.duplicate ? 1 : 0,
+             diagnostics: { kind: 'worker_fetch', mode: 'vendor_overlay', catalogRev: rev, baseCatalogRev: baseRev, accepted, reasons: validation.reasons,
+                            refresh, provenance, livelyRoot: built.report.livelyRoot, costIssues, completeness: { status: completeness.status, unresolved: completeness.unresolvedSources.length } },
+             response: { mode: 'vendor_overlay', catalogRev: rev, baseCatalogRev: baseRev, accepted, status: saved.status, reasons: validation.reasons, refresh,
+                         provenance, livelyRoot: built.report.livelyRoot, overlay: overlay.report, costIssues, completeness,
+                         counts: validation.counts, activeCatalogRev: accepted ? rev : (prev?.catalog_rev || null) } };
+  });
+}
+
+/**
+ * POST /v1/admin/catalog/base { tables, mcgExtra?, overrides?, reason, label? }
+ * Register the pinned base (existing non-vendor cost tables). It is stored as
+ * status 'base': it never becomes the active catalog. Point the overlay at it
+ * with the audited setting catalog_overlay_base_rev. The rev is content-addressed,
+ * so the same files always give the same rev.
+ */
+export async function adminCatalogBase(request, env) {
+  const body = await readJson(request);
+  const reason = String(body.reason || '').trim();
+  if (reason.length < 10) throw new ApiError(400, 'bad_payload', 'Registering a base catalog needs a reason of at least 10 characters');
+  const base = { tables: body.tables, mcgExtra: body.mcgExtra || {}, overrides: body.overrides || {} };
+  const v = validateBaseCatalog(base);
+  if (!v.accepted) throw new ApiError(400, 'base_invalid', v.reasons.join('; ').slice(0, 500));
+  const rev = await catalogRevOf(base);
+  const actor = actorFor('admin_secret', body);
+  const label = typeof body.label === 'string' ? body.label.slice(0, 80) : null;
+  const saved = await saveBaseCatalog(env.DB, { rev, base, counts: v.counts, meta: { kind: 'base', reason, label, actorClass: actor.cls, actorLabel: actor.label, registeredAt: nowIso() } });
+  if (saved.duplicate && saved.status !== 'base') throw new ApiError(409, 'rev_in_use', `${rev} already exists as a ${saved.status} catalog`);
+  return json({ baseCatalogRev: rev, status: 'base', duplicate: saved.duplicate, counts: v.counts });
 }
