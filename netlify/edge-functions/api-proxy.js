@@ -8,7 +8,8 @@
  * its OWN origin and this function forwards to the Worker.
  *
  * What it forwards, and nothing else:
- *   - dashboard routes only: auth (login, logout, session) and published reads.
+ *   - dashboard routes only: auth (login, logout, session), published reads and the
+ *     weekly automation status (codes and timestamps only).
  *     /v1/ingest/* and /v1/admin/* are not reachable through the browser path.
  *   - headers: Content-Type, Accept, Origin, and the `sb_session` cookie. The
  *     site-password cookie, any X-*-Secret header and client IP headers are dropped.
@@ -24,6 +25,7 @@ const ROUTES = [
   ['POST', /^\/v1\/auth\/(login|logout)$/],
   ['GET',  /^\/v1\/auth\/session$/],
   ['GET',  /^\/v1\/(weeks|history|compare)$/],
+  ['GET',  /^\/v1\/automation\/status$/],
   ['GET',  /^\/v1\/snapshot\/\d{4}-\d{2}-\d{2}(\/(orders(\/[^/]+)?|issues|scenario-input))?$/],
 ];
 const FORWARD = ['content-type', 'accept', 'origin'];

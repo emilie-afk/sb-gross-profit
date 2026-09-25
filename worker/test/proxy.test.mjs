@@ -104,3 +104,26 @@ test('the browser client only calls same-origin dashboard routes with credential
   await assert.rejects(workerApi('/admin/settings', { fetchImpl: fake }), /Only dashboard routes/);
   await assert.rejects(workerApi('https://evil.example/x', { fetchImpl: fake }), /Only dashboard routes/);
 });
+
+test('C7: the dashboard reads the weekly automation status through the proxy; cycle admin routes stay unreachable', async () => {
+  const { automationStatus } = await import('../../js/workerClient.js');
+  const { renderAutomationStatus, automationStatusError } = await import('../../js/automationStatus.js');
+  const { env } = await loaded(20, {}, { shippingReport: false });
+  await worker.scheduled({ scheduledTime: Date.parse('2026-09-21T08:30:00Z') }, env, null);
+  const b = browser(env);
+  await assert.rejects(automationStatus(WEEK, { fetchImpl: b.fetchImpl }), e => e.status === 401);
+  assert.match(automationStatusError({ status: 401 }), /Sign in/);
+  await login(PASSWORD, { fetchImpl: b.fetchImpl });
+  const s = await automationStatus(WEEK, { fetchImpl: b.fetchImpl });
+  assert.equal(s.cycle.status, 'waiting_for_sources');
+  const html = renderAutomationStatus(s);
+  assert.match(html, /Waiting for sources/);
+  assert.match(html, /ShipStation Shipping Cost Report \(missing\)/);
+  assert.match(html, /Unverified \(provisional\)/);
+  assert.match(html, /Publication<\/th><td[^>]*>Disabled/);
+  assert.equal(renderAutomationStatus({ weekStart: '<img src=x onerror=alert(1)>' }).includes('<img'), false, 'values are escaped');
+  const denied = await b.proxy(new Request(`${SITE}/api/v1/admin/cycles/${WEEK}`, { headers: { cookie: [...b.jar].map(([k, v]) => `${k}=${v}`).join('; ') } }));
+  assert.equal(denied.status, 404);
+  const post = await b.proxy(new Request(`${SITE}/api/v1/automation/status`, { method: 'POST', headers: { origin: SITE } }));
+  assert.equal(post.status, 404, 'status is read-only');
+});

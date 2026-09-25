@@ -19,6 +19,7 @@ import { createAndCompute, recompute, revise, restateCosts, listRestatements, we
          reviseTouchedWeeks, catalogPushes, getRunDetail, publish, settings, backfill, shipstationFieldComparison, storage } from './admin.js';
 import { adminCatalogFetch, adminCatalogBase } from './catalogFetch.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
+import { scheduledTick, automationStatus, acceptCycleCatalogReuse, adminCycleStatus } from './orchestrate.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -61,6 +62,8 @@ async function route(request, env) {
     if (p === '/v1/admin/catalog-pushes' && m === 'GET') return catalogPushes(request, env);
     if (p === '/v1/admin/catalog/fetch' && m === 'POST') return adminCatalogFetch(request, env);
     if (p === '/v1/admin/catalog/base' && m === 'POST') return adminCatalogBase(request, env);
+    if ((g = p.match(/^\/v1\/admin\/cycles\/(\d{4}-\d{2}-\d{2})$/)) && m === 'GET') return adminCycleStatus(env, g[1]);
+    if ((g = p.match(/^\/v1\/admin\/cycles\/(\d{4}-\d{2}-\d{2})\/accept-catalog-reuse$/)) && m === 'POST') return acceptCycleCatalogReuse(request, env, g[1]);
     if ((g = p.match(/^\/v1\/admin\/catalog-refresh\/([\w-]+)$/)) && m === 'GET') return getCatalogRefresh(env, g[1]);
     if (p === '/v1/admin/publish' && m === 'POST') return publish(request, env);
     if (p === '/v1/admin/settings' && (m === 'GET' || m === 'POST')) return settings(request, env);
@@ -80,6 +83,7 @@ async function route(request, env) {
   if (m === 'GET') {
     if (p === '/v1/weeks') return listWeeks(request, env, await requireReader(request, env));
     if (p === '/v1/history') return history(request, env, await requireReader(request, env));
+    if (p === '/v1/automation/status') return automationStatus(request, env, await requireReader(request, env));
     if (p === '/v1/compare') return compare(request, env, await requireReader(request, env));
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})$/))) return getSnapshot(request, env, await requireReader(request, env), g[1]);
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/orders$/))) return listOrders(request, env, await requireReader(request, env), g[1]);
@@ -98,5 +102,14 @@ export default {
     try { response = await route(request, env); }
     catch (e) { response = errorResponse(e); }
     return withCors(response, request, env);
+  },
+  /**
+   * C7 Cron entry. No cron trigger is configured in wrangler.toml, and the tick
+   * does nothing unless AUTOMATION_ENABLED = "true". Tests call it directly.
+   */
+  async scheduled(event, env, ctx) {
+    const p = scheduledTick(env, new Date(event?.scheduledTime ?? Date.now()));
+    if (ctx?.waitUntil) ctx.waitUntil(p.catch(() => {}));
+    return p;
   },
 };

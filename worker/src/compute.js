@@ -8,14 +8,14 @@
 import { ApiError } from './http.js';
 import { newId, nowIso, getSettings, jsonInsert, atomic } from './db.js';
 import { loadOrdersForWeek, loadShipmentsForOrders, loadHpdForOrders, loadCatalog, latestAcceptedCatalogMeta, catalogMeta } from './store.js';
-import { createRun, createRunStatements, getRun, transition, ownsCycle } from './runs.js';
+import { createRun, createRunStatements, getRun, transition, ownsCycle, canTransition } from './runs.js';
 import { WORKER } from './actor.js';
 import { buildSnapshot, ENGINE_VERSION, SHIPPING_SOURCES } from '../../shared/snapshot.js';
 import { effectiveOrderTotals, activeSegments } from './shippingCost.js';
 import { selectIn } from './db.js';
 import { evaluateGate, canPublish } from '../../shared/gate.js';
 import { addDays } from '../../shared/normalized.js';
-import { weekWindowUtc, scheduledRunFor } from '../../shared/schedule.js';
+import { weekWindowUtc, scheduledRunFor, nextRetryAt, pastCutoff, retryTimeline } from '../../shared/schedule.js';
 
 const J = v => JSON.stringify(v ?? null);
 
@@ -184,7 +184,7 @@ async function weekAnchor(db, weekStart) {
 export { weekAnchor };
 
 /** Rule 1 or 3. Rule 2 is the caller reusing run.catalog_info; rule 4 is restateCosts(). */
-async function chooseCatalog(db, weekStart) {
+export async function chooseCatalog(db, weekStart) {
   const anchor = await weekAnchor(db, weekStart);
   if (anchor) return { rev: anchor.rev, basis: anchor.basis, fromSnapshotId: anchor.fromSnapshotId, refreshId: null,
                       ...(anchor.inheritedFreshness !== undefined ? { inheritedFreshness: anchor.inheritedFreshness } : {}) };
@@ -270,7 +270,7 @@ const INGEST_SOURCES = [
 ];
 
 /** The newest Shipping Cost Report version that can serve this week, if any. */
-async function shippingCostReportFor(db, weekStart, win) {
+export async function shippingCostReportFor(db, weekStart, win) {
   const weekEnd = addDays(weekStart, 6);
   const v = await db.prepare(`SELECT version_id, status, requested_from, requested_to, imported_at, comparison FROM shipping_cost_source_version
       WHERE requested_from <= ?1 AND requested_to >= ?2 AND imported_at >= ?3 AND status IN ('pending_review', 'accepted')
@@ -298,13 +298,18 @@ export async function readiness(db, weekStart, settings, { now = Date.now() } = 
   }
   sources.shipping_cost_report = await shippingCostReportFor(db, weekStart, win);
   const refresh = await latestRefresh(db, weekStart);
+  // C7: a successful refresh for the week, or an administrator's audited
+  // acceptance of reusing the pinned catalog. A rejected or expired refresh
+  // without that acceptance keeps the week waiting.
+  const reuse = await db.prepare('SELECT catalog_rev, at FROM catalog_reuse_acceptance WHERE week_start = ?1 ORDER BY id DESC LIMIT 1').bind(weekStart).first();
   const catalog = { status: refresh ? refresh.effective_status : 'missing', refreshId: refresh?.refresh_id || null,
-                    catalogRev: refresh?.catalog_rev || null, requestedAt: refresh?.requested_at || null };
+                    catalogRev: refresh?.catalog_rev || null, requestedAt: refresh?.requested_at || null,
+                    reuseAccepted: !!reuse, ...(reuse ? { reuseCatalogRev: reuse.catalog_rev, reuseAcceptedAt: reuse.at } : {}) };
   const periodClosed = now >= Date.parse(win.endUtcExclusive);
   const missing = [];
   if (!periodClosed) missing.push('reporting_period:open');
   for (const [k, v] of Object.entries(sources)) if (v.required && v.status !== 'ok') missing.push(`${k}:${v.status}`);
-  if (catalog.status === 'missing' || catalog.status === 'pending') missing.push(`catalog_refresh:${catalog.status}`);
+  if (catalog.status !== 'fulfilled' && !catalog.reuseAccepted) missing.push(`catalog_refresh:${catalog.status}`);
   const schedule = { timeZone: settings.schedule_timezone, weekday: Number(settings.schedule_weekday), time: settings.schedule_time };
   const scheduledAt = scheduledRunFor(weekStart, schedule, settings.store_timezone).toISOString();
   return { weekStart, window: win, scheduledAt, due: now >= Date.parse(scheduledAt), periodClosed, sources, catalog,
@@ -377,10 +382,14 @@ export async function computeWeek(env, { weekStart, runId = null, trigger = 'man
     const catalogInfo = { ...info, freshness };
     const ordersInOtherTimezone = (await db.prepare(`SELECT COUNT(*) AS n FROM shopify_order WHERE week_start = ?1
       AND (normalized_timezone IS NULL OR normalized_timezone <> ?2)`).bind(weekStart, settings.store_timezone).first())?.n || 0;
+    // C7: which Shipping Cost Report version serves this week, and its state.
+    const rep = await shippingCostReportFor(db, weekStart, weekWindowUtc(weekStart, settings.store_timezone));
+    const shippingReport = rep.status === 'ok' ? { versionId: rep.versionId, status: rep.versionStatus, requestedFrom: rep.requestedFrom, requestedTo: rep.requestedTo }
+                                               : { versionId: null, status: 'missing' };
     const gate = evaluateGate({ totals: snap.totals, reconciliation: snap.reconciliation, sources,
                                 catalog: { accepted: true, rev: info.rev, freshness }, settings, ordersInOtherTimezone,
-                                shippingC3: snap.shipping.c3 });
-    const gateRecord = { ...gate, sources, storeTimezone: settings.store_timezone, storeTimezoneConfirmed: settings.store_timezone_confirmed === true,
+                                shippingC3: snap.shipping.c3, shippingReport });
+    const gateRecord = { ...gate, sources, shippingReport, storeTimezone: settings.store_timezone, storeTimezoneConfirmed: settings.store_timezone_confirmed === true,
       catalog: { expectedRefreshId: info.refreshId || null, selectedRev: info.rev,
       capturedAt: info.capturedAt, basis: info.basis, freshness } };
     const revision = ((await db.prepare('SELECT MAX(revision) AS m FROM snapshot WHERE week_start = ?1').bind(weekStart).first())?.m || 0) + 1;
@@ -485,6 +494,11 @@ export async function publishSnapshot(env, snapshotId, actor) {
   const settings = await getSettings(db);
   const verdict = canPublish(gate, settings, env.PUBLICATION_ALLOWED);
   if (!verdict.allowed) throw new ApiError(409, 'not_publishable', `Publication refused: ${verdict.reason}`, { reason: verdict.reason });
+  // C7: the report the snapshot was computed on must still be accepted now (not rolled back or superseded by a rejection).
+  if (gate.shippingReport?.versionId) {
+    const v = await db.prepare('SELECT status FROM shipping_cost_source_version WHERE version_id = ?1').bind(gate.shippingReport.versionId).first();
+    if (v?.status !== 'accepted') throw new ApiError(409, 'not_publishable', 'Publication refused: shipping_report_not_accepted', { reason: 'shipping_report_not_accepted' });
+  }
   if (snap.status !== 'draft' || run.state !== 'validated') throw new ApiError(409, 'not_publishable', 'Only a validated draft can be published');
   // The run's gate belongs to its latest snapshot only. An older draft of the
   // same run (before a recompute) was never checked against this gate.
@@ -559,77 +573,128 @@ const staleMs = env => (env?.TEST_HOOKS_ENABLED === 'true' && Number(env?.TEST_S
 const isStale = (env, run) => Date.now() - Date.parse(run.updated_at) > staleMs(env);
 
 /**
- * The single entry point for `trigger: 'schedule'`.
+ * The single entry point for `trigger: 'schedule'` (Cron tick or admin call).
  *
- *   1. Refused before the week's Monday 15:30 slot, and (for a new or resumed
- *      cycle) until every required source is ready.
+ *   1. Refused before the week's Monday 15:30 slot (too_early).
  *   2. CLAIM: one D1 batch inserts schedule_cycle(week_start PK) with
  *      ON CONFLICT DO NOTHING and creates the reporting run only if that
- *      insert won (INSERT … SELECT … WHERE EXISTS claim_token). Two
- *      simultaneous requests cannot both create a run: the loser inserts nothing.
- *   3. EXISTING: a settled run (draft/validated/blocked/published) is returned
- *      with existing: true; a live run in progress likewise, with inProgress.
- *   4. RESUME: a failed run, or one stuck in created/computing/draft longer than
- *      STALE_COMPUTE_MINUTES, is resumed IN PLACE after a compare-and-swap on
- *      claim_token. The same run is recomputed; no second scheduled run exists.
- *   5. The snapshot write re-checks the claim token, so a request that lost
- *      ownership mid-way cannot write a snapshot.
+ *      insert won. Exactly one cycle and one run per week, ready or not.
+ *   3. C7 — sources missing: the run moves to `waiting_for_sources` (no
+ *      snapshot), the cycle records the missing codes, the attempt time and the
+ *      next retry. After the cutoff it becomes `source_timeout`. Nothing is
+ *      failed because an emailed export is still processing, and no older
+ *      source is ever substituted.
+ *   4. A waiting or timed-out run resumes IN PLACE once every required source
+ *      is in: same run, first compute pins the catalog, one snapshot.
+ *   5. RESUME: a failed run, or one stuck in created/computing/draft longer
+ *      than STALE_COMPUTE_MINUTES, is taken over by compare-and-swap on the
+ *      claim token and on the run being exactly as observed.
+ *   6. Every write is claim-guarded; the snapshot, its rows, the run fields,
+ *      the gate and both transitions commit in one transaction (computeWeek).
  */
-export async function computeScheduledWeek(env, { weekStart, actor }) {
+const WAITING = new Set(['waiting_for_sources', 'source_timeout']);
+const scheduleOf = settings => ({ timeZone: settings.schedule_timezone, weekday: Number(settings.schedule_weekday), time: settings.schedule_time });
+
+export async function computeScheduledWeek(env, { weekStart, actor, now = null }) {
   // Fifth control: the scheduled path is off unless the Worker environment
   // explicitly allows automation. worker/wrangler.toml sets it "false".
   if (env.AUTOMATION_ENABLED !== 'true') throw new ApiError(409, 'automation_disabled', 'Scheduled computation is disabled in this environment (AUTOMATION_ENABLED is not "true")');
   const db = env.DB;
+  const at = now ? new Date(now) : new Date();
   const settings = await getSettings(db);
-  const ready = await readiness(db, weekStart, settings);
+  // Read the change marker BEFORE readiness: an upload landing after this read
+  // leaves a newer marker, so the next tick retries instead of missing it.
+  const seenBefore = (await db.prepare('SELECT sources_changed_at FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first())?.sources_changed_at || null;
+  const ready = await readiness(db, weekStart, settings, { now: at.getTime() });
   if (!ready.due) throw new ApiError(409, 'too_early', `The scheduled run for ${weekStart} is due at ${ready.scheduledAt}`, { scheduledAt: ready.scheduledAt });
-  const notReady = () => new ApiError(409, 'sources_not_ready', `Not ready: ${ready.missing.join(', ')}`,
-    { missing: ready.missing, sources: ready.sources, catalog: ready.catalog });
 
   let cycle = await db.prepare('SELECT * FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first();
   if (!cycle) {
-    if (!ready.ready) throw notReady();
-    const runId = newId('run'), token = newId('clm'), at = nowIso();
+    const runId = newId('run'), token = newId('clm'), ts = nowIso();
     const owned = 'EXISTS (SELECT 1 FROM schedule_cycle WHERE week_start = ?1 AND claim_token = ?2)';
     const [claim] = await atomic(db, [
-      db.prepare(`INSERT INTO schedule_cycle (week_start, run_id, claim_token, claimed_at, attempts, created_at)
-        VALUES (?1, ?2, ?3, ?4, 1, ?4) ON CONFLICT(week_start) DO NOTHING`).bind(weekStart, runId, token, at),
+      db.prepare(`INSERT INTO schedule_cycle (week_start, run_id, claim_token, claimed_at, attempts, created_at, status)
+        VALUES (?1, ?2, ?3, ?4, 1, ?4, 'created') ON CONFLICT(week_start) DO NOTHING`).bind(weekStart, runId, token, ts),
       db.prepare(`INSERT INTO reporting_run (run_id, week_start, state, trigger, created_at, updated_at, reason)
-        SELECT ?3, ?1, 'created', 'schedule', ?4, ?4, 'scheduled cycle' WHERE ${owned}`).bind(weekStart, token, runId, at),
+        SELECT ?3, ?1, 'created', 'schedule', ?4, ?4, 'scheduled cycle' WHERE ${owned}`).bind(weekStart, token, runId, ts),
       db.prepare(`INSERT INTO run_transition (run_id, seq, from_state, to_state, at, actor_class, actor_label, note)
-        SELECT ?3, 0, NULL, 'created', ?4, ?5, ?6, 'schedule' WHERE ${owned}`).bind(weekStart, token, runId, at, actor.cls, actor.label),
+        SELECT ?3, 0, NULL, 'created', ?4, ?5, ?6, 'schedule' WHERE ${owned}`).bind(weekStart, token, runId, ts, actor.cls, actor.label),
     ]);
-    if (claim?.meta?.changes === 1) return runOwnedCycle(env, { weekStart, runId, token, actor, attempt: 1 });
+    if (claim?.meta?.changes === 1) return ownedAttempt(env, { weekStart, runId, token, actor, attempt: 1, ready, at, settings, seen: null });
     cycle = await db.prepare('SELECT * FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first();   // lost the race
   }
 
   const run = await getRun(db, cycle.run_id);
   const cycleInfo = { weekStart, runId: cycle.run_id, attempts: cycle.attempts, claimedAt: cycle.claimed_at };
   if (SETTLED.has(run.state) || run.state === 'cancelled') return { ...(await runSummary(db, run.run_id)), existing: true, cycle: cycleInfo };
-  // Resumable: failed; or left mid-way (created / computing / draft) by a request
-  // that is gone — stale, or (for created) one that already recorded an error.
-  const resumable = run.state === 'failed'
+  // Resumable: waiting for sources or timed out (C7); failed; or left mid-way
+  // (created / computing / draft) by a request that is gone.
+  const resumable = WAITING.has(run.state) || run.state === 'failed'
     || (['created', 'computing', 'draft'].includes(run.state) && isStale(env, run))
     || (run.state === 'created' && !!cycle.last_error);
   if (!resumable) return { ...(await runSummary(db, run.run_id)), existing: true, inProgress: true, cycle: cycleInfo };
-  if (!ready.ready) throw notReady();
+  // A waiting run with nothing new: record the attempt only when this tick owns it (same CAS).
 
   // Takeover = compare-and-swap on the claim token AND on the run being exactly
   // as observed (same state, same updated_at). If the current owner commits,
   // or another request takes over first, this changes nothing.
-  const token = newId('clm'), at = nowIso();
+  const token = newId('clm'), ts = nowIso();
   let cas;
   try {
     [, cas] = await atomic(db, [
       guard(db, 'EXISTS (SELECT 1 FROM reporting_run WHERE run_id = ?1 AND state = ?2 AND updated_at = ?3)', run.run_id, run.state, run.updated_at),
       db.prepare(`UPDATE schedule_cycle SET claim_token = ?3, claimed_at = ?4, attempts = attempts + 1
-        WHERE week_start = ?1 AND claim_token = ?2`).bind(weekStart, cycle.claim_token, token, at),
+        WHERE week_start = ?1 AND claim_token = ?2`).bind(weekStart, cycle.claim_token, token, ts),
     ]);
   } catch (e) { if (!isGuardAbort(e)) throw e; cas = null; }
   if (cas?.meta?.changes !== 1) {   // the owner finished, or another request took over first
-    return { ...(await runSummary(db, run.run_id)), existing: true, inProgress: !SETTLED.has((await getRun(db, run.run_id)).state), cycle: cycleInfo };
+    const now2 = await getRun(db, run.run_id);
+    return { ...(await runSummary(db, run.run_id)), existing: true, inProgress: !SETTLED.has(now2.state) && !WAITING.has(now2.state), cycle: cycleInfo };
   }
-  return runOwnedCycle(env, { weekStart, runId: cycle.run_id, token, actor, attempt: cycle.attempts + 1, resumed: true });
+  return ownedAttempt(env, { weekStart, runId: cycle.run_id, token, actor, attempt: cycle.attempts + 1, ready, at, settings, resumed: true, seen: seenBefore });
+}
+
+/** The claim holder's attempt: compute when every input is in, otherwise wait (or time out). */
+async function ownedAttempt(env, { weekStart, runId, token, actor, attempt, ready, at, settings, resumed = false, seen = null }) {
+  const db = env.DB;
+  const own = { weekStart, token };
+  const sched = scheduleOf(settings);
+  const tz = settings.store_timezone;
+  const cycleUpdate = (fields) => {
+    const keys = Object.keys(fields);
+    return db.prepare(`UPDATE schedule_cycle SET ${keys.map((k, i) => `${k} = ?${i + 3}`).join(', ')} WHERE week_start = ?1 AND claim_token = ?2`)
+      .bind(weekStart, token, ...keys.map(k => fields[k]));
+  };
+  if (ready.ready) {
+    await cycleUpdate({ status: 'computing', missing: '[]', last_attempt_at: at.toISOString(), next_retry_at: null, changes_seen_at: seen }).run();
+    const r = await runOwnedCycle(env, { weekStart, runId, token, actor, attempt, resumed });
+    await cycleUpdate({ status: 'computed' }).run();
+    return r;
+  }
+  // Not ready: wait (or time out) without a snapshot.
+  const cut = pastCutoff(weekStart, at, sched, tz);
+  const target = cut ? 'source_timeout' : 'waiting_for_sources';
+  let run = await getRun(db, runId);
+  const note = `missing: ${ready.missing.join(', ')}`.slice(0, 500);
+  if (run.state !== target) {
+    if (!canTransition(run.state, 'waiting_for_sources') && !canTransition(run.state, target)) {
+      throw new ApiError(409, 'invalid_transition', `Run cannot wait from ${run.state}`);
+    }
+    if (run.state !== 'waiting_for_sources' && canTransition(run.state, 'waiting_for_sources')) {
+      run = await transition(db, runId, 'waiting_for_sources', WORKER, { note, ownership: own });
+    }
+    if (target === 'source_timeout' && run.state === 'waiting_for_sources') {
+      run = await transition(db, runId, 'source_timeout', WORKER, { note: `cutoff passed; ${note}`.slice(0, 500), ownership: own });
+    }
+  }
+  const next = cut ? null : nextRetryAt(weekStart, at, sched, tz);
+  const timeline = retryTimeline(weekStart, sched, tz);
+  const fields = { status: target, missing: J(ready.missing), last_attempt_at: at.toISOString(), next_retry_at: next, last_error: null, changes_seen_at: seen };
+  if (cut) fields.timed_out_at = (await db.prepare('SELECT timed_out_at FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first())?.timed_out_at || at.toISOString();
+  await cycleUpdate(fields).run();
+  return { run, weekStart, state: target, waiting: true, existing: false, ...(resumed ? { resumed: true } : {}),
+           missing: ready.missing, sources: ready.sources, catalog: ready.catalog,
+           nextRetryAt: next, cutoffAt: timeline.cutoffAt, cycle: { weekStart, runId, attempts: attempt } };
 }
 
 async function runOwnedCycle(env, { weekStart, runId, token, actor, attempt, resumed = false, reason = null, acceptance = null }) {
@@ -639,7 +704,7 @@ async function runOwnedCycle(env, { weekStart, runId, token, actor, attempt, res
     await env.DB.prepare('UPDATE schedule_cycle SET last_error = NULL WHERE week_start = ?1 AND claim_token = ?2').bind(weekStart, token).run();
     return { ...r, existing: false, ...(resumed ? { resumed: true } : {}), cycle: { weekStart, runId, attempts: attempt } };
   } catch (e) {
-    await env.DB.prepare('UPDATE schedule_cycle SET last_error = ?3 WHERE week_start = ?1 AND claim_token = ?2')
+    await env.DB.prepare("UPDATE schedule_cycle SET last_error = ?3, status = 'failed' WHERE week_start = ?1 AND claim_token = ?2")
       .bind(weekStart, token, e.code || 'compute_failed').run().catch(() => {});
     throw e;
   }

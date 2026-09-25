@@ -667,6 +667,61 @@ without authentication; the spreadsheet ID and tab gids are deployment
 configuration (Netlify environment and the Worker `CATALOG_SOURCES_JSON`
 secret), kept out of this repository.
 
+### Weekly orchestration (C7)
+
+**Reporting week:** Monday 00:00 → next Monday 00:00 (exclusive), America/Los_Angeles.
+
+**Windows collector:** `automation/collector` starts Monday **15:05 ICT**, and again at logon/startup to catch up after a missed start. It runs ShipStation first, then requests the Shopify export. The ShipStation report is uploaded during the Shopify email wait. The two browsers never run at once, each source is reported independently, and only sources the Worker still lacks are collected.
+
+**Worker:** the Cron handler (`scheduled` in `worker/src/index.js`, logic in `worker/src/orchestrate.js`) makes the first attempt at **15:30 ICT**. No cron trigger is configured in `wrangler.toml`, and the handler does nothing while `AUTOMATION_ENABLED` is not `"true"`.
+
+**Required inputs:** a run computes only with all of these:
+- the rolling Shopify export;
+- the updated-order scan (satisfied by the same rolling upload);
+- a Shipping Cost Report received after the week closed and covering it;
+- a successful catalog refresh, or an audited reuse approval (`POST /v1/admin/cycles/<week>/accept-catalog-reuse { reason }`);
+- a closed reporting period.
+
+Optional: the mapping export (never satisfies shipping readiness) and HPD actuals.
+
+**Retry timeline**, approved (Monday 15:30 ICT = 08:30 UTC, ICT has no DST):
+
+| Phase | Attempts (ICT) | UTC |
+| --- | --- | --- |
+| Collection | Mon 15:05 (Windows) | Mon 08:05 |
+| First attempt | Mon 15:30 | Mon 08:30 |
+| Fast retries | every 15 min, 15:45 … 18:30 (12) | 08:45 … 11:30 |
+| Hourly retries | 19:30 … Tue 15:30 (21) | Mon 12:30 … Tue 08:30 |
+| Cutoff | Tue 15:30 → `source_timeout` | Tue 08:30 |
+
+An upload, a catalog refresh or a reuse approval for the week also triggers an attempt on the next tick, even between retry points or after the cutoff.
+
+**Run states for a scheduled cycle** (one `schedule_cycle` and one run per week):
+
+| From | Event | To | Snapshot |
+| --- | --- | --- | --- |
+| — | first attempt (claim) | `created` | none |
+| `created` / `failed` | sources missing | `waiting_for_sources` | none |
+| `waiting_for_sources` | retry, still missing | `waiting_for_sources` (attempt recorded) | none |
+| `waiting_for_sources` | cutoff passed | `source_timeout` | none |
+| `created` / `waiting_for_sources` / `source_timeout` / `failed` | every input in | `computing` | — |
+| `computing` | one transaction: snapshot + rows + run + gate + both transitions | `validated` or `blocked` | one draft |
+| `computing` | compute error | `failed` (resumable) | none |
+| `validated` | publish (controls on, report accepted) | `published` | — |
+
+**Shipping Cost Report states:**
+- `accepted`: computes and may pass the report gate.
+- `pending_review`: satisfies arrival. The provisional draft is computed on the accepted, active report data, and publication is refused (`shipping_report_not_accepted`).
+- `rejected`: the source stays missing, so the run waits, and a manual compute is gate-blocked (`shipping_report_missing`).
+
+**Catalog:** the catalog revision is pinned at the run's first compute, and retries and recomputes keep it. A newer catalog never changes a computed week; that needs an audited restatement.
+
+**Earlier weeks:** once the cycle has computed, each tick drafts one revision for an earlier week touched by this cycle's uploads. The revision reason names the source, the ingest run and the sanitized source sha256 prefix. Published snapshots are never altered.
+
+**Status:**
+- `GET /v1/automation/status?weekStart=` (dashboard session, through the proxy; shown on the Reports screen) returns the schedule, last attempt, next retry, sources received / missing / pending review, timeout state, run state, catalog revision and completeness, and shipping verification. It returns codes and timestamps only.
+- `GET /v1/admin/cycles/<week>` adds the run id and the automation events.
+
 ### Make, ShipStation job, backfill
 
 - Make scenarios S0–S4: `docs/make-scenarios.md`.

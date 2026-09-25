@@ -123,3 +123,42 @@ export function planCycle(at, { schedule = DEFAULT_SCHEDULE, reportingTimeZone =
     },
   };
 }
+
+// ─── C7: collection time and the retry timeline ───────────────────────────────
+
+/** The Windows collector starts 25 minutes before the first compute attempt (15:05 ICT). */
+export const COLLECTION_LEAD_MINUTES = 25;
+/**
+ * Approved C7 retry policy, relative to the first attempt (Monday 15:30 ICT):
+ * every 15 minutes for 3 hours (through 18:30), then hourly until 24 hours
+ * after the first attempt (Tuesday 15:30). After that the run is source_timeout.
+ */
+export const RETRY_POLICY = Object.freeze({ fastEveryMinutes: 15, fastForMinutes: 180, slowEveryMinutes: 60, cutoffAfterMinutes: 1440 });
+
+/** Every attempt instant (UTC ISO) for a week, first attempt included, cutoff last. */
+export function retryTimeline(weekStart, schedule = DEFAULT_SCHEDULE, reportingTimeZone = DEFAULT_REPORTING_TIMEZONE, policy = RETRY_POLICY) {
+  const first = scheduledRunFor(weekStart, schedule, reportingTimeZone).getTime();
+  const out = [];
+  for (let m = 0; m <= policy.fastForMinutes; m += policy.fastEveryMinutes) out.push(first + m * 60_000);
+  for (let m = policy.fastForMinutes + policy.slowEveryMinutes; m <= policy.cutoffAfterMinutes; m += policy.slowEveryMinutes) out.push(first + m * 60_000);
+  return {
+    collectionAt: new Date(first - COLLECTION_LEAD_MINUTES * 60_000).toISOString(),
+    firstAttemptAt: new Date(first).toISOString(),
+    fastUntil: new Date(first + policy.fastForMinutes * 60_000).toISOString(),
+    cutoffAt: new Date(first + policy.cutoffAfterMinutes * 60_000).toISOString(),
+    attempts: out.map(t => new Date(t).toISOString()),
+  };
+}
+
+/** The next attempt strictly after `now`, or null when the cutoff has passed. */
+export function nextRetryAt(weekStart, now, schedule = DEFAULT_SCHEDULE, reportingTimeZone = DEFAULT_REPORTING_TIMEZONE) {
+  const t = now instanceof Date ? now.getTime() : Date.parse(now);
+  const next = retryTimeline(weekStart, schedule, reportingTimeZone).attempts.find(a => Date.parse(a) > t);
+  return next || null;
+}
+
+/** True once the week's retry window is over. */
+export function pastCutoff(weekStart, now, schedule = DEFAULT_SCHEDULE, reportingTimeZone = DEFAULT_REPORTING_TIMEZONE) {
+  const t = now instanceof Date ? now.getTime() : Date.parse(now);
+  return t >= Date.parse(retryTimeline(weekStart, schedule, reportingTimeZone).cutoffAt);
+}

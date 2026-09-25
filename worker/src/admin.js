@@ -30,7 +30,9 @@ export async function createAndCompute(request, env) {
   const actor = actorFor('admin_secret', body);
   if (trigger === 'schedule') {
     if (body.acceptCatalogReuse) throw new ApiError(400, 'bad_payload', 'A scheduled run cannot accept catalog reuse; recompute the run instead');
-    return json(runResult(await computeScheduledWeek(env, { weekStart: body.weekStart, actor })));
+    // `at` (the tick instant) is honoured only in test environments; production uses the clock.
+    const at = env.TEST_HOOKS_ENABLED === 'true' && body.at ? body.at : null;
+    return json(runResult(await computeScheduledWeek(env, { weekStart: body.weekStart, actor, now: at })));
   }
   const r = await computeWeek(env, { weekStart: body.weekStart, trigger, actor, reason: body.reason || null,
                                      acceptCatalogReuse: body.acceptCatalogReuse || null });
@@ -103,7 +105,8 @@ export async function listRestatements(request, env) {
 const runResult = r => ({ runId: r.run.run_id, state: r.run.state, weekStart: r.run.week_start, snapshotId: r.snapshotId,
   revision: r.revision, snapshotStatus: r.status, profitabilityStatus: r.profitabilityStatus, headline: r.headline, gate: r.gate,
   ...(r.existing ? { existing: true } : {}), ...(r.inProgress ? { inProgress: true } : {}), ...(r.resumed ? { resumed: true } : {}),
-  ...(r.cycle ? { cycle: r.cycle } : {}) });
+  ...(r.cycle ? { cycle: r.cycle } : {}),
+  ...(r.waiting ? { waiting: true, missing: r.missing, nextRetryAt: r.nextRetryAt, cutoffAt: r.cutoffAt } : {}) });
 
 // ─── Schedule, readiness, catalog refresh ─────────────────────────────────────
 
@@ -116,7 +119,11 @@ export async function weekPlan(request, env) {
   // no Shopify API integration, so they are not part of the week plan.
   const { shopify: _noApi, ...plan } = planCycle(at, { schedule: { timeZone: s.schedule_timezone, weekday: Number(s.schedule_weekday), time: s.schedule_time },
                                                       reportingTimeZone: s.store_timezone });
-  return json(plan);
+  // C7: what the Windows collector still has to deliver for this week (status codes only),
+  // so a run missed while the PC was off catches up on the next start without repeating uploads.
+  const r = await readiness(env.DB, plan.weekStart, s, { now: at.getTime() });
+  const collected = { shopify: r.sources.shopify.status, shopify_updates: r.sources.shopify_updates.status, shipping_cost_report: r.sources.shipping_cost_report.status };
+  return json({ ...plan, collected, collectionComplete: Object.values(collected).every(v => v === 'ok') });
 }
 
 export async function getReadiness(request, env) {
@@ -160,16 +167,26 @@ export async function getCatalogRefresh(env, refreshId) {
 export async function reviseTouchedWeeks(request, env) {
   const body = await readJson(request);
   const cycleWeek = mondayOrThrow(body.weekStart);
-  const actor = actorFor('admin_secret', body);
+  return json(await reviseTouched(env, { cycleWeek, actor: actorFor('admin_secret', body), maxWeeks: body.maxWeeks }));
+}
+
+/**
+ * Shared by the admin route and the C7 scheduled tick. Each draft revision's
+ * reason names the changed sources, their ingest runs and the sanitized
+ * source hashes, so the revision can be traced to the exact upload.
+ */
+export async function reviseTouched(env, { cycleWeek, actor, maxWeeks = 1 }) {
   const db = env.DB;
-  const runs = (await db.prepare("SELECT run_id, source, mode, finished_at, weeks_touched FROM ingest_run WHERE week_start = ?1 AND status = 'ok' ORDER BY started_at")
+  const runs = (await db.prepare("SELECT run_id, source, mode, finished_at, weeks_touched, diagnostics FROM ingest_run WHERE week_start = ?1 AND status = 'ok' ORDER BY started_at")
     .bind(cycleWeek).all()).results || [];
-  const touched = new Map();                                     // week → { changed, runs:Set, lastAt }
+  const touched = new Map();                                     // week → { changed, runs:Set, sources:Set, hashes:Set, lastAt }
   for (const r of runs) {
+    let d = {}; try { d = JSON.parse(r.diagnostics || '{}'); } catch { d = {}; }
     for (const [w, n] of Object.entries(JSON.parse(r.weeks_touched || '{}'))) {
       if (!(w < cycleWeek) || !WEEK_RE.test(w)) continue;
-      const t = touched.get(w) || { changed: 0, runs: new Set(), sources: new Set(), lastAt: '' };
+      const t = touched.get(w) || { changed: 0, runs: new Set(), sources: new Set(), hashes: new Set(), lastAt: '' };
       t.changed += Number(n) || 0; t.runs.add(r.run_id); t.sources.add(r.mode ? `${r.source}:${r.mode}` : r.source);
+      if (typeof d.sanitizedSha256 === 'string' && /^[0-9a-f]{64}$/.test(d.sanitizedSha256)) t.hashes.add(d.sanitizedSha256.slice(0, 16));
       if ((r.finished_at || '') > t.lastAt) t.lastAt = r.finished_at || '';
       touched.set(w, t);
     }
@@ -183,17 +200,18 @@ export async function reviseTouchedWeeks(request, env) {
     if (done) { skipped.push({ weekStart: w, reason: 'already_revised', runId: done.run_id }); continue; }
     todo.push({ weekStart: w, ...t });
   }
-  const maxWeeks = Math.min(Math.max(parseInt(body.maxWeeks || 1, 10), 1), 8);
+  const max = Math.min(Math.max(parseInt(maxWeeks || 1, 10), 1), 8);
   const revised = [];
-  for (const t of todo.slice(0, maxWeeks)) {
-    const reason = `Source update in cycle ${cycleWeek}: ${t.changed} changed record(s) from ${[...t.sources].join(', ')} (ingest ${[...t.runs].join(', ')})`;
+  for (const t of todo.slice(0, max)) {
+    const hashes = [...t.hashes];
+    const reason = `Source update in cycle ${cycleWeek}: ${t.changed} changed record(s) from ${[...t.sources].join(', ')} (ingest ${[...t.runs].join(', ')}${hashes.length ? `; source sha256 ${hashes.join(', ')}` : ''})`;
     try {
       const r = await computeWeek(env, { weekStart: t.weekStart, trigger: 'source_update', actor, reason });
-      revised.push({ ...runResult(r), reason, published: false });
+      revised.push({ ...runResult(r), reason, sourceHashes: hashes, published: false });
     } catch (e) { revised.push({ weekStart: t.weekStart, error: e.code || 'compute_failed', message: e.message, reason }); }
   }
-  return json({ cycleWeek, revised, remaining: todo.slice(maxWeeks).map(t => t.weekStart), skipped,
-                note: 'Revisions are drafts. Nothing is published automatically.' });
+  return { cycleWeek, revised, remaining: todo.slice(max).map(t => t.weekStart), skipped,
+           note: 'Revisions are drafts. Nothing is published automatically.' };
 }
 
 export async function getRunDetail(env, runId) {

@@ -7,7 +7,8 @@
 > (Shipping Cost Report). Readiness keys are now `shopify`, `shopify_updates`,
 > `shipping_cost_report`, `catalog_refresh` and `reporting_period`; the mapping
 > export (`shipstation_mapping`) never satisfies shipping readiness. Weekly
-> orchestration moves to the Worker (C7).
+> orchestration is now the Worker's Cron handler (C7; see DEPLOYMENT.md, "Weekly
+> orchestration"); S0 and S4 are superseded too.
 
 Nothing here publishes. Publication is a separate, deliberate admin action and
 stays locked (`publication_enabled = false`, `PUBLICATION_ALLOWED = "false"`,

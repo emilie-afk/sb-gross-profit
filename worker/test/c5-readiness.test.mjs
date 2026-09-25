@@ -28,7 +28,7 @@ async function sendReport(env, { from = WEEK, to = '2026-09-20', rows = [{ order
 }
 
 test('C5: the mapping export alone never satisfies shipping readiness', async () => {
-  const { env } = await loaded(20, {}, { shippingReport: false });          // Shopify week + mapping export + catalog
+  const { env } = await loaded(20, { TEST_HOOKS_ENABLED: 'true' }, { shippingReport: false });   // Shopify week + mapping export + catalog
   assert.equal((await updatesScan(env)).status, 200);
   const r = await ready(env);
   assert.equal(r.ready, false);
@@ -36,8 +36,8 @@ test('C5: the mapping export alone never satisfies shipping readiness', async ()
   assert.deepEqual([r.sources.shipstation_mapping.status, r.sources.shipstation_mapping.required, r.sources.shipstation_mapping.satisfiesShippingReadiness],
     ['ok', false, false]);
   assert.equal(r.sources.shipstation, undefined, 'no readiness key named after the mapping export');
-  const sched = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule' });
-  assert.deepEqual([sched.status, sched.json.error], [409, 'sources_not_ready']);
+  const sched = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', at: '2026-09-21T09:00:00Z' });
+  assert.deepEqual([sched.status, sched.json.state, sched.json.missing], [200, 'waiting_for_sources', ['shipping_cost_report:missing']]);
 });
 
 test('C5: a Shipping Cost Report received for the week satisfies it, even while pending review', async () => {

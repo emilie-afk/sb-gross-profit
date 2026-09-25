@@ -4,8 +4,8 @@
  * Calls the dashboard's own origin (/api/v1/...), which the Netlify edge
  * function api-proxy.js forwards to the Worker. Same-origin is what lets the
  * Worker's SameSite=Strict, HttpOnly session cookie travel; the browser never
- * sees the cookie, a secret or a Worker URL. Not wired into the UI yet
- * (Phase 1 keeps the manual workflow as the default).
+ * sees the cookie, a secret or a Worker URL. The manual workflow stays the
+ * default; C7 wires only the read-only weekly automation status (Reports screen).
  */
 export const API_BASE = '/api/v1';
 
@@ -31,3 +31,5 @@ export const logout = o => workerApi('/auth/logout', { method: 'POST', body: {},
 export const session = o => workerApi('/auth/session', o);
 export const weeks = o => workerApi('/weeks', o);
 export const snapshot = (weekStart, o) => workerApi(`/snapshot/${weekStart}`, o);
+/** C7: the weekly automation status (codes and timestamps only). */
+export const automationStatus = (weekStart, o) => workerApi(`/automation/status${weekStart ? `?weekStart=${encodeURIComponent(weekStart)}` : ''}`, o);

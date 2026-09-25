@@ -20,17 +20,27 @@ import { newId, nowIso } from './db.js';
 // Every `actor` argument below is { cls, label } from actor.js: cls is
 // server-assigned from the auth path; label is caller-supplied and unverified.
 
-export const RUN_STATES = Object.freeze(['created', 'computing', 'draft', 'validated', 'blocked', 'failed', 'published', 'cancelled']);
+/*
+ * C7 (scheduled cycles): a run with missing sources waits WITHOUT a snapshot.
+ *
+ *   created ──► waiting_for_sources ──► computing            (sources arrive)
+ *                     │                                      
+ *                     └──► source_timeout ──► computing      (cutoff passed; a later valid upload resumes it)
+ *   failed ──► waiting_for_sources                           (a resumed run whose inputs are gone again)
+ */
+export const RUN_STATES = Object.freeze(['created', 'waiting_for_sources', 'source_timeout', 'computing', 'draft', 'validated', 'blocked', 'failed', 'published', 'cancelled']);
 
 export const TRANSITIONS = Object.freeze({
-  created:   ['computing', 'cancelled'],
-  computing: ['draft', 'failed'],
-  draft:     ['validated', 'blocked', 'computing'],
-  validated: ['published', 'computing', 'cancelled'],
-  blocked:   ['computing', 'cancelled'],
-  failed:    ['computing', 'cancelled'],
-  published: [],
-  cancelled: [],
+  created:             ['computing', 'waiting_for_sources', 'cancelled'],
+  waiting_for_sources: ['computing', 'source_timeout', 'cancelled'],
+  source_timeout:      ['computing', 'cancelled'],
+  computing:           ['draft', 'failed'],
+  draft:               ['validated', 'blocked', 'computing'],
+  validated:           ['published', 'computing', 'cancelled'],
+  blocked:             ['computing', 'cancelled'],
+  failed:              ['computing', 'waiting_for_sources', 'cancelled'],
+  published:           [],
+  cancelled:           [],
 });
 
 export function canTransition(from, to) {

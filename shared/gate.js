@@ -57,7 +57,7 @@ export const CATALOG_FRESHNESS = Object.freeze(['current', 'intentionally_reused
  * @param {object} p.catalog         { accepted: boolean, rev, freshness: { status, reason, ... } }
  * @param {object} p.settings
  */
-export function evaluateGate({ totals, reconciliation, sources, catalog, settings, ordersInOtherTimezone = 0, shippingC3 = null }) {
+export function evaluateGate({ totals, reconciliation, sources, catalog, settings, ordersInOtherTimezone = 0, shippingC3 = null, shippingReport = null }) {
   const s = { ...DEFAULT_SETTINGS, ...(settings || {}) };
   const failures = [], warnings = [];
 
@@ -73,6 +73,13 @@ export function evaluateGate({ totals, reconciliation, sources, catalog, setting
       push.push({ code: 'shipping_order_coverage_open', message: shippingC3.lifecycle?.label || 'Order-level shipping coverage is open' });
     }
     warnings.push({ code: 'partial_fulfillment_unverified', message: 'Coverage is order level; partial-shipment verification is unavailable' });
+  }
+  // C7: the week's Shipping Cost Report. accepted → may pass; pending_review →
+  // a provisional draft is allowed but publication is refused (canPublish);
+  // missing or rejected → blocked.
+  if (shippingReport) {
+    if (shippingReport.status === 'pending_review') warnings.push({ code: 'shipping_report_pending_review', message: 'The Shipping Cost Report for this week is pending review; this is a provisional draft and cannot be published' });
+    else if (shippingReport.status !== 'accepted') failures.push({ code: 'shipping_report_missing', message: `No accepted or pending Shipping Cost Report covers this week (${shippingReport.status})` });
   }
 
   if (sources?.shopify !== 'ok') failures.push({ code: 'source_shopify', message: `Shopify ingest is ${sources?.shopify || 'missing'}` });
@@ -138,6 +145,8 @@ export function canPublish(gate, settings, envAllowed) {
   if (s.store_timezone_confirmed !== true) return { allowed: false, reason: 'store_timezone_unconfirmed' };
   if (gate?.storeTimezone && gate.storeTimezone !== s.store_timezone) return { allowed: false, reason: 'store_timezone_changed' };
   if (!gate?.passed) return { allowed: false, reason: 'gate_failed' };
+  // C7: only a snapshot computed on an ACCEPTED Shipping Cost Report may publish.
+  if (gate?.shippingReport && gate.shippingReport.status !== 'accepted') return { allowed: false, reason: 'shipping_report_not_accepted' };
   // C3: an unverified Shipping Cost Report source is publishable only as
   // provisional, and only when provisional publication is enabled NOW.
   if (gate?.shippingSource === 'shipping_cost_report' && s.shipping_cost_report_source_verified !== true && s.provisional_publication_enabled !== true) {

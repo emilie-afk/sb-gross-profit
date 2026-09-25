@@ -919,6 +919,12 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <section id="screen-reports" class="gp-screen" hidden
                  style="display:none;flex-direction:column;gap:24px">
           <div class="gp-kpi-row" id="report-kpis"></div>
+          <div class="gp-card" id="automation-card">
+            <div class="gp-card-head"><h3>Weekly automation</h3>
+              <span class="meta">Collection, retries and sources for the last closed week · nothing publishes automatically</span>
+              <button class="logout-btn" onclick="loadAutomationStatus()" style="font-size:.75rem;margin-left:auto">Refresh</button></div>
+            <div class="gp-card-body" id="automation-status"><p class="meta">Not loaded.</p></div>
+          </div>
           <div class="gp-card">
             <div class="gp-card-head"><h3>Saved analyses</h3>
               <span class="meta">Open a report, or jump to the filtered order table</span></div>
@@ -1327,12 +1333,21 @@ import { toCsvText } from './shared/adapters/shopifyCsv.js';
 import { unmatchedShippingOrders, exportPeriodOf, shippingCostBridge, filterUnmatched, unmatchedCsv, UNMATCHED_REASON, EXCLUDED_PENDING_MATCH } from './js/unmatchedShipping.js';
 import { catalogRevOf } from './shared/catalog.js';
 import { initScenarioView, renderScenarioView } from './js/scenarioUI.js';
+import { automationStatus } from './js/workerClient.js';
+import { renderAutomationStatus, automationStatusError } from './js/automationStatus.js';
 import { SCREENS, initTheme, toggleTheme, initRouter, showScreen, currentScreen,
          buildAlerts, renderAlerts, renderStoreBars, renderChannelDonut,
          renderShipping as renderShippingScreen, renderReports } from './js/shell.js';
 
 window.toggleTheme = toggleTheme;
-window.gotoScreen  = (id) => showScreen(id);
+window.gotoScreen  = (id) => { showScreen(id); if (id === 'reports') window.loadAutomationStatus(); };
+// C7: weekly automation status from the Worker (same-origin proxy; codes and timestamps only).
+window.loadAutomationStatus = async () => {
+  const el = document.getElementById('automation-status');
+  if (!el) return;
+  try { el.innerHTML = renderAutomationStatus(await automationStatus()); }
+  catch (e) { el.textContent = automationStatusError(e); }
+};
 initTheme();
 
 // ─── MCG Extra Costs — proxied via server-side edge function ──────

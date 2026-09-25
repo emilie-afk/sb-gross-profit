@@ -335,13 +335,16 @@ test('no staff email, customer name, address or buyer note is stored anywhere in
 // ─── 1. Scheduled compute: not before Monday 15:30, only when every source is ready ──
 
 test('a scheduled compute waits for its slot and for every required source, and runs once per week', async () => {
-  const { env } = await loaded(20);
+  const { env } = await loaded(20, { TEST_HOOKS_ENABLED: 'true' });
   const early = await admin(env, 'POST', '/v1/admin/runs', { weekStart: '2099-01-05', trigger: 'schedule' });
   assert.deepEqual([early.status, early.json.error], [409, 'too_early']);
 
-  const notReady = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule' });
-  assert.deepEqual([notReady.status, notReady.json.error], [409, 'sources_not_ready']);
-  assert.deepEqual(notReady.json.detail.missing, ['shopify_updates:missing']);
+  // C7: missing sources → the week's one run waits (no snapshot), it is not refused.
+  const notReady = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', at: '2026-09-21T08:30:00Z' });
+  assert.deepEqual([notReady.status, notReady.json.state], [200, 'waiting_for_sources']);
+  assert.equal(notReady.json.nextRetryAt, '2026-09-21T08:45:00.000Z');
+  assert.deepEqual(notReady.json.missing, ['shopify_updates:missing']);
+  assert.equal((await env.DB.prepare('SELECT COUNT(*) n FROM snapshot').first()).n, 0);
 
   assert.equal((await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [], weekStart: WEEK }))).status, 200);
   const ready = (await admin(env, 'GET', `/v1/admin/readiness?weekStart=${WEEK}`)).json;
@@ -351,6 +354,7 @@ test('a scheduled compute waits for its slot and for every required source, and 
 
   const r1 = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: 'make:S4' });
   assert.equal(r1.status, 200, JSON.stringify(r1.json));
+  assert.equal(r1.json.runId, notReady.json.runId, 'the waiting run resumes in place');
   const r2 = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: 'make:S4' });
   assert.deepEqual([r2.json.runId, r2.json.existing], [r1.json.runId, true]);        // a Make retry does not double-compute
 

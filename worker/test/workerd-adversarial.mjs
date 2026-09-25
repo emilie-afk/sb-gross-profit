@@ -18,6 +18,9 @@
  *   F  admin recompute vs a stalled scheduled owner      → recompute takes the claim; stalled owner writes nothing
  *   G  run changed underneath the owner (claim unchanged) → final transaction refused
  *   E  takeover races the commit (both orders, repeated) → exactly one owner completes; D1 consistent
+ *   H  (C7) Cron ticks + scheduled calls + collector uploads in parallel → one cycle/run/snapshot
+ *   I  (C7) an upload, a tick and a scheduled call while the owner commits → owner completes; one snapshot
+ *   J  (C7) source_timeout, then a late upload resumes the same run via the Cron tick
  * Synthetic data only.
  */
 import { Miniflare } from 'miniflare';
@@ -54,7 +57,7 @@ for (let i = 0; i < 30; i++) {
 }
 
 /** A fresh Worker + real D1 whose hook calls `ctx.on(point, data)`. */
-async function world() {
+async function world({ partial = false } = {}) {
   const ctx = { on: async () => {} };
   const mf = new Miniflare({ modules: true, script: bundle, compatibilityDate: '2024-09-01', d1Databases: ['DB'],
     serviceBindings: { TEST_HOOK: async req => { await ctx.on(new URL(req.url).pathname.slice(1), await req.json()); return new Response('ok'); } },
@@ -74,17 +77,24 @@ async function world() {
   const rf = (await call('POST', '/v1/admin/catalog-refresh', { body: { weekStart: W }, headers: A })).json.refreshId;
   await call('POST', '/v1/ingest/catalog', { body: { ...catalog, meta: { refreshId: rf } }, headers: I });
   await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'week', nodes, weekStart: W }), headers: I });
-  await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'updated_since', nodes: [], weekStart: W }), headers: I });
   await call('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: ship, weekStart: W }, headers: I });
   // C3: the expense source (every order has a row, so coverage is complete).
-  const rs = sanitizeShippingCostReport(nodes.map((n, i) => reportRow({ date: `2026-09-${15 + (i % 5)}`, order: n.name.slice(1), cost: '5.10' })));
-  const rp = parseShippingCostReport(rs.rows, { requestedFrom: W, requestedTo: '2026-09-20' });
-  const rep = await call('POST', '/v1/ingest/shipping-cost-report', { body: { format: 'csv_text', text: toCsvText(rs.rows, rs.columns), requestedFrom: W, requestedTo: '2026-09-20',
-    rowCount: rp.rowCount, shippingCostTotal: rp.shippingCostCents / 100, exportedAt: '2026-09-21T15:00:00Z' }, headers: I });
-  await call('POST', `/v1/admin/shipping-cost/versions/${rep.json.versionId}/accept`, { body: { reason: 'adversarial test only' }, headers: A });
+  const updates = () => call('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'updated_since', nodes: [], weekStart: W }), headers: I });
+  const report = async () => {
+    const rs = sanitizeShippingCostReport(nodes.map((n, i) => reportRow({ date: `2026-09-${15 + (i % 5)}`, order: n.name.slice(1), cost: '5.10' })));
+    const rp = parseShippingCostReport(rs.rows, { requestedFrom: W, requestedTo: '2026-09-20' });
+    const rep = await call('POST', '/v1/ingest/shipping-cost-report', { body: { format: 'csv_text', text: toCsvText(rs.rows, rs.columns), requestedFrom: W, requestedTo: '2026-09-20',
+      rowCount: rp.rowCount, shippingCostTotal: rp.shippingCostCents / 100, exportedAt: '2026-09-21T15:00:00Z' }, headers: I });
+    if (rep.json?.status === 'pending_review') await call('POST', `/v1/admin/shipping-cost/versions/${rep.json.versionId}/accept`, { body: { reason: 'adversarial test only' }, headers: A });
+    return rep;
+  };
+  // C7: `partial` leaves the updated-order scan and the report for the test to deliver mid-retry.
+  if (!partial) { await updates(); await report(); }
   // Test-only stand-in for the future source-verification checklist, so runs reach `validated`.
   await db.prepare("UPDATE settings SET value = 'true' WHERE key = 'shipping_cost_report_source_verified'").run();
-  const schedule = label => call('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label }, headers: A });
+  const schedule = (label, at) => call('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label, ...(at ? { at } : {}) }, headers: A });
+  const fetcher = await mf.getWorker();
+  const tick = at => fetcher.scheduled({ scheduledTime: new Date(at) });
   const q = async (sql, ...p) => (await db.prepare(sql).bind(...p).all()).results;
   const digest = async () => JSON.stringify(await Promise.all(['reporting_run', 'run_transition', 'snapshot', 'snapshot_totals', 'snapshot_order', 'schedule_cycle']
     .map(t => q(`SELECT * FROM ${t} ORDER BY 1, 2`))));
@@ -97,7 +107,7 @@ async function world() {
              orphans: snaps.filter(s => s.snapshot_id !== runs[0]?.snapshot_id).length, dupSeq,
              contiguous: tr.every((t, i) => t.seq === i), state: runs[0]?.state, stuck: runs.filter(r => ['created', 'computing'].includes(r.state)).length };
   };
-  return { mf, db, ctx, schedule, digest, consistent, q };
+  return { mf, db, ctx, schedule, digest, consistent, q, updates, report, tick };
 }
 const expectDone = (c, label) => assert.deepEqual([c.cycles, c.runs, c.snapshots, c.orphans, c.dupSeq, c.contiguous, c.state, c.stuck],
   [1, 1, 1, 0, 0, true, 'validated', 0], `${label}: ${JSON.stringify(c)}`);
@@ -230,4 +240,58 @@ for (const variant of ['owner_commits_first', 'takeover_claims_first']) {
   }
 }
 log('E  takeover racing the commit, 10 runs: exactly one owner completed each time; D1 consistent;', JSON.stringify(tally));
+// H (C7) ────────────────────────────────────────────────────────────────────
+// Retries (Cron ticks and scheduled admin calls) racing collector uploads on real D1.
+for (let i = 0; i < 3; i++) {
+  const w = await world({ partial: true });
+  const first = await w.schedule('cron:H', '2026-09-21T08:30:00Z');
+  assert.deepEqual([first.status, first.json.state], [200, 'waiting_for_sources'], JSON.stringify(first.json));
+  const burst = [];
+  for (let k = 0; k < 6; k++) burst.push(w.tick('2026-09-21T08:45:00Z'));
+  for (let k = 0; k < 4; k++) burst.push(w.schedule(`cron:H${k}`, '2026-09-21T08:45:00Z'));
+  burst.push(w.updates());
+  burst.push(w.report());
+  await Promise.all(burst);
+  for (let k = 0; k < 3; k++) await Promise.all([w.tick('2026-09-21T09:00:00Z'), w.tick('2026-09-21T09:00:00Z'), w.schedule('cron:Hx', '2026-09-21T09:00:00Z')]);
+  // The report may be computed on while its acceptance is still in flight (pending_review satisfies arrival),
+  // so the one draft is validated or gate-blocked; either way there is exactly one of everything.
+  const c = await w.consistent();
+  assert.deepEqual([c.cycles, c.runs, c.snapshots, c.orphans, c.dupSeq, c.contiguous, c.stuck], [1, 1, 1, 0, 0, true, 0], `H#${i}: ${JSON.stringify(c)}`);
+  assert.ok(['validated', 'blocked'].includes(c.state), `H#${i}: ${c.state}`);
+  assert.equal((await w.q('SELECT COUNT(*) AS n FROM automation_lease'))[0].n, 0);
+  const tr = (await w.q("SELECT to_state FROM run_transition ORDER BY seq")).map(t => t.to_state);
+  assert.deepEqual(tr.slice(0, 3), ['created', 'waiting_for_sources', 'computing']);
+  await w.mf.dispose();
+}
+log('H  ticks, scheduled calls and uploads in parallel (3 runs): one cycle, one run, one snapshot; waiting → computing → draft; leases released');
+// I (C7): an upload lands while the owner is inside the final transaction window
+{
+  const w = await world({ partial: true });
+  await w.schedule('cron:I', '2026-09-21T08:30:00Z');
+  await w.updates();
+  let inner = null;
+  w.ctx.on = async point => { if (point !== 'schedule:before_final_txn' || inner) return;
+    inner = Promise.all([w.report(), w.tick('2026-09-21T09:00:00Z'), w.schedule('cron:I-racer', '2026-09-21T09:00:00Z')]);
+    await inner; };
+  await w.report();                                      // makes the week ready
+  const r = await w.schedule('cron:I-owner', '2026-09-21T08:45:00Z');
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  expectDone(await w.consistent(), 'I');
+  log('I  report re-sent + tick + scheduled call while the owner commits: owner completed; racers saw it in progress; one snapshot');
+  await w.mf.dispose();
+}
+// J (C7): source_timeout on real D1, then a late valid upload resumes the same run
+{
+  const w = await world({ partial: true });
+  const t = await w.schedule('cron:J', '2026-09-22T08:30:00Z');
+  assert.equal(t.json.state, 'source_timeout');
+  const runId = t.json.runId;
+  assert.equal((await w.q('SELECT COUNT(*) AS n FROM snapshot'))[0].n, 0);
+  await w.updates(); await w.report();
+  await w.tick('2026-09-23T03:00:00Z');
+  expectDone(await w.consistent(), 'J');
+  assert.equal((await w.q("SELECT run_id FROM reporting_run WHERE trigger = 'schedule'"))[0].run_id, runId);
+  log('J  source_timeout on real D1; a later upload resumed the SAME run through the cron tick into one validated draft');
+  await w.mf.dispose();
+}
 console.log('WORKERD ADVERSARIAL: PASS');

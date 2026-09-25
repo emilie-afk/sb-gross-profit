@@ -123,3 +123,14 @@ export function validateSetting(key, value) {
   if (key === 'insurance_treatment' && value !== 'awaiting_confirmation') return 'insurance_treatment is locked at awaiting_confirmation until the Insurance Cost non-duplication test is complete';
   return null;
 }
+
+/**
+ * C7: a successful upload or decision for these weeks: a waiting or timed-out
+ * scheduled cycle for them is retried on the next tick (never substituted).
+ */
+export async function markCyclesChanged(db, weeks) {
+  const list = [...new Set((weeks || []).filter(w => /^\d{4}-\d{2}-\d{2}$/.test(String(w))))];
+  if (!list.length) return;
+  await db.prepare('UPDATE schedule_cycle SET sources_changed_at = ?2 WHERE week_start IN (SELECT value FROM json_each(?1))')
+    .bind(JSON.stringify(list), nowIso()).run();
+}

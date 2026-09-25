@@ -26,7 +26,7 @@
  * weeks affected by this cycle get draft revisions (admin reviseTouchedWeeks).
  */
 import { ApiError, json, readJson, WEEK_RE } from './http.js';
-import { newId, nowIso, getSettings } from './db.js';
+import { newId, nowIso, getSettings, markCyclesChanged } from './db.js';
 import { saveOrders, saveShipments, saveHpd, saveCatalog, latestAcceptedCatalogMeta } from './store.js';
 import { normalizeShipStationRows, SHIPSTATION_MAPPING_EXPORT_COLUMNS } from '../../shared/adapters/shipstation.js';
 import { normalizeHpdRows } from '../../shared/adapters/hpd.js';
@@ -70,6 +70,8 @@ export async function withRun(env, source, body, fn, { mode: forcedMode, onSucce
   try {
     const r = await fn(runId);
     await finishRun(env.DB, runId, { status: 'ok', ...r });
+    // C7: the cycle of this week (and any week whose records changed) retries on the next tick.
+    await markCyclesChanged(env.DB, [weekStart, ...Object.keys(r.weeksTouched || {})]);
     const extra = onSuccess ? await onSuccess(runId, r, weekStart) : {};
     return json({ runId, source, weekStart, mode, rowsSeen: r.rowsSeen, rowsWritten: r.written, duplicates: r.duplicates,
                   weeksTouched: r.weeksTouched || {}, ...(r.response || {}), ...extra });
@@ -260,5 +262,9 @@ export async function resolveRefresh(db, refreshId, { rev, accepted, reasons }) 
   const status = accepted ? 'fulfilled' : 'rejected';
   const u = await db.prepare('UPDATE catalog_refresh SET status = ?2, catalog_rev = ?3, resolved_at = ?4, detail = ?5 WHERE refresh_id = ?1 AND status = ?6')
     .bind(refreshId, status, accepted ? rev : null, nowIso(), JSON.stringify({ reasons: reasons || [], candidateRev: rev }), 'pending').run();
+  if (u.meta.changes === 1) {
+    const w = await db.prepare('SELECT week_start FROM catalog_refresh WHERE refresh_id = ?1').bind(refreshId).first();
+    await markCyclesChanged(db, [w?.week_start]);
+  }
   return { refreshId, status: u.meta.changes === 1 ? status : 'already_resolved' };
 }

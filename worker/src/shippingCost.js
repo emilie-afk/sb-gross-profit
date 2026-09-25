@@ -28,7 +28,7 @@
  * cents. No row, filename or value is ever logged.
  */
 import { ApiError, json, readJson } from './http.js';
-import { newId, nowIso, getSettings, jsonInsert, atomic, selectIn } from './db.js';
+import { newId, nowIso, getSettings, jsonInsert, atomic, selectIn, markCyclesChanged } from './db.js';
 import { actorFor, actorJson } from './actor.js';
 import { parseCSV } from '../../shared/calculator.js';
 import { addDays, contentHash, weekStartOf } from '../../shared/normalized.js';
@@ -135,7 +135,7 @@ export function autoAcceptable(cmp, reviewFlags) {
  * ingest run (source 'shipping_cost_report') of the cycle week that ends the
  * report's range, so /v1/admin/revise-touched drafts revisions for them.
  */
-async function recordTouchedWeeks(db, beforeTotals, cycleEnd) {
+async function recordTouchedWeeks(db, beforeTotals, cycleEnd, sourceSha256 = null) {
   const afterTotals = await effectiveOrderTotals(db);
   const changed = [];
   for (const k of new Set([...beforeTotals.keys(), ...afterTotals.keys()])) {
@@ -148,7 +148,8 @@ async function recordTouchedWeeks(db, beforeTotals, cycleEnd) {
   const at = nowIso();
   await db.prepare(`INSERT INTO ingest_run (run_id, source, week_start, started_at, finished_at, status, rows_seen, rows_written, duplicates, diagnostics, weeks_touched)
     VALUES (?1, 'shipping_cost_report', ?2, ?3, ?3, 'ok', ?4, ?5, 0, ?6, ?7)`)
-    .bind(newId('ing'), weekStartOf(cycleEnd), at, changed.length, changed.length, JSON.stringify({ changedOrders: changed.length }), JSON.stringify(weeks)).run();
+    .bind(newId('ing'), weekStartOf(cycleEnd), at, changed.length, changed.length, JSON.stringify({ changedOrders: changed.length, ...(sourceSha256 ? { sanitizedSha256: sourceSha256 } : {}) }), JSON.stringify(weeks)).run();
+  await markCyclesChanged(db, [...Object.keys(weeks), weekStartOf(cycleEnd)]);
   return { changedOrders: changed.length, weeksTouched: weeks };
 }
 
@@ -174,7 +175,7 @@ async function activate(db, version, actor, reason) {
   ];
   try { await atomic(db, stmts); }
   catch (e) { if (isGuardAbort(e)) throw new ApiError(409, 'activation_conflict', 'Another activation happened first; nothing was written'); throw e; }
-  const touched = await recordTouchedWeeks(db, totalsBefore, version.requested_to);
+  const touched = await recordTouchedWeeks(db, totalsBefore, version.requested_to, version.sanitized_sha256);
   return { activationId, segments: after, touched };
 }
 
@@ -232,6 +233,7 @@ export async function ingestShippingCostReport(request, env) {
     const v = await env.DB.prepare('SELECT * FROM shipping_cost_source_version WHERE version_id = ?1').bind(versionId).first();
     activation = await activate(env.DB, v, { cls: 'worker', label: 'shipping-cost:auto-accept' }, 'overlap reconciles exactly; no review flags');
   }
+  await markCyclesChanged(env.DB, weeksInRange(body.requestedFrom, body.requestedTo));
   return json({ sourceStatus: 'source_received', sourceHash: sha, versionId, status: auto ? 'accepted' : 'pending_review',
     rowCount: parsed.rowCount, shippingCostTotal: fromCents(parsed.shippingCostCents), orderCount: aggs.length,
     reviewFlags: parsed.reviewFlags, comparison: cmp, activationId: activation?.activationId || null, ...actorJson(actor) });
@@ -291,7 +293,8 @@ export async function rollbackActivation(request, env, activationId) {
       WHERE activation_id = ?1`).bind(activationId, at, actor.cls, actor.label, reason),
     env.DB.prepare(`UPDATE shipping_cost_source_version SET status = 'rolled_back' WHERE version_id = ?1`).bind(latest.version_id),
   ]);
-  const touched = await recordTouchedWeeks(env.DB, totalsBefore, latest.range_to);
+  const rolled = await env.DB.prepare('SELECT sanitized_sha256 FROM shipping_cost_source_version WHERE version_id = ?1').bind(latest.version_id).first();
+  const touched = await recordTouchedWeeks(env.DB, totalsBefore, latest.range_to, rolled?.sanitized_sha256 || null);
   return json({ activationId, rolledBack: true, segments: prior, touched });
 }
 export async function getSegments(env) { return json({ segments: await activeSegments(env.DB) }); }
@@ -300,4 +303,12 @@ export async function getEffectiveSummary(env) {
   let cents = 0, rows = 0, multi = 0;
   for (const a of t.values()) { cents += a.costCents; rows += a.rowCount; if (a.rowCount > 1) multi++; }
   return json({ orders: t.size, rows, ordersWithMultipleRows: multi, shippingCostTotal: fromCents(cents), segments: await activeSegments(env.DB) });
+}
+
+/** Monday week starts overlapping [from, to]. */
+function weeksInRange(from, to) {
+  const out = [];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(from)) || !/^\d{4}-\d{2}-\d{2}$/.test(String(to))) return out;
+  for (let w = weekStartOf(from); w <= to && out.length < 60; w = addDays(w, 7)) out.push(w);
+  return out;
 }
