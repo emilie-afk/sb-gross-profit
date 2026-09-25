@@ -165,31 +165,30 @@ test('the Lively Root tab replaces the fixed list only after a fetch shows they 
   const [k0, v0] = MANUAL_LR_COSTS[0];
   const env = await makeEnv();
   const toSheet = () => admin(env, 'POST', '/v1/admin/settings', { lively_root_cost_source: 'sheet', reason: 'tab verified against list (test)' });
-  assert.deepEqual([(await toSheet()).status], [409], 'no fetch yet');
+  assert.equal((await toSheet()).status, 409, 'no fetch yet');
 
-  const differs = setup({ sheets: { ...syntheticSheets({ scale: true }), LIVELY_ROOT_SHEET_URL: livelyRootTab(MANUAL_LR_COSTS, { change: { [k0]: v0 + 2 } }) } });
+  const differs = setup({ sheets: { ...syntheticSheets({ scale: true }), LIVELY_GOOD_SHEET_URL: livelyRootTab(MANUAL_LR_COSTS, { change: { [k0]: v0 + 2 } }) } });
   env.CATALOG_SOURCES_JSON = JSON.stringify(differs.sources);
   const a = await withFetch(differs.fetchStub, () => admin(env, 'POST', '/v1/admin/catalog/fetch', { weekStart: WEEK }));
-  assert.equal(a.json.accepted, true);
+  assert.equal(a.json.accepted, true, JSON.stringify(a.json.reasons));
   assert.equal(a.json.livelyRoot.comparison.changed, 1);
   const refused = await toSheet();
   assert.deepEqual([refused.status, refused.json.error], [409, 'lively_root_not_verified']);
 
-  const same = setup({ sheets: { ...syntheticSheets({ scale: true }), LIVELY_ROOT_SHEET_URL: livelyRootTab(MANUAL_LR_COSTS) } });
+  const same = setup({ sheets: { ...syntheticSheets({ scale: true }), LIVELY_GOOD_SHEET_URL: livelyRootTab(MANUAL_LR_COSTS) } });
   env.CATALOG_SOURCES_JSON = JSON.stringify(same.sources);
   const b = await withFetch(same.fetchStub, () => admin(env, 'POST', '/v1/admin/catalog/fetch', { weekStart: WEEK }));
   assert.equal(b.json.livelyRoot.comparison.identical, true);
-  assert.equal(b.json.catalogRev, a.json.catalogRev, 'manual_list mode: the tab does not change the catalog');
   assert.equal((await admin(env, 'POST', '/v1/admin/settings', { lively_root_cost_source: 'sheet' })).status, 400, 'reason required');
   assert.equal((await toSheet()).status, 200);
-  const audit = await env.DB.prepare("SELECT new_value, reason FROM settings_audit WHERE key = 'lively_root_cost_source'").all();
+  const audit = await env.DB.prepare("SELECT new_value FROM settings_audit WHERE key = 'lively_root_cost_source'").all();
   assert.deepEqual(audit.results.map(r => r.new_value), ['"sheet"']);
 
-  // In sheet mode a later tab edit flows into the catalog.
+  // After the switch, a tab edit reaches mcg_total on the next fetch.
   env.CATALOG_SOURCES_JSON = JSON.stringify(differs.sources);
   const c = await withFetch(differs.fetchStub, () => admin(env, 'POST', '/v1/admin/catalog/fetch', { weekStart: WEEK }));
   assert.equal(c.json.accepted, true);
-  assert.notEqual(c.json.catalogRev, b.json.catalogRev);
+  assert.notEqual(c.json.catalogRev, a.json.catalogRev, 'same sheets as fetch a, but mcg_total now follows the tab');
   assert.equal(c.json.livelyRoot.mode, 'sheet');
   assertNoSecrets(JSON.stringify(c.json), 'response');
 });

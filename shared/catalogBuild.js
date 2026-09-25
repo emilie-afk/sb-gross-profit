@@ -27,8 +27,6 @@ export const URL_SOURCES = Object.freeze([
   'MCG_SHEET_URL', 'MCG_POTS_SHEET_URL', 'SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL',
   'AS_SHEET_URL', 'L2G_SHEET_URL', 'LIVELY_GOOD_SHEET_URL', 'CALATHEA_COLLECTIVE_SHEET_URL',
   'SURFSIDE_ARRANGEMENT_SHEET_URL', 'LINDAMAKES_SHEET_URL', 'HP_SHEET_URL', 'MCG_EXTRA_SHEET_URL',
-  // Not read by build.py: the Products Master "Lively Root" tab (see parseLivelyRootTab).
-  'LIVELY_ROOT_SHEET_URL',
 ]);
 export const LIVELY_ROOT_MODES = Object.freeze(['manual_list', 'sheet']);
 export const JSON_SOURCES = Object.freeze(['PRODUCT_COSTS_JSON1', 'PRODUCT_COSTS_JSON2', 'SKU_WEIGHTS_JSON']);
@@ -183,10 +181,14 @@ function parseAliasRows(rawRows) {
   return rawRows.slice(idx + 1).map(r => pyZipDict(header, r));
 }
 
-// ─── Lively Root tab (C6 addition; build.py uses MANUAL_LR_COSTS instead) ──────
-// build.py: "Products Master sheet > 'Lively Root' tab. Only rows where col Q
-// (Listing Shopify) is CHECKED → col E (LR SKU), col G (LR cost)."
-const LR_SPEC = { headerRequired: ['sku', 'cost'], sku: ['LR SKU', 'Lively Root SKU', 'SKU'], cost: ['LR Cost', 'Lively Root Cost', 'Cost'], active: ['Listing Shopify'] };
+// ─── Lively Root tab ──────────────────────────────────────────────────────────
+// The Products Master tab that build.py imports as vendor "Lively Good"
+// (LIVELY_GOOD_SHEET_URL; js/vendorCosts.js aliases "Lively Root" to it) is the
+// Lively Root tab: its first cell reads "Lively Root" and build.py describes it
+// as "only rows where col Q (Listing Shopify) is CHECKED → col E (LR SKU),
+// col G (LR cost)". build.py ALSO writes a hand-copied MANUAL_LR_COSTS list into
+// mcg_total, which the engine consults first. Each fetch compares the two.
+const LR_SPEC = { headerRequired: ['sku', 'cost per item'], sku: ['SKU'], cost: ['Cost per item'], active: ['Listing Shopify'] };
 const LR_EXPECTED_COLUMNS = Object.freeze({ sku: 'E', cost: 'G', listed: 'Q' });
 const colLetter = i => (i === null ? null : (i >= 26 ? String.fromCharCode(64 + Math.floor(i / 26)) : '') + String.fromCharCode(65 + (i % 26)));
 
@@ -374,12 +376,12 @@ export function buildCatalogTables(src, { livelyRootSource = 'manual_list' } = {
   for (const [k, v] of as) product.set(k, v);
   for (const [k, v] of l2g) product.set(k, v);
   for (const [sku, cost] of MANUAL_MCG_COSTS) { if (!mcg.has(sku)) mcg.set(sku, cost); if (!mcg.has(upper(sku))) mcg.set(upper(sku), cost); }
-  // Lively Root: build.py's fixed list, unless the operator switched to the tab
-  // (lively_root_cost_source = 'sheet'). The tab, when configured, is always
-  // parsed and compared so the switch can be made on evidence.
+  // Lively Root in mcg_total: build.py's fixed list, unless the operator
+  // switched to the tab (lively_root_cost_source = 'sheet'). The tab (the
+  // "Lively Good" source) is always parsed and compared so the switch rests on evidence.
   let lrTab = null;
-  if (has(src.LIVELY_ROOT_SHEET_URL)) {
-    lrTab = parseLivelyRootTab(pyCsvRows(src.LIVELY_ROOT_SHEET_URL));
+  if (has(src.LIVELY_GOOD_SHEET_URL)) {
+    lrTab = parseLivelyRootTab(pyCsvRows(src.LIVELY_GOOD_SHEET_URL));
     report.livelyRoot = { mode: livelyRootSource, columns: lrTab.columns, stats: lrTab.stats, errors: lrTab.errors,
                           comparison: lrTab.costs ? compareLivelyRoot(lrTab.costs) : null };
   } else report.livelyRoot = { mode: livelyRootSource, configured: false };

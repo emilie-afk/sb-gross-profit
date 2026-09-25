@@ -456,14 +456,15 @@ Keys are the build.py environment names: `MCG_SHEET_URL`, `MCG_POTS_SHEET_URL`,
 fallbacks `PRODUCT_COSTS_JSON1/2`, `SKU_WEIGHTS_JSON`. Copy the values from the
 Netlify environment; leave out any that are unset there.
 
-`LIVELY_ROOT_SHEET_URL` (not a Netlify variable) is the CSV export of the
-Products Master "Lively Root" tab: LR SKU in column E, LR cost in G, the
-Listing Shopify checkbox in Q. Every fetch compares the listed rows with
-build.py's fixed `MANUAL_LR_COSTS` list (counts only). The fixed list stays the
-cost source until an administrator sets `lively_root_cost_source` to `sheet`
-(audited, reason required), which is refused unless the latest Worker fetch
-showed the tab and the list identical. After the switch, tab edits reach the
-catalog on the next fetch.
+Lively Root: the `LIVELY_GOOD_SHEET_URL` tab is the Products Master "Lively
+Root" tab (the engine aliases vendor "Lively Root" to catalog key "Lively
+Good"): SKU in column E, Cost per item in G, the Listing Shopify checkbox in
+Q. build.py also writes a hand-copied `MANUAL_LR_COSTS` list into mcg_total,
+which the engine consults first. Every fetch compares the tab's listed rows
+with that list (counts only). The list stays in mcg_total until an
+administrator sets `lively_root_cost_source` to `sheet` (audited, reason
+required), which is refused unless the latest Worker fetch showed the tab and
+the list identical. After the switch, tab edits reach mcg_total on the next fetch.
 
 `POST /v1/admin/catalog/fetch { weekStart }` registers a refresh and answers it;
 `{ refreshId }` answers one existing pending refresh. The tables are built by

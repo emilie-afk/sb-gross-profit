@@ -52,14 +52,17 @@ export function syntheticSheets({ scale = false, vendorScale = 1 } = {}) {
 }
 
 /**
- * A synthetic Products Master "Lively Root" tab: LR SKU in column E, LR cost in
- * G, the Listing Shopify checkbox in Q. By default the listed rows are exactly
- * build.py's MANUAL_LR_COSTS; `change` edits costs, `extra` adds listed rows.
+ * A synthetic Products Master "Lively Root" tab (the LIVELY_GOOD_SHEET_URL
+ * source), laid out like the real one: group headers on row 1 ("Lively Root" at
+ * A, "Succulents Box" at I, "Listing Shopify" at Q), column headers on row 2
+ * (SKU at E, Cost per item at G, repeated for the Succulents Box block).
+ * By default the listed rows are exactly build.py's MANUAL_LR_COSTS.
  */
 export function livelyRootTab(manualEntries, { change = {}, extra = [], drop = [] } = {}) {
   const row = (cells) => { const r = Array(17).fill(''); for (const [i, v] of Object.entries(cells)) r[i] = v; return r.join(','); };
-  const lines = [row({ 0: 'Lively Root products' }), row({ 0: 'Product', 4: 'LR SKU', 5: 'LR Price', 6: 'LR Cost', 16: 'Listing Shopify' })];
-  for (const [sku, cost] of manualEntries) if (!drop.includes(sku)) lines.push(row({ 0: 'Synthetic plant', 4: sku, 5: '99.00', 6: (change[sku] ?? cost).toFixed(2), 16: 'TRUE' }));
+  const hdr = ['Title', 'Size', 'Pot', 'Pot Color', 'SKU', 'Retail Price', 'Cost per item', 'Est. Profit'];
+  const lines = [row({ 0: 'Lively Root', 8: 'Succulents Box', 16: 'Listing Shopify' }), row(Object.fromEntries([...hdr, ...hdr].map((h, i) => [i, h])))];
+  for (const [sku, cost] of manualEntries) if (!drop.includes(sku)) lines.push(row({ 0: 'Synthetic plant', 4: sku, 5: '99.00', 6: (change[sku] ?? cost).toFixed(2), 12: `SB-${sku}`, 14: '120.00', 16: 'TRUE' }));
   for (const [sku, cost] of extra) lines.push(row({ 0: 'Synthetic extra', 4: sku, 6: cost.toFixed(2), 16: 'TRUE' }));
   lines.push(row({ 0: 'Not listed', 4: 'PL_SYN_NOTLISTED', 6: '12.00', 16: 'FALSE' }));
   return lines.join('\n') + '\n';
