@@ -143,8 +143,9 @@ export async function refreshCatalog(env, { refreshId = null, fetchImpl = fetch 
       return { rowsSeen: 0, written: 0, duplicates: 0, diagnostics: { accepted: false, reasons, refresh, provenance },
                response: { accepted: false, catalogRev: null, reasons, refresh, provenance } };
     }
+    const settings = await getSettings(env.DB);
     let built;
-    try { built = buildCatalogTables(texts); }
+    try { built = buildCatalogTables(texts, { livelyRootSource: settings.lively_root_cost_source }); }
     catch (e) {
       const reasons = [`parse_failed: ${e.code || 'error'}`];
       const refresh = await resolveRefresh(env.DB, refreshId, { rev: null, accepted: false, reasons });
@@ -152,18 +153,17 @@ export async function refreshCatalog(env, { refreshId = null, fetchImpl = fetch 
                response: { accepted: false, catalogRev: null, reasons, refresh, provenance } };
     }
     const candidate = { tables: built.tables, mcgExtra: built.mcgExtra, overrides: {} };
-    const settings = await getSettings(env.DB);
     const prev = await latestAcceptedCatalogMeta(env.DB);
     const previous = prev ? { tableCounts: JSON.parse(prev.table_counts), vendorCounts: JSON.parse(prev.vendor_counts) } : null;
     const validation = validateCatalog(candidate, previous, { shrinkTolerance: Number(settings.catalog_shrink_tolerance) });
     const rev = await catalogRevOf(candidate);
-    const meta = { fetchedAt, provenance, vendorStats: built.report.vendorStats, sourceCounts: built.report.sources, warnings: built.report.warnings.slice(0, 50) };
+    const meta = { fetchedAt, provenance, livelyRoot: built.report.livelyRoot, vendorStats: built.report.vendorStats, sourceCounts: built.report.sources, warnings: built.report.warnings.slice(0, 50) };
     const saved = await saveCatalog(env.DB, { rev, candidate, validation, source: 'worker_fetch', meta });
     const accepted = saved.duplicate ? saved.status === 'accepted' : validation.accepted;
     const refresh = await resolveRefresh(env.DB, refreshId, { rev, accepted, reasons: validation.reasons });
     return { rowsSeen: 1, written: saved.duplicate ? 0 : 1, duplicates: saved.duplicate ? 1 : 0,
-             diagnostics: { catalogRev: rev, accepted, reasons: validation.reasons, refresh, provenance },
-             response: { catalogRev: rev, accepted, status: saved.status, reasons: validation.reasons, refresh, provenance,
+             diagnostics: { kind: 'worker_fetch', catalogRev: rev, accepted, reasons: validation.reasons, refresh, provenance, livelyRoot: built.report.livelyRoot },
+             response: { catalogRev: rev, accepted, status: saved.status, reasons: validation.reasons, refresh, provenance, livelyRoot: built.report.livelyRoot,
                          counts: validation.counts, activeCatalogRev: accepted ? rev : (prev?.catalog_rev || null) } };
   });
 }

@@ -220,6 +220,16 @@ export async function settings(request, env) {
     throw new ApiError(400, 'bad_payload', `Changing ${needReason.join(', ')} needs a stated reason`);
   }
   const before = await getSettings(env.DB);
+  // The Lively Root tab replaces the fixed list only on evidence: the latest
+  // Worker catalog fetch must show the tab and the list are identical.
+  if (changes.lively_root_cost_source === 'sheet' && before.lively_root_cost_source !== 'sheet') {
+    // Evidence comes from the fetch run itself (a re-fetch of unchanged content
+    // reuses the catalog row, so its meta would be stale).
+    const last = await env.DB.prepare(`SELECT diagnostics FROM ingest_run WHERE source = 'catalog' AND status = 'ok'
+      AND json_extract(diagnostics, '$.kind') = 'worker_fetch' ORDER BY started_at DESC, rowid DESC LIMIT 1`).first();
+    let cmp = null; try { cmp = JSON.parse(last?.diagnostics || '{}').livelyRoot?.comparison || null; } catch { cmp = null; }
+    if (!cmp?.identical) throw new ApiError(409, 'lively_root_not_verified', 'The latest catalog fetch does not show the Lively Root tab matching the fixed list', { comparison: cmp });
+  }
   const why = reason ? String(reason).trim() : null;
   const writes = Object.entries(changes).map(([k, v]) => [k, v, why]);
   // A new store time zone is unconfirmed until confirmed IN THE SAME operation.

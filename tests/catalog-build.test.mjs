@@ -103,3 +103,27 @@ test('the parity tool refuses real-looking source files inside the repository', 
   fs.writeFileSync(f, JSON.stringify({ MCG_SHEET_URL: 'build.py' }));
   try { await assert.rejects(runParity(f), /inside the repository/); } finally { fs.rmSync(f); }
 });
+
+test('Lively Root tab: parsed from columns E/G/Q, compared with the fixed list, used only in sheet mode', async () => {
+  const { MANUAL_LR_COSTS } = await import('../shared/catalogManual.js');
+  const { livelyRootTab } = await import('./fixtures-catalog.mjs');
+  const same = { ...syntheticSheets(), LIVELY_ROOT_SHEET_URL: livelyRootTab(MANUAL_LR_COSTS) };
+  const a = buildCatalogTables(same);
+  assert.deepEqual(a.report.livelyRoot.columns, { sku: 'E', cost: 'G', listed: 'Q' });
+  assert.equal(a.report.livelyRoot.comparison.identical, true);
+  assert.equal(a.report.livelyRoot.stats.notListed, 1);
+  const noTab = buildCatalogTables(syntheticSheets());
+  assert.deepEqual(a.tables, noTab.tables, 'manual_list mode ignores the tab: build.py parity holds');
+  assert.deepEqual(buildCatalogTables(same, { livelyRootSource: 'sheet' }).tables, noTab.tables, 'an identical tab gives identical tables');
+
+  const [k0, v0] = MANUAL_LR_COSTS[0], [k1] = MANUAL_LR_COSTS[1];
+  const edited = { ...syntheticSheets(), LIVELY_ROOT_SHEET_URL: livelyRootTab(MANUAL_LR_COSTS, { change: { [k0]: v0 + 1 }, drop: [k1], extra: [['PL_SYN_NEW_6IN1', 40]] }) };
+  const b = buildCatalogTables(edited);
+  assert.deepEqual([b.report.livelyRoot.comparison.changed, b.report.livelyRoot.comparison.onlyManualList, b.report.livelyRoot.comparison.onlySheet, b.report.livelyRoot.comparison.identical], [1, 1, 1, false]);
+  assert.equal(b.tables.mcg_total[k0], v0, 'manual_list mode keeps the fixed list');
+  const c = buildCatalogTables(edited, { livelyRootSource: 'sheet' });
+  assert.equal(c.tables.mcg_total[k0], Math.round((v0 + 1) * 100) / 100);
+  assert.equal(c.tables.mcg_total.PL_SYN_NEW_6IN1, 40);
+  assert.equal(c.tables.mcg_total.PL_SYN_NOTLISTED, undefined, 'unlisted rows are never imported');
+  assert.throws(() => buildCatalogTables(syntheticSheets(), { livelyRootSource: 'sheet' }), e => e.code === 'lively_root_unavailable');
+});

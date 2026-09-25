@@ -27,6 +27,10 @@ export const DEFAULT_SETTINGS = Object.freeze({
   shipping_report_timezone: 'America/Los_Angeles',
   shipping_report_store: 'Succulents Box (Shopify)',
   shipping_cost_report_source_verified: false,
+  // C6: where Lively Root product costs come from. 'manual_list' = build.py's
+  // MANUAL_LR_COSTS (parity); 'sheet' = the Products Master "Lively Root" tab.
+  // Switching to 'sheet' requires the latest Worker fetch to match the list.
+  lively_root_cost_source: 'manual_list',
 });
 
 /**

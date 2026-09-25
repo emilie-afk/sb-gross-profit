@@ -27,7 +27,10 @@ export const URL_SOURCES = Object.freeze([
   'MCG_SHEET_URL', 'MCG_POTS_SHEET_URL', 'SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL',
   'AS_SHEET_URL', 'L2G_SHEET_URL', 'LIVELY_GOOD_SHEET_URL', 'CALATHEA_COLLECTIVE_SHEET_URL',
   'SURFSIDE_ARRANGEMENT_SHEET_URL', 'LINDAMAKES_SHEET_URL', 'HP_SHEET_URL', 'MCG_EXTRA_SHEET_URL',
+  // Not read by build.py: the Products Master "Lively Root" tab (see parseLivelyRootTab).
+  'LIVELY_ROOT_SHEET_URL',
 ]);
+export const LIVELY_ROOT_MODES = Object.freeze(['manual_list', 'sheet']);
 export const JSON_SOURCES = Object.freeze(['PRODUCT_COSTS_JSON1', 'PRODUCT_COSTS_JSON2', 'SKU_WEIGHTS_JSON']);
 export const DRIVE_SOURCES = Object.freeze(['HP_COSTS_FOLDER_ID', 'GDRIVE_API_KEY']);
 
@@ -180,6 +183,59 @@ function parseAliasRows(rawRows) {
   return rawRows.slice(idx + 1).map(r => pyZipDict(header, r));
 }
 
+// ─── Lively Root tab (C6 addition; build.py uses MANUAL_LR_COSTS instead) ──────
+// build.py: "Products Master sheet > 'Lively Root' tab. Only rows where col Q
+// (Listing Shopify) is CHECKED → col E (LR SKU), col G (LR cost)."
+const LR_SPEC = { headerRequired: ['sku', 'cost'], sku: ['LR SKU', 'Lively Root SKU', 'SKU'], cost: ['LR Cost', 'Lively Root Cost', 'Cost'], active: ['Listing Shopify'] };
+const LR_EXPECTED_COLUMNS = Object.freeze({ sku: 'E', cost: 'G', listed: 'Q' });
+const colLetter = i => (i === null ? null : (i >= 26 ? String.fromCharCode(64 + Math.floor(i / 26)) : '') + String.fromCharCode(65 + (i % 26)));
+
+/** Lively Root tab → { costs: Map(sku → cost) | null, stats, errors, columns } */
+export function parseLivelyRootTab(rows) {
+  const stats = { rows: 0, listed: 0, notListed: 0, blankSku: 0, invalidCost: 0, conflicting: 0, imported: 0 };
+  const errors = [];
+  const hdr = findHeaderRow(rows, LR_SPEC.headerRequired);
+  if (hdr === null) return { costs: null, stats, errors: ['Lively Root: header row not found'], columns: null };
+  const header = rows[hdr];
+  const iSku = colIndex(header, LR_SPEC.sku), iCost = colIndex(header, LR_SPEC.cost);
+  let iAct = null;
+  for (const r of rows.slice(0, hdr + 1)) { iAct = colIndex(r, LR_SPEC.active); if (iAct !== null) break; }
+  const columns = { sku: colLetter(iSku), cost: colLetter(iCost), listed: colLetter(iAct) };
+  if (iSku === null || iCost === null || iAct === null) return { costs: null, stats, errors: ['Lively Root: SKU, cost or Listing Shopify column not found'], columns };
+  if (columns.sku !== LR_EXPECTED_COLUMNS.sku || columns.cost !== LR_EXPECTED_COLUMNS.cost || columns.listed !== LR_EXPECTED_COLUMNS.listed)
+    errors.push(`Lively Root: columns are ${columns.sku}/${columns.cost}/${columns.listed}, expected E/G/Q`);
+  const cell = (row, idx) => (idx < row.length ? pyStrip(row[idx]) : '');
+  const collected = new Map();
+  for (const row of rows.slice(hdr + 1)) {
+    if (!row.some(c => pyStrip(c))) continue;
+    stats.rows++;
+    if (!['TRUE', 'YES', 'X', '1', 'CHECKED'].includes(upper(cell(row, iAct)))) { stats.notListed++; continue; }
+    stats.listed++;
+    const sku = normalizeSku(cell(row, iSku));
+    if (!sku) { stats.blankSku++; continue; }
+    const cost = finiteOrThrow(vendorMoney(cell(row, iCost)), 'Lively Root');
+    if (cost === null || Number.isNaN(cost) || !(cost > 0)) { stats.invalidCost++; continue; }
+    if (!collected.has(sku)) collected.set(sku, new Set());
+    collected.get(sku).add(cost);
+  }
+  const costs = new Map();
+  for (const [sku, set] of collected) {
+    if (set.size > 1) { stats.conflicting++; errors.push('Lively Root: a SKU has conflicting costs — not imported'); continue; }
+    costs.set(sku, [...set][0]);
+  }
+  stats.imported = costs.size;
+  return { costs, stats, errors, columns };
+}
+
+/** Counts only: how the tab compares with build.py's MANUAL_LR_COSTS. */
+export function compareLivelyRoot(costs) {
+  const manual = new Map(MANUAL_LR_COSTS.map(([k, v]) => [upper(k), v]));
+  let same = 0, changed = 0, onlyManual = 0, onlySheet = 0;
+  for (const [k, v] of manual) { if (!costs.has(k)) onlyManual++; else if (Math.round(costs.get(k) * 100) === Math.round(v * 100)) same++; else changed++; }
+  for (const k of costs.keys()) if (!manual.has(k)) onlySheet++;
+  return { manualList: manual.size, sheet: costs.size, same, changed, onlyManualList: onlyManual, onlySheet, identical: changed === 0 && onlyManual === 0 && onlySheet === 0 };
+}
+
 const toObj = m => Object.fromEntries(m);
 
 /**
@@ -187,7 +243,8 @@ const toObj = m => Object.fromEntries(m);
  *                      { PRODUCT_COSTS_JSON1|2, SKU_WEIGHTS_JSON: json text },
  *                      productExport: { name, text } | undefined (Drive's latest export)
  */
-export function buildCatalogTables(src) {
+export function buildCatalogTables(src, { livelyRootSource = 'manual_list' } = {}) {
+  if (!LIVELY_ROOT_MODES.includes(livelyRootSource)) throw new Error(`livelyRootSource must be one of ${LIVELY_ROOT_MODES.join(', ')}`);
   const warnings = [];
   const report = { sources: {}, vendorStats: [], warnings };
 
@@ -317,7 +374,21 @@ export function buildCatalogTables(src) {
   for (const [k, v] of as) product.set(k, v);
   for (const [k, v] of l2g) product.set(k, v);
   for (const [sku, cost] of MANUAL_MCG_COSTS) { if (!mcg.has(sku)) mcg.set(sku, cost); if (!mcg.has(upper(sku))) mcg.set(upper(sku), cost); }
-  for (const [sku, cost] of MANUAL_LR_COSTS) { mcg.set(sku, cost); mcg.set(upper(sku), cost); }
+  // Lively Root: build.py's fixed list, unless the operator switched to the tab
+  // (lively_root_cost_source = 'sheet'). The tab, when configured, is always
+  // parsed and compared so the switch can be made on evidence.
+  let lrTab = null;
+  if (has(src.LIVELY_ROOT_SHEET_URL)) {
+    lrTab = parseLivelyRootTab(pyCsvRows(src.LIVELY_ROOT_SHEET_URL));
+    report.livelyRoot = { mode: livelyRootSource, columns: lrTab.columns, stats: lrTab.stats, errors: lrTab.errors,
+                          comparison: lrTab.costs ? compareLivelyRoot(lrTab.costs) : null };
+  } else report.livelyRoot = { mode: livelyRootSource, configured: false };
+  if (livelyRootSource === 'sheet') {
+    if (!lrTab || !lrTab.costs || !lrTab.costs.size) throw new PyCompatError('lively_root_unavailable', 'Lively Root tab is the cost source but could not be read');
+    for (const [sku, cost] of lrTab.costs) { mcg.set(sku, cost); mcg.set(upper(sku), cost); }
+  } else {
+    for (const [sku, cost] of MANUAL_LR_COSTS) { mcg.set(sku, cost); mcg.set(upper(sku), cost); }
+  }
 
   const tables = {
     mcg_total: toObj(mcg), product_costs: toObj(product), sku_weights: toObj(weights), sku_alias: toObj(alias),

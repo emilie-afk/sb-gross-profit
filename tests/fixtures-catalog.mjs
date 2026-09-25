@@ -50,3 +50,17 @@ export function syntheticSheets({ scale = false, vendorScale = 1 } = {}) {
       + 'hp-ivy,Ivy,House Plant Shop,,7.00,\nother,Other,Someone Else,OT-1,1.00,\n' },
   };
 }
+
+/**
+ * A synthetic Products Master "Lively Root" tab: LR SKU in column E, LR cost in
+ * G, the Listing Shopify checkbox in Q. By default the listed rows are exactly
+ * build.py's MANUAL_LR_COSTS; `change` edits costs, `extra` adds listed rows.
+ */
+export function livelyRootTab(manualEntries, { change = {}, extra = [], drop = [] } = {}) {
+  const row = (cells) => { const r = Array(17).fill(''); for (const [i, v] of Object.entries(cells)) r[i] = v; return r.join(','); };
+  const lines = [row({ 0: 'Lively Root products' }), row({ 0: 'Product', 4: 'LR SKU', 5: 'LR Price', 6: 'LR Cost', 16: 'Listing Shopify' })];
+  for (const [sku, cost] of manualEntries) if (!drop.includes(sku)) lines.push(row({ 0: 'Synthetic plant', 4: sku, 5: '99.00', 6: (change[sku] ?? cost).toFixed(2), 16: 'TRUE' }));
+  for (const [sku, cost] of extra) lines.push(row({ 0: 'Synthetic extra', 4: sku, 6: cost.toFixed(2), 16: 'TRUE' }));
+  lines.push(row({ 0: 'Not listed', 4: 'PL_SYN_NOTLISTED', 6: '12.00', 16: 'FALSE' }));
+  return lines.join('\n') + '\n';
+}
