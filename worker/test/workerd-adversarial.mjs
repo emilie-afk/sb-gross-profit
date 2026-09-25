@@ -22,6 +22,10 @@
  */
 import { Miniflare } from 'miniflare';
 import { build } from 'esbuild';
+// Tests post synthetic GraphQL-shaped orders through the normalized path (no Shopify API route exists).
+import { normalizeShopifyOrders as __norm } from '../../shared/adapters/shopifyGraphql.js';
+const viaNormalized = ({ nodes, ...rest }) => ({ format: 'normalized', orders: __norm(nodes, { timeZone: 'America/Los_Angeles' }), storeTimezone: 'America/Los_Angeles', ...rest });
+
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs'; import path from 'node:path'; import assert from 'node:assert/strict';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -66,8 +70,8 @@ async function world() {
   await call('POST', '/v1/admin/settings', { body: { carrier_fee_priority_locked: true, reason: 'adversarial test only' }, headers: A });
   const rf = (await call('POST', '/v1/admin/catalog-refresh', { body: { weekStart: W }, headers: A })).json.refreshId;
   await call('POST', '/v1/ingest/catalog', { body: { ...catalog, meta: { refreshId: rf } }, headers: I });
-  await call('POST', '/v1/ingest/shopify', { body: { format: 'graphql', mode: 'week', nodes, weekStart: W }, headers: I });
-  await call('POST', '/v1/ingest/shopify', { body: { format: 'graphql', mode: 'updated_since', nodes: [], weekStart: W }, headers: I });
+  await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'week', nodes, weekStart: W }), headers: I });
+  await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'updated_since', nodes: [], weekStart: W }), headers: I });
   await call('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: ship, weekStart: W }, headers: I });
   const schedule = label => call('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label }, headers: A });
   const q = async (sql, ...p) => (await db.prepare(sql).bind(...p).all()).results;

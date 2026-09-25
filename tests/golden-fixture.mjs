@@ -1,13 +1,12 @@
 /**
  * Fixed synthetic week for the financial-engine golden hash (see golden.test.mjs).
- * Invented order numbers, SKUs and amounts only.
+ * CSV orders only (there is no Shopify API path). Invented order numbers and amounts.
  */
 import { createHash } from 'node:crypto';
 import { buildSnapshot } from '../shared/snapshot.js';
 import { csvRowsToNormalizedOrders } from '../shared/adapters/legacy.js';
-import { normalizeShopifyOrders } from '../shared/adapters/shopifyGraphql.js';
 import { normalizeShipStationRows } from '../shared/adapters/shipstation.js';
-import { csvOrder, gqlOrder, ssCustom, FIXTURE_CATALOG } from './fixtures-normalized.mjs';
+import { csvOrder, ssCustom, FIXTURE_CATALOG } from './fixtures-normalized.mjs';
 
 function stable(v) {
   if (Array.isArray(v)) return `[${v.map(stable).join(',')}]`;
@@ -25,13 +24,11 @@ export function goldenSnapshot() {
       lines: [{ sku: 'FH-POTHOS', price: 45, qty: 1, vendor: 'House Plant Dropship' }] }),
     ...csvOrder({ name: '#900104', subtotal: 39.6, shipping: 5, taxes: 0, total: 44.6,
       lines: [{ sku: 'LM-VASE-PRO-BUD-RAINBOW', price: 39.6, qty: 1, vendor: 'LindaMakes' }, { sku: 'UNKNOWN-1', price: 0, qty: 1 }] }),
+    ...csvOrder({ name: '#900105', createdAt: '2026-09-16 11:00:00 -0700', subtotal: 21.6, shipping: 6, taxes: 1.5, total: 29.1,
+      discountAmount: 2.4, lines: [{ sku: 'MG-ALOE', price: 12, qty: 2, discount: 2.4, vendor: 'Succulents Box' }] }),
   ];
-  const gql = normalizeShopifyOrders([
-    gqlOrder({ name: '#900105', createdAt: '2026-09-16T18:00:00Z', subtotal: 24, shipping: 6, taxes: 1.5, total: 31.5, discounts: 0,
-      lines: [{ sku: 'MG-ALOE', price: 12, qty: 2, vendor: 'Succulents Box',
-        allocations: [{ amount: 2.4, code: 'TEST10' }] }] }),
-  ], { timeZone: 'America/Los_Angeles' });
-  const orders = [...csvRowsToNormalizedOrders(csvRows), ...gql];
+
+  const orders = csvRowsToNormalizedOrders(csvRows);
   const { shipments } = normalizeShipStationRows([
     ...ssCustom({ shipment: 'S101', order: '900101', fee: '6.25', items: [{ sku: 'MG-ALOE', qty: 1 }, { sku: 'MG-JADE', qty: 1 }] }),
     ...ssCustom({ shipment: 'S102', order: '900102', fee: '', rate: '4.10', items: [{ sku: 'AS-TILL', qty: 3 }] }),

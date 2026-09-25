@@ -10,17 +10,21 @@
  * silently on the server.
  *
  * The allowlist is exactly what the manual-upload path reads
- * (csvRowsToNormalizedOrders), plus Currency for the store-currency cross-check.
+ * (csvRowsToNormalizedOrders), plus Currency for the store-currency cross-check
+ * and the two fulfilment-status columns (verified in the Jul–Sep export) that
+ * the Revision 9 shipping rules use. Free-text columns are then reduced to
+ * their minimum form by shopifyPrivacy.js (prepareShopifyUpload below).
  * Both spellings Shopify has used for a column are allowed.
  */
 import { CustomerDataError, isKeptNoteAttribute, formatCsvNoteAttributes } from '../normalized.js';
+import { reduceShopifyOrderRows } from './shopifyPrivacy.js';
 
 export const SHOPIFY_ORDERS_CSV_COLUMNS = Object.freeze([
   'Name', 'Id', 'Created at', 'Cancelled at', 'Cancelled At', 'Financial Status', 'Currency',
   'Subtotal', 'Shipping', 'Taxes', 'Total', 'Duties', 'Discount Code', 'Discount Amount',
   'Refunded Amount', 'Refunded amount', 'Source', 'Source name', 'Tags', 'Note Attributes', 'Note attributes',
   'Vendor', 'Lineitem name', 'Lineitem price', 'Lineitem quantity', 'Lineitem sku', 'Lineitem discount',
-  'Lineitem requires shipping',
+  'Lineitem requires shipping', 'Fulfillment Status', 'Lineitem fulfillment status',
 ]);
 const ALLOWED = new Set(SHOPIFY_ORDERS_CSV_COLUMNS);
 
@@ -89,4 +93,15 @@ export function currenciesOf(rows) {
 export function toCsvText(rows, columns) {
   const q = v => { const s = String(v ?? ''); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   return [columns.map(q).join(','), ...rows.map(r => columns.map(c => q(r[c])).join(','))].join('\n') + '\n';
+}
+
+/**
+ * The collector's whole Shopify pipeline: allowlisted columns → minimum
+ * free-text form → CSV text. `problems` (column + rule, never values) means the
+ * file must not be uploaded (collector status sanitization_failed).
+ */
+export function prepareShopifyUpload(rawRows) {
+  const s = sanitizeShopifyOrderRows(rawRows);
+  const r = reduceShopifyOrderRows(s.rows);
+  return { text: toCsvText(r.rows, s.columns), columns: s.columns, droppedColumns: s.droppedColumns, rowCount: r.rows.length, problems: r.problems };
 }

@@ -22,6 +22,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { calculate, summarize, parseCSV, parseShipStation, parseHpdLog } from '../shared/calculator.js';
 import { csvRowsToNormalizedOrders } from '../shared/adapters/legacy.js';
+import { sanitizeShopifyOrderRows } from '../shared/adapters/shopifyCsv.js';
+import { reduceShopifyOrderRows } from '../shared/adapters/shopifyPrivacy.js';
 import { normalizeShipStationRows, SHIPSTATION_FIELDS, classifyCreatedBy } from '../shared/adapters/shipstation.js';
 import { normalizeHpdRows } from '../shared/adapters/hpd.js';
 import { buildSnapshot } from '../shared/snapshot.js';
@@ -125,7 +127,13 @@ async function push(a) {
   if (!secret && !dry) throw new Error('Set SB_INGEST_SECRET in the environment (never on the command line)');
   const from = a.from?.[0] || '0000-01-01';
 
-  const byWeek = groupRowsByWeek(readRows(a.shopify));
+  // Same privacy contract as the collector: allowlisted columns, minimum free text.
+  const reduced = reduceShopifyOrderRows(sanitizeShopifyOrderRows(readRows(a.shopify)).rows);
+  if (reduced.problems.length) {
+    const kinds = [...new Set(reduced.problems.map(p => `${p.column}: ${p.rule}`))];
+    throw new Error(`Shopify export needs review before upload (${kinds.join('; ')})`);
+  }
+  const byWeek = groupRowsByWeek(reduced.rows);
   for (const [w, wr] of [...byWeek.entries()].filter(([w]) => w >= from).sort()) {
     const orders = csvRowsToNormalizedOrders(wr);
     for (let i = 0; i < orders.length; i += 250) {

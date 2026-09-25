@@ -1,8 +1,9 @@
 /**
  * ingest.js — versioned ingestion routes (X-Ingest-Secret)
  * =======================================================
- * POST /v1/ingest/shopify      { format: 'graphql', nodes } | { format: 'normalized', orders }
- *                               | { format: 'csv_text', text, weekStart, mode?: 'rolling', sanitizedSha256? }
+ * POST /v1/ingest/shopify      { format: 'csv_text', text, weekStart, mode?: 'rolling', sanitizedSha256? }
+ *                               | { format: 'normalized', orders, storeTimezone }   (manual / backfill)
+ *                               format 'graphql' is refused: there is no Shopify API integration
  * POST /v1/ingest/shipstation  { format: 'rows', rows, sourceFormat?: 'custom'|'legacy' }
  *                               | { format: 'csv_text', text, weekStart, sanitizedSha256? }
  * POST /v1/ingest/hpd          { format: 'normalized', hpdOrders } | { format: 'rows', rows } | { format: 'csv_text', text }
@@ -27,13 +28,13 @@
 import { ApiError, json, readJson, WEEK_RE } from './http.js';
 import { newId, nowIso, getSettings } from './db.js';
 import { saveOrders, saveShipments, saveHpd, saveCatalog, latestAcceptedCatalogMeta } from './store.js';
-import { normalizeShopifyOrders } from '../../shared/adapters/shopifyGraphql.js';
-import { normalizeShipStationRows } from '../../shared/adapters/shipstation.js';
+import { normalizeShipStationRows, SHIPSTATION_MAPPING_EXPORT_COLUMNS } from '../../shared/adapters/shipstation.js';
 import { normalizeHpdRows } from '../../shared/adapters/hpd.js';
 import { parseCSV } from '../../shared/calculator.js';
-import { CustomerDataError, CUSTOMER_KEYS, assertNoCustomerFields, filterNoteAttributes } from '../../shared/normalized.js';
+import { CustomerDataError, assertNoCustomerFields, filterNoteAttributes } from '../../shared/normalized.js';
 import { csvRowsToNormalizedOrders } from '../../shared/adapters/legacy.js';
 import { assertSanitizedShopifyOrderRows, currenciesOf } from '../../shared/adapters/shopifyCsv.js';
+import { assertReducedShopifyOrderRows, assertReducedNormalizedOrders } from '../../shared/adapters/shopifyPrivacy.js';
 import { validateCatalog, catalogRevOf, parseMcgExtraCsv } from '../../shared/catalog.js';
 import { REFRESH_TIMEOUT_MINUTES } from './compute.js';
 
@@ -77,13 +78,17 @@ async function withRun(env, source, body, fn, { mode: forcedMode, onSuccess } = 
     await finishRun(env.DB, runId, { status: 'failed', error: code });
     if (e instanceof CustomerDataError) throw new ApiError(400, 'customer_data_rejected', 'Payload contains customer fields; fix the query or export template', { paths: e.paths.slice(0, 10) });
     if (e instanceof ApiError) throw e;
-    if (e.code === 'bad_payload') throw new ApiError(400, 'bad_payload', e.message);
+    if (e.code === 'bad_payload' || e.code === 'unapproved_value') throw new ApiError(400, e.code, e.message);
     throw e;
   }
 }
 
 export async function ingestShopify(request, env) {
   const body = await readJson(request);
+  // No Shopify API integration exists for this project. The Revision 8 GraphQL
+  // adapter stays in the repository only until cleanup; no route, setting or
+  // secret can reach it.
+  if (body.format === 'graphql') throw new ApiError(400, 'format_unavailable', "Shopify API ingestion is not available; send format 'csv_text'");
   const rolling = body.format === 'csv_text' && body.mode === 'rolling';
   if (body.format === 'csv_text') requireCsvUpload(body);
   const upload = body.format === 'csv_text' ? await uploadHash(body) : null;
@@ -93,15 +98,14 @@ export async function ingestShopify(request, env) {
     if (body.format === 'csv_text') {
       const rows = parseCSV(body.text);
       assertSanitizedShopifyOrderRows(rows);                  // customer columns → rejected, not dropped
+      assertReducedShopifyOrderRows(rows);                    // free text must already be in its minimum form
       orders = csvRowsToNormalizedOrders(rows);
       diagnostics = { csvRows: rows.length, currencies: currenciesOf(rows), sanitizedSha256: upload.sha256 };
-    } else if (body.format === 'graphql') {
-      if (!Array.isArray(body.nodes)) throw new ApiError(400, 'bad_payload', 'nodes must be an array');
-      orders = normalizeShopifyOrders(body.nodes, { timeZone: settings.store_timezone });
     } else if (body.format === 'normalized') {
       if (!Array.isArray(body.orders)) throw new ApiError(400, 'bad_payload', 'orders must be an array');
       assertNoCustomerFields(body.orders);
-      // Same allowlist as the graphql and CSV paths: attribute VALUES can hold
+      assertReducedNormalizedOrders(body.orders);             // same privacy contract as csv_text
+      // Same allowlist as the CSV path: attribute VALUES can hold
       // gift messages or names, so only Channel / sample attributes are kept.
       orders = body.orders.map(o => ({ ...o, noteAttributes: filterNoteAttributes(o.noteAttributes) }));
       // Pre-normalized orders carry store-local dates; the sender must state the
@@ -109,7 +113,7 @@ export async function ingestShopify(request, env) {
       if (body.storeTimezone !== settings.store_timezone) {
         throw new ApiError(400, 'timezone_mismatch', `storeTimezone must be ${settings.store_timezone} (the current store time zone); got ${body.storeTimezone ?? 'none'}`);
       }
-    } else throw new ApiError(400, 'bad_payload', "format must be 'graphql', 'normalized' or 'csv_text'");
+    } else throw new ApiError(400, 'bad_payload', "format must be 'csv_text' or 'normalized'");
     const r = await saveOrders(env.DB, orders, runId, { timeZone: settings.store_timezone });
     return { rowsSeen: orders.length, written: r.written, duplicates: r.duplicates, weeksTouched: r.weeksTouched, diagnostics };
   }, {
@@ -175,9 +179,10 @@ export async function ingestShipStation(request, env) {
     if (body.format === 'rows' && Array.isArray(body.rows)) rows = body.rows;
     else if (body.format === 'csv_text') {
       rows = parseCSV(body.text);
-      // The collector's export template has no customer columns; one arriving here
-      // means the template changed, so the upload is refused rather than filtered.
-      const bad = (rows.length ? Object.keys(rows[0]) : []).filter(h => CUSTOMER_KEYS.has(h.toLowerCase().replace(/[^a-z0-9]/g, '')));
+      // Exactly the saved template's columns (an allowlist, not banned names): any
+      // other column means the template changed, so the upload is refused.
+      const allowed = new Set(SHIPSTATION_MAPPING_EXPORT_COLUMNS);
+      const bad = (rows.length ? Object.keys(rows[0]) : []).filter(h => !allowed.has(h));
       if (bad.length) throw new CustomerDataError(bad.map(h => `$.columns.${h}`));
     } else throw new ApiError(400, 'bad_payload', "Send { format: 'rows', rows: [...] } or { format: 'csv_text', text, weekStart }");
     let normalized;

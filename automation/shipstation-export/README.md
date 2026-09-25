@@ -17,8 +17,8 @@ Downloads last week's ShipStation shipments with the saved custom export templat
    New-StoredCredential -Target sb-shipstation-export -UserName <user> -Password <password> -Persist LocalMachine
    New-StoredCredential -Target sb-gp-ingest -UserName worker -Password <Worker INGEST_SECRET> -Persist LocalMachine
    ```
-3. `copy config.example.json config.local.json` (gitignored). Set `workerUrl` to the Worker (staging first). Keep `delivery` at `"worker"`; `"drive"` plus `outputDir` is the old copy-to-folder behaviour, kept for rollback only.
-4. In ShipStation, save a custom shipment export template named **SB GP weekly** with the Revision 5 fields only: Shipment ID, Order Number, Tracking Number, Ship Date, Modify Date, Void Flag, Void Date, Carrier, Service, Carrier Fee, Rate, Insurance Cost, Shipping Paid, Provider, Carrier Transaction ID, Internal Transaction ID, External ID, No Postage, Store Name, Package Count, Weight, Item SKU, Item Quantity (these are the columns `shared/adapters/shipstation.js` reads; anything else is ignored and reported). Shipping Paid is kept for disclosure only and is never used as expense. Leave out **Created By**: it can hold a staff email and is not needed; if it is present, the Worker keeps only a blank/integration/person class. No recipient, address, phone, email or company column; the job refuses any file that has one.
+3. `copy config.example.json config.local.json` (gitignored). Set `workerUrl` to the Worker (staging first). Delivery to the Worker is the default. `"delivery": "drive"` plus an explicit `outputDir` is the old copy-to-folder behaviour, kept for rollback only and off unless both are set.
+4. In ShipStation, save a custom shipment export template named **SB GP weekly** with the Revision 5 fields only: Shipment ID, Order Number, Tracking Number, Ship Date, Modify Date, Void Flag, Void Date, Carrier, Service, Carrier Fee, Rate, Insurance Cost, Shipping Paid, Provider, Carrier Transaction ID, Internal Transaction ID, External ID, No Postage, Store Name, Package Count, Weight, Item SKU, Item Quantity (these are the columns `shared/adapters/shipstation.js` reads; anything else is ignored and reported). Shipping Paid is kept for disclosure only and is never used as expense. Leave out **Created By**: it can hold a staff email and is not needed; if it is present, the Worker keeps only a blank/integration/person class. No recipient, address, phone, email or company column; the job refuses any file whose columns are not exactly the template's (an allowlist, not a list of banned names).
 5. Record the export clicks: `npm run codegen`, sign in, open the template, set a date range and download. Copy the selectors into `exportSteps` in `config.local.json`, replacing every `REPLACE:` value. Use `{{weekStartUS}}` and `{{weekEndUS}}` (MM/DD/YYYY) or `{{weekStart}}` / `{{weekEnd}}` (YYYY-MM-DD) for the dates.
 6. Sign in once with a visible browser and complete 2FA yourself: `npm run login`.
 7. Test one week: `npm run export -- --week 2026-09-14 --headed`. Compare the file with a manual export of the same week.
@@ -50,6 +50,16 @@ The job exports the last completed Monday–Sunday week in America/Los_Angeles (
 | 23 | Login rejected | update the stored credential |
 | 30 | Export failed, the file had customer columns, or the export was invalid (no rows, missing columns) | see the run manifest; fix the steps or the template |
 | 31 | Export fine, upload to the Worker failed after retries (or was refused) | see `ingest` in the manifest; the file is in `quarantine` for 72 hours, then deleted |
+
+## Daily quarantine cleanup
+
+A file that failed delivery is kept in `quarantine` for at most 72 hours. Cleanup runs every day, independent of the weekly export:
+
+```
+schtasks /Create /TN "SB collector quarantine cleanup" /SC DAILY /ST 09:00 /TR "cmd /c cd /d C:\path\to\automation\shipstation-export && npm run purge"
+```
+
+The local working folder (`localDir`, default `%LOCALAPPDATA%\sb-shipstation-export`) must be outside the repository and outside any cloud-synced folder (OneDrive, Google Drive, Dropbox, iCloud); the job refuses to start otherwise.
 
 ## Delivery and retries
 

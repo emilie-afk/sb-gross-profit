@@ -88,3 +88,8 @@ export const FIXTURE_CATALOG = Object.freeze({
 });
 
 export { row, ssRow };
+
+/** ssCustom rows reshaped to the saved mapping-export template (exact columns: no Recipient, no Created By). */
+export function ssTemplate(opts) {
+  return ssCustom(opts).map(({ Recipient, 'Created By': _createdBy, 'Provider Name': provider, ...r }) => ({ ...r, Provider: provider }));
+}

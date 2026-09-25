@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeEnv, ingest, admin, catalog, WEEK } from './helpers.mjs';
-import { csvOrder, ssCustom } from '../../tests/fixtures-normalized.mjs';
+import { csvOrder, ssCustom, ssTemplate } from '../../tests/fixtures-normalized.mjs';
 import { csvRowsToNormalizedOrders } from '../../shared/adapters/legacy.js';
 import { sanitizeShopifyOrderRows, toCsvText, SHOPIFY_ORDERS_CSV_COLUMNS } from '../../shared/adapters/shopifyCsv.js';
 
@@ -27,10 +27,10 @@ function shopifyRows() {
 /** What Shopify's raw export adds: customer columns the collector must strip. */
 const withCustomerColumns = rows => rows.map(r => ({ ...r, 'Email': 'synthetic@example.invalid', 'Billing Name': 'SYNTHETIC',
   'Shipping Address1': '1 Synthetic Way', 'Phone': '+10000000000', 'Notes': 'synthetic note' }));
-const shipRows = () => [
-  ...ssCustom({ shipment: 'SX1', order: '910001', fee: '5.10', items: [{ sku: 'MG-ALOE', qty: 2 }] }),
-  ...ssCustom({ shipment: 'SX2', order: '910002', fee: '', rate: '4.40', items: [{ sku: 'MG-JADE', qty: 1 }] }),
-].map(({ Recipient, ...r }) => r);         // the export template has no customer columns
+const shipRows = () => [                  // exactly the saved template's columns
+  ...ssTemplate({ shipment: 'SX1', order: '910001', fee: '5.10', items: [{ sku: 'MG-ALOE', qty: 2 }] }),
+  ...ssTemplate({ shipment: 'SX2', order: '910002', fee: '', rate: '4.40', items: [{ sku: 'MG-JADE', qty: 1 }] }),
+];
 
 async function runsFor(env) {
   return (await env.DB.prepare('SELECT source, mode, status, week_start FROM ingest_run ORDER BY started_at').all()).results;

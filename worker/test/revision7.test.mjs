@@ -7,14 +7,14 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WEEK, makeEnv, call, ingest, admin, catalog, weekOrders, loaded } from './helpers.mjs';
+import { WEEK, makeEnv, call, ingest, admin, catalog, weekOrders, loaded, viaNormalized } from './helpers.mjs';
 import { computeWeek } from '../src/compute.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const goLive = env => admin(env, 'POST', '/v1/admin/settings', { publication_enabled: true, reason: 'test go-live' });
 const one = async (env, sql, ...p) => env.DB.prepare(sql).bind(...p).first();
 const all = async (env, sql, ...p) => (await env.DB.prepare(sql).bind(...p).all()).results;
-const updated = env => ingest(env, '/v1/ingest/shopify', { format: 'graphql', mode: 'updated_since', nodes: [], weekStart: WEEK });
+const updated = env => ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [], weekStart: WEEK }));
 const schedule = (env, label = 'make:S4') => admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK, trigger: 'schedule', actorLabel: label });
 
 // ─── Confirmed store time zone ────────────────────────────────────────────────

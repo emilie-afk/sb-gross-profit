@@ -9,13 +9,13 @@ import os from 'node:os';
 import path from 'node:path';
 import worker from '../worker/src/index.js';
 import { makeEnv, WEEK } from '../worker/test/helpers.mjs';
-import { ssCustom } from './fixtures-normalized.mjs';
+import { ssCustom, ssTemplate } from './fixtures-normalized.mjs';
 import { toCsvText } from '../shared/adapters/shopifyCsv.js';
 import { uploadShipStationCsv, workerEndpoint } from '../automation/shipstation-export/src/upload.mjs';
 import { invalidExportReason, purgeOlderThan, assertNoSecretsInConfig } from '../automation/shipstation-export/src/lib.mjs';
 
 const text = () => {
-  const rows = ssCustom({ shipment: 'SU1', order: '920001', fee: '5.25', items: [{ sku: 'MG-ALOE', qty: 1 }] }).map(({ Recipient, ...r }) => r);
+  const rows = ssTemplate({ shipment: 'SU1', order: '920001', fee: '5.25', items: [{ sku: 'MG-ALOE', qty: 1 }] });
   return toCsvText(rows, Object.keys(rows[0]));
 };
 const viaWorker = (env, { failFirst = 0, status = 503 } = {}) => {

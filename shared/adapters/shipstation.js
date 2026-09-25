@@ -65,6 +65,18 @@ export const SHIPSTATION_FIELDS = Object.freeze({
   itemQuantity:   ['Item Quantity', 'Quantity', 'Item - Qty', 'Item Qty'],
 });
 
+/**
+ * The saved "SB GP weekly" mapping-export template, exactly (role
+ * shipstation_mapping_export: dormant, mapping only, never an expense source in
+ * Revision 9). The collector refuses any other column and the Worker's csv_text
+ * route rejects it. Created By is not allowed: it can hold a staff email.
+ */
+export const SHIPSTATION_MAPPING_EXPORT_COLUMNS = Object.freeze([
+  'Shipment ID', 'Order Number', 'Tracking Number', 'Ship Date', 'Modify Date', 'Void Flag', 'Void Date', 'Carrier',
+  'Service', 'Carrier Fee', 'Rate', 'Insurance Cost', 'Shipping Paid', 'Provider', 'Carrier Transaction ID',
+  'Internal Transaction ID', 'External ID', 'No Postage', 'Store Name', 'Package Count', 'Weight', 'Item SKU', 'Item Quantity',
+]);
+
 /** Shipment-level fields that must agree across a shipment's rows. */
 const SHIPMENT_CONSISTENT = ['orderNumber', 'carrierFee', 'legacyRate', 'insuranceCost', 'voided', 'noPostage'];
 

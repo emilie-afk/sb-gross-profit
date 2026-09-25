@@ -5,8 +5,9 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { WEEK, makeEnv, call, ingest, admin, sessionCookie, catalog, weekOrders, loaded } from './helpers.mjs';
+import { WEEK, makeEnv, call, ingest, admin, sessionCookie, catalog, weekOrders, loaded, viaNormalized } from './helpers.mjs';
 import { gqlOrder, ssCustom } from '../../tests/fixtures-normalized.mjs';
+import { normalizeShopifyOrders } from '../../shared/adapters/shopifyGraphql.js';
 
 const PREV = '2026-09-07';                                   // the week before WEEK
 const goLive = env => admin(env, 'POST', '/v1/admin/settings', { publication_enabled: true, reason: 'test go-live' });
@@ -25,7 +26,7 @@ async function loadPrevWeek(env, n = 10) {
   const rf = (await admin(env, 'POST', '/v1/admin/catalog-refresh', { weekStart: PREV })).json.refreshId;
   const cat = catalog(); cat.meta.refreshId = rf;
   assert.equal((await ingest(env, '/v1/ingest/catalog', cat)).json.refresh.status, 'fulfilled');   // duplicate content still verifies
-  assert.equal((await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes, weekStart: PREV })).status, 200);
+  assert.equal((await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: PREV }))).status, 200);
   assert.equal((await ingest(env, '/v1/ingest/shipstation', { format: 'rows', rows: ship, weekStart: PREV })).status, 200);
   return { nodes, ship };
 }
@@ -220,7 +221,7 @@ test('stale catalog: no refresh, a pending refresh, and a rejected refresh all b
   assert.equal((await ingest(env2, '/v1/ingest/catalog', shrunk)).json.refresh.status, 'rejected');
   assert.equal((await admin(env2, 'GET', `/v1/admin/catalog-refresh/${rf}`)).json.status, 'rejected');
   const { nodes, ship } = weekOrders(20);
-  await ingest(env2, '/v1/ingest/shopify', { format: 'graphql', nodes, weekStart: WEEK });
+  await ingest(env2, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: WEEK }));
   await ingest(env2, '/v1/ingest/shipstation', { format: 'rows', rows: ship, weekStart: WEEK });
   const r2 = await admin(env2, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   assert.deepEqual([r2.json.state, r2.json.gate.catalog.freshness.reason], ['blocked', 'refresh_rejected']);
@@ -240,7 +241,7 @@ test('earlier weeks touched by Shopify updates and late shipments become unpubli
     refunds: [{ id: 'gid://shopify/Refund/800000x', createdAt: '2026-09-16T10:00:00Z', totalRefundedSet: { shopMoney: { amount: '5.00', currencyCode: 'USD' } },
                 refundLineItems: { nodes: [] }, refundShippingLines: { nodes: [{ subtotalAmountSet: { shopMoney: { amount: '5.00', currencyCode: 'USD' } }, taxAmountSet: { shopMoney: { amount: '0', currencyCode: 'USD' } } }] },
                 orderAdjustments: { nodes: [] } }] };
-  const up = await ingest(env, '/v1/ingest/shopify', { format: 'graphql', mode: 'updated_since', nodes: [refunded, prevNodes[1]], weekStart: WEEK });
+  const up = await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [refunded, prevNodes[1]], weekStart: WEEK }));
   assert.equal(up.status, 200, JSON.stringify(up.json));
   assert.deepEqual(up.json.weeksTouched, { [PREV]: 1 });                                  // the unchanged order is a duplicate
   const late = await ingest(env, '/v1/ingest/shipstation', { format: 'rows', weekStart: WEEK,
@@ -260,8 +261,8 @@ test('earlier weeks touched by Shopify updates and late shipments become unpubli
   const again = await admin(env, 'POST', '/v1/admin/revise-touched', { weekStart: WEEK });
   assert.deepEqual([again.json.revised.length, again.json.skipped[0].reason], [0, 'already_revised']);
   // A touched week with no snapshot yet is reported, not computed.
-  await ingest(env, '/v1/ingest/shopify', { format: 'graphql', mode: 'updated_since', weekStart: WEEK,
-    nodes: [gqlOrder({ name: '#700001', createdAt: '2026-08-31T17:00:00Z', subtotal: 10, total: 10, lines: [{ sku: 'MG-ALOE', price: 10, vendor: 'Succulents Box' }] })] });
+  await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', weekStart: WEEK,
+    nodes: [gqlOrder({ name: '#700001', createdAt: '2026-08-31T17:00:00Z', subtotal: 10, total: 10, lines: [{ sku: 'MG-ALOE', price: 10, vendor: 'Succulents Box' }] })] }));
   const third = await admin(env, 'POST', '/v1/admin/revise-touched', { weekStart: WEEK });
   assert.ok(third.json.skipped.some(s => s.weekStart === '2026-08-31' && s.reason === 'no_snapshot_yet'));
 });
@@ -276,7 +277,7 @@ test('HPD pass-through is stored as assumed and never reported as confirmed actu
   await ingest(env, '/v1/ingest/catalog', cat);
   const nodes = [gqlOrder({ name: '#900500', createdAt: '2026-09-15T17:00:00Z', subtotal: 9, shipping: 6, total: 15,
                             lines: [{ sku: 'FH-POTHOS', price: 9, vendor: 'House Plant Dropship' }] })];
-  await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes, weekStart: WEEK });
+  await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: WEEK }));
   const r = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   const s = (await admin(env, 'GET', `/v1/snapshot/${WEEK}?includeDrafts=1`)).json;
   assert.equal(s.totals.hpdOrdersPassThrough, 1);
@@ -311,8 +312,9 @@ test('no staff email, customer name, address or buyer note is stored anywhere in
     `2026-09-15,HPD-1,USPS,ZZ,1,FH-POTHOS,"#900001 ${NOTE}",7.10,6.00,1.10`].join('\n');
   await ingest(env, '/v1/ingest/hpd', { format: 'csv_text', text });
   const bad = gqlOrder({ name: '#900002', subtotal: 1, total: 1, lines: [{ sku: 'A', price: 1 }] });
-  bad.customer = { firstName: NAME }; bad.email = STAFF;
-  assert.equal((await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes: [bad] })).status, 400);
+  const [badOrder] = normalizeShopifyOrders([bad], { timeZone: 'America/Los_Angeles' });
+  badOrder.customer = { firstName: NAME }; badOrder.email = STAFF;
+  assert.equal((await ingest(env, '/v1/ingest/shopify', { format: 'normalized', storeTimezone: 'America/Los_Angeles', orders: [badOrder] })).status, 400);
 
   assert.equal((await env.DB.prepare('SELECT created_by_class FROM shipment').first()).created_by_class, 'person');
   const cols = (await env.DB.prepare("SELECT name FROM pragma_table_info('shipment')").all()).results.map(c => c.name);
@@ -335,7 +337,7 @@ test('a scheduled compute waits for its slot and for every required source, and 
   assert.deepEqual([notReady.status, notReady.json.error], [409, 'sources_not_ready']);
   assert.deepEqual(notReady.json.detail.missing, ['shopify_updates:missing']);
 
-  assert.equal((await ingest(env, '/v1/ingest/shopify', { format: 'graphql', mode: 'updated_since', nodes: [], weekStart: WEEK })).status, 200);
+  assert.equal((await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [], weekStart: WEEK }))).status, 200);
   const ready = (await admin(env, 'GET', `/v1/admin/readiness?weekStart=${WEEK}`)).json;
   assert.equal(ready.ready, true, JSON.stringify(ready.missing));
   assert.equal(ready.scheduledAt, '2026-09-21T08:30:00.000Z');
@@ -391,8 +393,8 @@ test('a failed touched-week revision is retried on the next call', async () => {
   const { env } = await loaded(20);
   const { nodes: prevNodes } = await loadPrevWeek(env, 3);
   await admin(env, 'POST', '/v1/admin/runs', { weekStart: PREV });
-  const changed = { ...prevNodes[0], tags: ['edited'] };
-  await ingest(env, '/v1/ingest/shopify', { format: 'graphql', mode: 'updated_since', nodes: [changed], weekStart: WEEK });
+  const changed = { ...prevNodes[0], tags: ['prepaid'] };             // an approved tag: a real content change
+  await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [changed], weekStart: WEEK }));
   env.DB.failNextBatchAt(/INSERT INTO snapshot \(/);
   const first = await admin(env, 'POST', '/v1/admin/revise-touched', { weekStart: WEEK });
   assert.ok(first.json.revised[0].error);

@@ -112,8 +112,11 @@ export async function weekPlan(request, env) {
   const at = url.searchParams.get('at') ? new Date(url.searchParams.get('at')) : new Date();
   if (isNaN(at)) throw new ApiError(400, 'bad_query', 'at must be an ISO timestamp');
   const s = await getSettings(env.DB);
-  return json(planCycle(at, { schedule: { timeZone: s.schedule_timezone, weekday: Number(s.schedule_weekday), time: s.schedule_time },
-                              reportingTimeZone: s.store_timezone }));
+  // planCycle() still computes Shopify API search strings (Revision 8); there is
+  // no Shopify API integration, so they are not part of the week plan.
+  const { shopify: _noApi, ...plan } = planCycle(at, { schedule: { timeZone: s.schedule_timezone, weekday: Number(s.schedule_weekday), time: s.schedule_time },
+                                                      reportingTimeZone: s.store_timezone });
+  return json(plan);
 }
 
 export async function getReadiness(request, env) {

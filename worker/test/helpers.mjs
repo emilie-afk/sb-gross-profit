@@ -9,6 +9,16 @@ import worker from '../src/index.js';
 import { D1Shim } from './d1shim.mjs';
 import { hashPassword } from '../src/auth.js';
 import { gqlOrder, ssCustom } from '../../tests/fixtures-normalized.mjs';
+import { normalizeShopifyOrders } from '../../shared/adapters/shopifyGraphql.js';
+
+/**
+ * The Worker has no Shopify API route (format 'graphql' is refused). Tests keep
+ * building orders with the synthetic GraphQL-shaped fixture, normalize them here
+ * and send them through the manual/backfill `normalized` path instead.
+ */
+export function viaNormalized({ nodes, ...rest }) {
+  return { format: 'normalized', orders: normalizeShopifyOrders(nodes, { timeZone: 'America/Los_Angeles' }), storeTimezone: 'America/Los_Angeles', ...rest };
+}
 
 export const MIGRATIONS = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
 export const PASSWORD = `synthetic-${crypto.randomUUID()}`;
@@ -86,7 +96,7 @@ export async function loaded(n = 60, extra = {}, { lock = true, refresh = true }
   const rf = refresh ? (await admin(env, 'POST', '/v1/admin/catalog-refresh', { weekStart: WEEK })).json.refreshId : null;
   const cat = catalog(); if (rf) cat.meta.refreshId = rf;
   assert.equal((await ingest(env, '/v1/ingest/catalog', cat)).status, 200);
-  assert.equal((await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes, weekStart: WEEK })).status, 200);
+  assert.equal((await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: WEEK }))).status, 200);
   assert.equal((await ingest(env, '/v1/ingest/shipstation', { format: 'rows', rows: ship, weekStart: WEEK })).status, 200);
   return { env, nodes, ship };
 }

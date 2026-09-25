@@ -8,6 +8,10 @@
  */
 import { Miniflare } from 'miniflare';
 import { build } from 'esbuild';
+// Tests post synthetic GraphQL-shaped orders through the normalized path (no Shopify API route exists).
+import { normalizeShopifyOrders as __norm } from '../../shared/adapters/shopifyGraphql.js';
+const viaNormalized = ({ nodes, ...rest }) => ({ format: 'normalized', orders: __norm(nodes, { timeZone: 'America/Los_Angeles' }), storeTimezone: 'America/Los_Angeles', ...rest });
+
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs'; import path from 'node:path'; import assert from 'node:assert/strict';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -54,11 +58,11 @@ for (let i = 0; i < 400; i++) {
   ship.push(...ssCustom({ shipment: `Z${i}`, order: name.slice(1), fee: i % 25 === 0 ? '0' : '5.10', rate: i % 25 === 0 ? '0' : '5.40' }));
 }
 const t0 = Date.now();
-const o = await call('POST', '/v1/ingest/shopify', { body: { format: 'graphql', nodes, weekStart: '2026-09-14' }, headers: I });
+const o = await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ nodes, weekStart: '2026-09-14' }), headers: I });
 assert.equal(o.status, 200, JSON.stringify(o.json)); assert.equal(o.json.rowsWritten, 400);
 const s = await call('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: ship, weekStart: '2026-09-14' }, headers: I });
 assert.equal(s.json.rowsWritten, 400);
-const again = await call('POST', '/v1/ingest/shopify', { body: { format: 'graphql', nodes, weekStart: '2026-09-14' }, headers: I });
+const again = await call('POST', '/v1/ingest/shopify', { body: viaNormalized({ nodes, weekStart: '2026-09-14' }), headers: I });
 assert.deepEqual([again.json.rowsWritten, again.json.duplicates], [0, 400]);
 const run = await call('POST', '/v1/admin/runs', { body: { weekStart: '2026-09-14' }, headers: A });
 assert.equal(run.status, 200, JSON.stringify(run.json));
@@ -111,7 +115,7 @@ await call2('POST', '/v1/admin/settings', { body: { carrier_fee_priority_locked:
 const rf = (await call2('POST', '/v1/admin/catalog-refresh', { body: { weekStart: '2026-09-14' }, headers: A })).json.refreshId;
 assert.equal((await call2('POST', '/v1/ingest/catalog', { body: { ...catalog, meta: { refreshId: rf } }, headers: I })).json.refresh.status, 'fulfilled');
 const few = nodes.slice(0, 40), fewShip = ship.filter(r => few.some(n => n.name.slice(1) === r['Order Number']));
-await call2('POST', '/v1/ingest/shopify', { body: { format: 'graphql', nodes: few, weekStart: '2026-09-14' }, headers: I });
+await call2('POST', '/v1/ingest/shopify', { body: viaNormalized({ nodes: few, weekStart: '2026-09-14' }), headers: I });
 await call2('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: fewShip.map(r => ({ ...r, 'Carrier Fee': '5.10' })), weekStart: '2026-09-14' }, headers: I });
 const run2 = await call2('POST', '/v1/admin/runs', { body: { weekStart: '2026-09-14' }, headers: A });
 assert.equal(run2.json.state, 'validated', JSON.stringify(run2.json.gate?.failures));
@@ -140,8 +144,8 @@ const call3 = async (method, p, { body, headers = {} } = {}) => {
 const W = '2026-09-14';
 const rf3 = (await call3('POST', '/v1/admin/catalog-refresh', { body: { weekStart: W }, headers: A })).json.refreshId;
 await call3('POST', '/v1/ingest/catalog', { body: { ...catalog, meta: { refreshId: rf3 } }, headers: I });
-await call3('POST', '/v1/ingest/shopify', { body: { format: 'graphql', mode: 'week', nodes: few, weekStart: W }, headers: I });
-await call3('POST', '/v1/ingest/shopify', { body: { format: 'graphql', mode: 'updated_since', nodes: [], weekStart: W }, headers: I });
+await call3('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'week', nodes: few, weekStart: W }), headers: I });
+await call3('POST', '/v1/ingest/shopify', { body: viaNormalized({ mode: 'updated_since', nodes: [], weekStart: W }), headers: I });
 await call3('POST', '/v1/ingest/shipstation', { body: { format: 'rows', rows: fewShip, weekStart: W }, headers: I });
 const sched = label => call3('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label }, headers: A });
 const counts = async () => db3.prepare(`SELECT (SELECT COUNT(*) FROM schedule_cycle) AS cycles,

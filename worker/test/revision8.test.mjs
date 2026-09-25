@@ -8,7 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { WEEK, ingest, admin, loaded } from './helpers.mjs';
+import { WEEK, ingest, admin, loaded, viaNormalized } from './helpers.mjs';
 
 const RUN_TABLES = ['reporting_run', 'run_transition', 'snapshot', 'snapshot_totals', 'snapshot_order'];
 const STALE_MS = 150;                                      // test-only stale limit (TEST_STALE_MS)
@@ -20,7 +20,7 @@ const schedule = (env, label = 'make:S4') => admin(env, 'POST', '/v1/admin/runs'
 /** A week ready for its scheduled run, with test hooks routed to `on(point, data)`. */
 async function ready(on) {
   const { env } = await loaded(20, { TEST_HOOKS_ENABLED: 'true', TEST_STALE_MS: String(STALE_MS) });
-  await ingest(env, '/v1/ingest/shopify', { format: 'graphql', mode: 'updated_since', nodes: [], weekStart: WEEK });
+  await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [], weekStart: WEEK }));
   env.TEST_HOOK = { fetch: async (url, init) => { await on(new URL(url).pathname.slice(1), JSON.parse(init.body), env); return new Response('ok'); } };
   return env;
 }
@@ -50,7 +50,7 @@ test('hooks are test-only: no configuration binds them', () => {
 
 test('hooks are inert unless TEST_HOOKS_ENABLED is "true"', async () => {
   const { env } = await loaded(20);
-  await ingest(env, '/v1/ingest/shopify', { format: 'graphql', mode: 'updated_since', nodes: [], weekStart: WEEK });
+  await ingest(env, '/v1/ingest/shopify', viaNormalized({ mode: 'updated_since', nodes: [], weekStart: WEEK }));
   let called = 0;
   env.TEST_HOOK = { fetch: async () => { called++; return new Response('ok'); } };
   assert.equal((await schedule(env)).status, 200);

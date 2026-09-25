@@ -26,7 +26,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { detectAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
 import { readWindowsCredential } from './credentials.mjs';
-import { lastCompletedWeek, weekFromStart, render, customerHeaders, csvHeaderNames, sha256, localPaths, assertNoSecretsInConfig, invalidExportReason, purgeOlderThan } from './lib.mjs';
+import { lastCompletedWeek, weekFromStart, render, customerHeaders, csvHeaderNames, sha256, localPaths, assertNoSecretsInConfig, invalidExportReason, purgeOlderThan, resolveDelivery, MAPPING_EXPORT_COLUMNS, unexpectedColumns } from './lib.mjs';
 import { uploadShipStationCsv, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
 
 function argv() {
@@ -61,10 +61,9 @@ async function main() {
   assertNoSecretsInConfig(config);
   const paths = localPaths(config);
   for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
-  const delivery = config.delivery || 'worker';
-  if (!['worker', 'drive'].includes(delivery)) throw new Error('config.delivery must be "worker" or "drive"');
+  const { delivery } = resolveDelivery(config);                          // Worker by default; Drive only if explicit
   if (delivery === 'worker') workerEndpoint(config.workerUrl);            // fail fast on a bad URL
-  purgeOlderThan(paths.quarantine, 72 * 3600_000);                        // failed-delivery retention: 72 hours
+  purgeOlderThan(paths.quarantine, 72 * 3600_000);                        // also runs daily from purge.mjs
   const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone);
   const runId = `ssx_${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const manifest = { runId, weekStart: week.weekStart, weekEnd: week.weekEnd, startedAt: new Date().toISOString(), status: 'running' };
@@ -100,11 +99,11 @@ async function main() {
     const file = await runSteps(page, config.exportSteps || [], week, paths.downloads);
     const buf = fs.readFileSync(file);
     const headers = csvHeaderNames(buf.toString('utf8'));
-    const pii = customerHeaders(headers);
+    const pii = [...new Set([...customerHeaders(headers), ...unexpectedColumns(headers, MAPPING_EXPORT_COLUMNS)])];
     if (pii.length) {
       fs.rmSync(file);                                        // never forward customer columns
       return finish('refused_customer_columns', EXIT.EXPORT_FAILED, { headers, customerHeaders: pii,
-        note: 'Remove these columns from the ShipStation export template' });
+        note: 'The export must contain exactly the saved template columns; remove these columns from it' });
     }
     const text = buf.toString('utf8');
     const rows = text.split(/\r?\n/).filter(l => l.trim()).length - 1;

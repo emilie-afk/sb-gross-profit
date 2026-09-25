@@ -6,6 +6,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
 /**
  * Last completed Monday–Sunday week in the store's time zone. Scheduled at
@@ -72,12 +75,53 @@ export function csvHeaderNames(text) {
 
 export const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex');
 
+/** Path segments of cloud-synced folders a raw export must never land in. */
+const SYNCED = /(^|[\\/])(onedrive[^\\/]*|google drive|my drive|googledrive|dropbox|icloud ?drive|icloud|box sync|box)([\\/]|$)/i;
+
+/**
+ * Refuse a local working folder inside the repository or a cloud-synced folder.
+ * Raw exports (ShipStation Recipient, Shopify customer columns) only ever live
+ * in these folders, briefly.
+ */
+export function assertSafeLocalDir(dir, { repoRoot = REPO_ROOT, env = process.env } = {}) {
+  if (SYNCED.test(String(dir))) throw new Error('Local working folder must not be inside a cloud-synced folder');
+  const P = /^[A-Za-z]:[\\/]/.test(String(dir)) ? path.win32 : path;          // Windows drive paths on any host
+  const abs = P.resolve(dir);
+  const rel = P.relative(P.resolve(repoRoot), abs);
+  if (rel === '' || (!rel.startsWith('..') && !P.isAbsolute(rel))) throw new Error('Local working folder must be outside the repository');
+  for (const k of ['OneDrive', 'OneDriveCommercial', 'OneDriveConsumer']) {
+    const root = env[k];
+    if (root) { const r = P.relative(P.resolve(root), abs); if (r === '' || (!r.startsWith('..') && !P.isAbsolute(r))) throw new Error('Local working folder must not be inside OneDrive'); }
+  }
+  return abs;
+}
+
+/**
+ * Where a validated export goes. Worker upload is the default; the old
+ * copy-to-Drive behaviour is rollback only and needs delivery: "drive" AND an
+ * outputDir set explicitly.
+ */
+export function resolveDelivery(config = {}) {
+  const delivery = config.delivery === undefined || config.delivery === null ? 'worker' : config.delivery;
+  if (delivery === 'worker') return { delivery, workerUrl: config.workerUrl };
+  if (delivery === 'drive') {
+    if (!config.outputDir) throw new Error('delivery "drive" (rollback only) needs outputDir set explicitly');
+    return { delivery, outputDir: config.outputDir };
+  }
+  throw new Error('config.delivery must be "worker" or "drive"');
+}
+
 /** Local folders outside the repository: browser profile, run manifests. */
 export function localPaths(config = {}) {
   const base = config.localDir || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'sb-shipstation-export');
+  assertSafeLocalDir(base);
   return { base, profile: path.join(base, 'profile'), runs: path.join(base, 'runs'), downloads: path.join(base, 'downloads'),
            quarantine: path.join(base, 'quarantine') };
 }
+
+/** The saved template's exact columns (shared with the Worker's check). */
+export { SHIPSTATION_MAPPING_EXPORT_COLUMNS as MAPPING_EXPORT_COLUMNS } from '../../../shared/adapters/shipstation.js';
+export const unexpectedColumns = (headers, allowed) => headers.filter(h => !allowed.includes(String(h).trim()));
 
 /** Columns the saved "SB GP weekly" template must have for the export to be usable. */
 export const REQUIRED_EXPORT_HEADERS = Object.freeze(['Shipment ID', 'Order Number', 'Item SKU']);

@@ -16,7 +16,7 @@ import { normalizeShopifyOrders } from '../../shared/adapters/shopifyGraphql.js'
 import { normalizeShipStationRows } from '../../shared/adapters/shipstation.js';
 import { gqlOrder, ssCustom } from '../../tests/fixtures-normalized.mjs';
 
-import { PASSWORD, WEEK, makeEnv, bodies, call, ingest, admin, sessionCookie, catalog, weekOrders, loaded } from './helpers.mjs';
+import { PASSWORD, WEEK, makeEnv, bodies, call, ingest, admin, sessionCookie, catalog, weekOrders, loaded, viaNormalized } from './helpers.mjs';
 
 // ─── Auth and credential classes ──────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ test('A17: reads without a session are refused', async () => {
 
 test('A18/A19: ingest and admin secrets are not interchangeable', async () => {
   const env = await makeEnv();
-  const a = await call(env, 'POST', '/v1/ingest/shopify', { body: { format: 'graphql', nodes: [] }, headers: { 'X-Ingest-Secret': env.ADMIN_SECRET } });
+  const a = await call(env, 'POST', '/v1/ingest/shopify', { body: viaNormalized({ nodes: [] }), headers: { 'X-Ingest-Secret': env.ADMIN_SECRET } });
   assert.equal(a.status, 401); assert.equal(a.json.error, 'ingest_auth');
   const b = await call(env, 'GET', '/v1/admin/settings', { headers: { 'X-Admin-Secret': env.INGEST_SECRET } });
   assert.equal(b.status, 401); assert.equal(b.json.error, 'admin_auth');
@@ -104,7 +104,7 @@ test('A21: CORS answers only exact allowlisted origins', async () => {
 
 test('A6: re-posting an identical batch writes nothing and creates no duplicates', async () => {
   const { env, nodes, ship } = await loaded(10);
-  const again = await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes, weekStart: WEEK });
+  const again = await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: WEEK }));
   assert.deepEqual([again.json.rowsWritten, again.json.duplicates], [0, 10]);
   const s2 = await ingest(env, '/v1/ingest/shipstation', { format: 'rows', rows: ship, weekStart: WEEK });
   assert.deepEqual([s2.json.rowsWritten, s2.json.duplicates], [0, 10]);
@@ -116,7 +116,7 @@ test('a changed order is rewritten in place, children replaced, not duplicated',
   const { env, nodes } = await loaded(3);
   nodes[0].lineItems.nodes.push({ id: 'gid://x/LineItem/extra', sku: 'MG-JADE', name: 'MG-JADE', quantity: 1, currentQuantity: 1,
     requiresShipping: true, vendor: 'Succulents Box', originalUnitPriceSet: { shopMoney: { amount: '6' } }, discountAllocations: [] });
-  const r = await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes, weekStart: WEEK });
+  const r = await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: WEEK }));
   assert.deepEqual([r.json.rowsWritten, r.json.duplicates], [1, 2]);
   const lines = await env.DB.prepare('SELECT COUNT(*) AS n FROM shopify_order_line WHERE order_name = ?1').bind(nodes[0].name).first();
   assert.equal(lines.n, nodes[0].lineItems.nodes.length);
@@ -124,12 +124,19 @@ test('a changed order is rewritten in place, children replaced, not duplicated',
 
 test('A11 at the API: customer fields are rejected and the run is recorded as failed', async () => {
   const env = await makeEnv();
-  const bad = gqlOrder({ subtotal: 10, total: 10, lines: [{ sku: 'MG-ALOE', price: 10 }] });
+  const [bad] = normalizeShopifyOrders([gqlOrder({ subtotal: 10, total: 10, lines: [{ sku: 'MG-ALOE', price: 10 }] })], { timeZone: 'America/Los_Angeles' });
   bad.email = 'synthetic@example.invalid';
-  const r = await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes: [bad] });
+  const r = await ingest(env, '/v1/ingest/shopify', { format: 'normalized', storeTimezone: 'America/Los_Angeles', orders: [bad] });
   assert.equal(r.status, 400); assert.equal(r.json.error, 'customer_data_rejected');
   assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM shopify_order').first()).n, 0);
   assert.equal((await env.DB.prepare("SELECT status FROM ingest_run WHERE source = 'shopify'").first()).status, 'failed');
+});
+
+test('there is no Shopify API route: format graphql is refused before any run starts', async () => {
+  const env = await makeEnv();
+  const r = await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes: [] });
+  assert.deepEqual([r.status, r.json.error], [400, 'format_unavailable']);
+  assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM ingest_run').first()).n, 0);
 });
 
 test('ShipStation ingest reports level-1 diagnostics with header names only', async () => {
@@ -275,7 +282,7 @@ test('A24/A26: the default snapshot read carries no line rows; scenario input ca
 test('history and compare use the operating definition and flag provisional comparisons', async () => {
   const { env, nodes, ship } = await loaded(10);
   const next = nodes.map(n => ({ ...n, name: n.name.replace('#9', '#8'), createdAt: n.createdAt.replace('2026-09-1', '2026-09-2') }));
-  await ingest(env, '/v1/ingest/shopify', { format: 'graphql', nodes: next, weekStart: '2026-09-21' });
+  await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes: next, weekStart: '2026-09-21' }));
   await ingest(env, '/v1/ingest/shipstation', { format: 'rows', rows: ship.map(r => ({ ...r, 'Shipment ID': 'N' + r['Shipment ID'], 'Order Number': r['Order Number'].replace(/^9/, '8') })), weekStart: '2026-09-21' });
   await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   await admin(env, 'POST', '/v1/admin/runs', { weekStart: '2026-09-21' });
@@ -350,12 +357,16 @@ test('Insurance Cost treatment cannot be changed through the API before the non-
   assert.equal((await admin(env, 'POST', '/v1/admin/settings', { insurance_treatment: 'awaiting_confirmation' })).status, 200);
 });
 
-test('the normalized Shopify path keeps only allowlisted note attributes', async () => {
+test('the normalized Shopify path enforces the privacy contract: unknown note attributes are rejected', async () => {
   const env = await makeEnv();
-  const [o] = normalizeShopifyOrders([gqlOrder({ name: '#900777', createdAt: '2026-09-15T17:00:00Z', subtotal: 10, total: 10,
-                                                 lines: [{ sku: 'MG-ALOE', price: 10, vendor: 'Succulents Box' }] })], { timeZone: 'America/Los_Angeles' });
-  o.noteAttributes = [{ key: 'Channel', value: 'TikTok' }, { key: 'Gift message', value: 'Synthetic private text' }];
-  assert.equal((await ingest(env, '/v1/ingest/shopify', { format: 'normalized', storeTimezone: 'America/Los_Angeles', orders: [o] })).status, 200);
+  const mk = () => normalizeShopifyOrders([gqlOrder({ name: '#900777', createdAt: '2026-09-15T17:00:00Z', subtotal: 10, total: 10,
+                                                   lines: [{ sku: 'MG-ALOE', price: 10, vendor: 'Succulents Box' }] })], { timeZone: 'America/Los_Angeles' })[0];
+  const bad = mk(); bad.noteAttributes = [{ key: 'Channel', value: 'TikTok' }, { key: 'Gift message', value: 'Synthetic private text' }];
+  const r = await ingest(env, '/v1/ingest/shopify', { format: 'normalized', storeTimezone: 'America/Los_Angeles', orders: [bad] });
+  assert.deepEqual([r.status, r.json.error], [400, 'customer_data_rejected']);
+  assert.ok(!JSON.stringify(r.json).includes('Synthetic private text'));
+  const good = mk(); good.noteAttributes = [{ key: 'Channel', value: 'TikTok' }];
+  assert.equal((await ingest(env, '/v1/ingest/shopify', { format: 'normalized', storeTimezone: 'America/Los_Angeles', orders: [good] })).status, 200);
   const row = await env.DB.prepare('SELECT note_attributes FROM shopify_order').first();
   assert.deepEqual(JSON.parse(row.note_attributes), [{ key: 'Channel', value: 'TikTok' }]);
 });
