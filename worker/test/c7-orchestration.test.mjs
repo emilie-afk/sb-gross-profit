@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import worker from '../src/index.js';
-import { makeEnv, loaded, ingest, admin, call, sessionCookie, viaNormalized, catalog, weekOrders, markShippingSourceVerifiedForTests, WEEK } from './helpers.mjs';
+import { makeEnv, loaded, ingest, admin, call, sessionCookie, viaNormalized, catalog, weekOrders, markShippingSourceVerifiedForTests, WEEK, asOf, ingestReport } from './helpers.mjs';
 import { reportRow } from '../../tests/fixtures-shipping-cost.mjs';
 import { ssCustom, gqlOrder } from '../../tests/fixtures-normalized.mjs';
 import { sanitizeShippingCostReport, parseShippingCostReport } from '../../shared/adapters/shippingCostReport.js';
@@ -18,7 +18,7 @@ import { retryTimeline, nextRetryAt, pastCutoff, RETRY_POLICY } from '../../shar
 import { canTransition, TRANSITIONS } from '../src/runs.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const tick = (env, iso) => worker.scheduled({ scheduledTime: Date.parse(iso) }, env, null);
+const tick = async (env, iso) => { await asOf(env, iso); return worker.scheduled({ scheduledTime: Date.parse(iso) }, env, null); };
 const count = async (env, table, where = '1=1') => (await env.DB.prepare(`SELECT COUNT(*) n FROM ${table} WHERE ${where}`).first()).n;
 const cycleRow = env => env.DB.prepare('SELECT * FROM schedule_cycle WHERE week_start = ?1').bind(WEEK).first();
 const runOf = async env => env.DB.prepare('SELECT * FROM reporting_run WHERE run_id = ?1').bind((await cycleRow(env)).run_id).first();
@@ -140,12 +140,16 @@ test('C7: never an older source — a report that does not cover the week, or ar
   await updatesScan(env);
   await sendReport(env, nodes.slice(0, 4), { accept: true, from: '2026-09-14', to: '2026-09-18' });   // ends Friday
   const r = await tick(env, '2026-09-21T08:30:00Z');
-  assert.deepEqual(r.attempts[0].missing, ['shipping_cost_report:missing']);
+  assert.deepEqual(r.attempts[0].missing, ['shipping_cost_report:partial'], 'C8: accepted data covers Mon–Fri only');
   // A full-week report whose import predates the week's close (e.g. an old export re-sent) is not substituted either.
   const v = await sendReport(env, nodes, { accept: true });
   await env.DB.prepare("UPDATE shipping_cost_source_version SET imported_at = '2026-09-20T12:00:00.000Z' WHERE version_id = ?1").bind(v.versionId).run();
   const r2 = await tick(env, '2026-09-21T08:45:00Z');
-  assert.deepEqual(r2.attempts[0].missing, ['shipping_cost_report:missing']);
+  assert.deepEqual(r2.attempts[0].missing, ['shipping_cost_report:partial']);
+  assert.equal(await count(env, 'snapshot'), 0);
+  // And a manual compute of the week is refused outright: no financial snapshot on partial data.
+  const m = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
+  assert.deepEqual([m.status, m.json.error], [409, 'shipping_report_not_ready']);
   assert.equal(await count(env, 'snapshot'), 0);
 });
 
@@ -179,19 +183,134 @@ test('C7 report states: accepted computes and passes the report gate; only the p
   assert.deepEqual([p.status, p.json.detail?.reason], [409, 'publication_disabled'], 'controls are off; nothing else blocks it');
 });
 
-test('C7 report states: pending_review computes a provisional draft but can never publish', async () => {
+test('C8 report basis: an accepted full-week report with a newer version pending → labelled draft, publication blocked', async () => {
   const { env, run } = await computedWith('pending_review');
   assert.equal(run.state, 'validated', 'the draft is allowed (computed on the accepted, active report data)');
   const gate = JSON.parse(run.gate);
-  assert.equal(gate.shippingReport.status, 'pending_review');
-  assert.ok(gate.warnings.some(w => w.code === 'shipping_report_pending_review'));
+  assert.equal(gate.shippingReport.status, 'accepted');
+  assert.equal(gate.shippingReport.newerPending.length, 1);
+  assert.equal(gate.shippingReport.label, 'Newer shipping report pending review');
+  assert.ok(gate.warnings.some(w => w.code === 'shipping_report_newer_pending'));
+  const used = gate.shippingReport.used;
+  assert.deepEqual(used.map(u => [u.state, u.requestedFrom, u.requestedTo, u.weekDatesFrom, u.weekDatesTo]), [['accepted', WEEK, '2026-09-20', WEEK, '2026-09-20']]);
+  assert.match(used[0].sha256, /^[0-9a-f]{64}$/); assert.ok(used[0].receivedAt);
   assert.equal((await env.DB.prepare('SELECT status FROM snapshot WHERE snapshot_id = ?1').bind(run.snapshot_id).first()).status, 'draft');
-  // Even with both publication switches on (test-only), pending review refuses publication.
+  // The draft itself carries the disclosure.
+  const snap = (await admin(env, 'GET', `/v1/snapshot/${WEEK}?includeDrafts=1`)).json;
+  const d = snap.totals.labels.c3.disclosures;
+  assert.equal(d.shippingReport.label, 'Newer shipping report pending review');
+  assert.ok(d.labels.includes('Newer shipping report pending review'));
+  assert.deepEqual([d.shippingReport.used.length, d.shippingReport.newerPending.length], [1, 1]);
+  // And the status card.
+  const st = (await call(env, 'GET', `/v1/automation/status?weekStart=${WEEK}`, { cookie: await sessionCookie(env) })).json;
+  assert.deepEqual([st.shippingReport.status, st.shippingReport.newerPending.length, st.shippingReport.used[0].state, st.sources.pendingReview], ['ok', 1, 'accepted', ['shipping_cost_report']]);
+  const { renderAutomationStatus } = await import('../../js/automationStatus.js');
+  assert.match(renderAutomationStatus(st), /Newer shipping report pending review/);
+  // Even with both publication switches on (test-only), the pending newer version refuses publication.
   await env.DB.prepare("UPDATE settings SET value = 'true' WHERE key = 'publication_enabled'").run();
   env.PUBLICATION_ALLOWED = 'true';
   const p = await admin(env, 'POST', '/v1/admin/publish', { snapshotId: run.snapshot_id });
-  assert.deepEqual([p.status, p.json.detail?.reason], [409, 'shipping_report_not_accepted']);
+  assert.deepEqual([p.status, p.json.detail?.reason], [409, 'shipping_report_newer_pending']);
   assert.equal(await count(env, 'snapshot', "status = 'published'"), 0);
+});
+
+test('C8 report basis: accepting the newer version creates a new draft revision on it; the old draft can no longer publish', async () => {
+  const { env, run } = await computedWith('pending_review');
+  const gate = JSON.parse(run.gate);
+  const newer = gate.shippingReport.newerPending[0].versionId;
+  assert.equal((await admin(env, 'POST', `/v1/admin/shipping-cost/versions/${newer}/accept`, { reason: 'test: reviewed the newer export' })).status, 200);
+  const t = await tick(env, '2026-09-21T08:45:00Z');
+  assert.deepEqual(t.revisions.map(r => [r.weekStart, r.basisChanged]), [[WEEK, true]], JSON.stringify(t));
+  const snaps = (await env.DB.prepare('SELECT snapshot_id, revision, status, run_id FROM snapshot WHERE week_start = ?1 ORDER BY revision').bind(WEEK).all()).results;
+  assert.deepEqual(snaps.map(x => [x.revision, x.status]), [[1, 'draft'], [2, 'draft']]);
+  const rev = await env.DB.prepare('SELECT gate, reason, trigger FROM reporting_run WHERE run_id = ?1').bind(snaps[1].run_id).first();
+  const g2 = JSON.parse(rev.gate);
+  assert.deepEqual([rev.trigger, g2.shippingReport.used.map(u => u.versionId), g2.shippingReport.newerPending], ['source_update', [newer], []]);
+  assert.match(rev.reason, /Shipping Cost Report basis changed/);
+  assert.ok(!g2.warnings.some(w => w.code === 'shipping_report_newer_pending'));
+  // The changed costs are in the new revision's shipping expense (6.40 on every third order).
+  const exp = async id => (await env.DB.prepare('SELECT shipping_expense AS e FROM snapshot_totals WHERE snapshot_id = ?1').bind(id).first()).e;
+  assert.ok(await exp(snaps[1].snapshot_id) > await exp(snaps[0].snapshot_id));
+  // Idempotent, and nothing publishes.
+  assert.deepEqual((await tick(env, '2026-09-21T09:00:00Z')).revisions, []);
+  await env.DB.prepare("UPDATE settings SET value = 'true' WHERE key = 'publication_enabled'").run();
+  env.PUBLICATION_ALLOWED = 'true';
+  const old = await admin(env, 'POST', '/v1/admin/publish', { snapshotId: snaps[0].snapshot_id });
+  assert.equal(old.status, 409, 'the draft computed on the superseded basis cannot publish');
+  assert.equal(await count(env, 'snapshot', "status = 'published'"), 0);
+});
+
+test('C8 report basis: rejecting the newer version also drafts a revision, without the pending label', async () => {
+  const { env, run } = await computedWith('pending_review');
+  const newer = JSON.parse(run.gate).shippingReport.newerPending[0].versionId;
+  assert.equal((await admin(env, 'POST', `/v1/admin/shipping-cost/versions/${newer}/reject`, { reason: 'test: wrong export' })).status, 200);
+  const t = await tick(env, '2026-09-21T08:45:00Z');
+  assert.equal(t.revisions.length, 1);
+  const g = JSON.parse((await env.DB.prepare("SELECT gate FROM reporting_run WHERE week_start = ?1 AND trigger = 'source_update'").bind(WEEK).first()).gate);
+  assert.deepEqual([g.shippingReport.used.map(u => u.versionId), g.shippingReport.newerPending, g.shippingReport.label], [JSON.parse(run.gate).shippingReport.used.map(u => u.versionId), [], null]);
+});
+
+test('C8 report basis: a pending-only report never borrows older data — waiting, no snapshot, manual compute refused', async () => {
+  const { env, nodes } = await partial();
+  await updatesScan(env);
+  // An older accepted report exists for the PREVIOUS week only; the week's only report is pending review.
+  await ingestReport(env, [{ order: '555001', date: '2026-09-10', cost: 4 }], { from: '2026-09-07', to: '2026-09-13', exportedAt: '2026-09-14T15:00:00Z' });
+  const v = await sendReport(env, nodes, { from: '2026-09-07' });            // overlaps the accepted week differently → review
+  assert.equal(v.status, 'pending_review');
+  const t = await tick(env, '2026-09-21T08:30:00Z');
+  assert.deepEqual([t.attempts[0].state, t.attempts[0].missing], ['waiting_for_sources', ['shipping_cost_report:pending_review']]);
+  assert.equal(await count(env, 'snapshot'), 0);
+  const m = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
+  assert.deepEqual([m.status, m.json.error], [409, 'shipping_report_not_ready']);
+  assert.equal(await count(env, 'snapshot'), 0);
+  const st = (await admin(env, 'GET', `/v1/admin/cycles/${WEEK}`)).json;
+  assert.deepEqual([st.shippingReport.status, st.shippingReport.used, st.shippingReport.pendingReview.map(p => p.versionId), st.shippingReport.newerPending], ['pending_review', [], [v.versionId], []]);
+  // Accepting it is a change: the next tick computes on it.
+  assert.equal((await admin(env, 'POST', `/v1/admin/shipping-cost/versions/${v.versionId}/accept`, { reason: 'test: reviewed' })).status, 200);
+  await tick(env, '2026-09-21T08:35:00Z');
+  const g = JSON.parse((await runOf(env)).gate);
+  assert.deepEqual(g.shippingReport.used.map(u => u.versionId), [v.versionId]);
+});
+
+test('C8 report basis: split coverage — accepted versions owning parts of the week are all recorded', async () => {
+  const { env, nodes } = await partial();
+  await updatesScan(env);
+  await sendReport(env, nodes.slice(0, 4), { accept: true, from: '2026-09-07', to: '2026-09-18' });          // Mon–Fri (and the week before)
+  await ingestReport(env, [{ order: nodes[4].name.slice(1), date: '2026-09-19', cost: 5.1 }], { from: '2026-09-19', to: '2026-09-20' });   // Sat–Sun
+  await tick(env, '2026-09-21T08:30:00Z');
+  const run = await runOf(env);
+  assert.ok(['validated', 'blocked'].includes(run.state), run.state);
+  const g = JSON.parse(run.gate);
+  assert.deepEqual(g.shippingReport.used.map(u => [u.requestedFrom, u.weekDatesFrom, u.weekDatesTo, u.state]),
+    [['2026-09-07', WEEK, '2026-09-18', 'accepted'], ['2026-09-19', '2026-09-19', '2026-09-20', 'accepted']]);
+});
+
+test('C8 report basis: pure rules — coverage, receipt after close, as-of acceptance, newer pending', async () => {
+  const { reportBasisFrom } = await import('../src/compute.js');
+  const v = (id, from, to, imported, status = 'accepted', decided = imported) => ({ version_id: id, status, requested_from: from, requested_to: to, imported_at: imported, decided_at: status === 'pending_review' ? null : decided, sanitized_sha256: id.padEnd(64, '0') });
+  const seg = (from, to, id) => ({ segFrom: from, segTo: to, versionId: id });
+  const base = { weekStart: WEEK, closedAt: '2026-09-21T07:00:00.000Z', asOf: '2026-09-22T08:30:00.000Z' };
+  // Full accepted coverage.
+  let b = reportBasisFrom({ ...base, segments: [seg('2026-09-07', '2026-09-20', 'a')], versions: [v('a', '2026-09-07', '2026-09-20', '2026-09-21T08:10:00.000Z')] });
+  assert.deepEqual([b.status, b.used.length, b.newerPending.length, b.label], ['ok', 1, 0, null]);
+  // A gap on Saturday: partial.
+  b = reportBasisFrom({ ...base, segments: [seg(WEEK, '2026-09-18', 'a'), seg('2026-09-20', '2026-09-20', 'b')],
+    versions: [v('a', WEEK, '2026-09-18', '2026-09-21T08:10:00.000Z'), v('b', '2026-09-20', '2026-09-20', '2026-09-21T08:10:00.000Z')] });
+  assert.equal(b.status, 'partial');
+  // Owner of Sunday received before the week closed: partial (no trailing substitution).
+  b = reportBasisFrom({ ...base, segments: [seg(WEEK, '2026-09-20', 'a')], versions: [v('a', WEEK, '2026-09-20', '2026-09-20T12:00:00.000Z')] });
+  assert.equal(b.status, 'partial');
+  // Accepted after the as-of instant: still pending as of then.
+  b = reportBasisFrom({ ...base, segments: [seg(WEEK, '2026-09-20', 'a')], versions: [v('a', WEEK, '2026-09-20', '2026-09-21T08:10:00.000Z', 'accepted', '2026-09-22T08:30:00.001Z')] });
+  assert.deepEqual([b.status, b.pendingReview.map(p => p.versionId)], ['pending_review', ['a']]);
+  // Received after the as-of instant: invisible.
+  b = reportBasisFrom({ ...base, segments: [], versions: [v('a', WEEK, '2026-09-20', '2026-09-22T08:30:00.001Z', 'pending_review')] });
+  assert.equal(b.status, 'missing');
+  // Newer pending (partial overlap counts) vs. older pending (does not).
+  b = reportBasisFrom({ ...base, segments: [seg(WEEK, '2026-09-20', 'a')], versions: [v('old', WEEK, '2026-09-20', '2026-09-21T07:30:00.000Z', 'pending_review'),
+    v('a', WEEK, '2026-09-20', '2026-09-21T08:10:00.000Z'), v('n', '2026-09-19', '2026-09-27', '2026-09-22T01:00:00.000Z', 'pending_review')] });
+  assert.deepEqual([b.status, b.newerPending.map(x => x.versionId), b.label], ['ok', ['n'], 'Newer shipping report pending review']);
+  assert.notEqual(b.signature, reportBasisFrom({ ...base, segments: [seg(WEEK, '2026-09-20', 'a')], versions: [v('a', WEEK, '2026-09-20', '2026-09-21T08:10:00.000Z')] }).signature);
 });
 
 test('C7 report states: rejected leaves the source missing — no computation, no publication', async () => {
@@ -199,10 +318,10 @@ test('C7 report states: rejected leaves the source missing — no computation, n
   assert.deepEqual([t.attempts[0].state, t.attempts[0].missing], ['waiting_for_sources', ['shipping_cost_report:missing']]);
   assert.equal(run.state, 'waiting_for_sources');
   assert.equal(await count(env, 'snapshot'), 0);
-  // A manual compute of the week is blocked by the report gate.
+  // C8: a manual compute of the week is refused — no financial snapshot without an accepted report.
   const m = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
-  assert.ok(m.json.gate.failures.some(f => f.code === 'shipping_report_missing'));
-  assert.equal(m.json.snapshotStatus, 'blocked');
+  assert.deepEqual([m.status, m.json.error], [409, 'shipping_report_not_ready']);
+  assert.equal(await count(env, 'snapshot'), 0);
 });
 
 test('C7: the mapping export never satisfies readiness and is financially inert', async () => {
@@ -257,6 +376,7 @@ test('C7: an earlier order changed by the rolling export drafts a traced revisio
   const PREV = '2026-09-07';
   const prevOrder = gqlOrder({ name: '#980001', createdAt: '2026-09-08T17:00:00Z', subtotal: 20, shipping: 5, total: 25, lines: [{ sku: 'MG-ALOE', price: 10, qty: 2, vendor: 'Succulents Box' }] });
   assert.equal((await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes: [prevOrder], weekStart: PREV }))).status, 200);
+  await ingestReport(env, [{ order: '980001', date: '2026-09-09', cost: 5.1 }], { from: PREV, to: '2026-09-13', exportedAt: '2026-09-14T15:00:00Z' });   // C8
   const prev = await admin(env, 'POST', '/v1/admin/runs', { weekStart: PREV });
   assert.equal(prev.status, 200);
   const before = (await env.DB.prepare('SELECT snapshot_id, status FROM snapshot WHERE week_start = ?1').bind(PREV).all()).results;
@@ -340,11 +460,12 @@ test('C7 controls: the tick does nothing unless AUTOMATION_ENABLED is "true"; wr
 
 test('C7: the collector week plan says what the last closed week still lacks (codes only)', async () => {
   const { env, nodes } = await partial();
-  const plan = async () => (await call(env, 'GET', '/v1/ingest/week-plan?at=2026-09-21T08:05:00Z', { headers: { 'X-Ingest-Secret': env.INGEST_SECRET } })).json;
+  const plan = async () => { await asOf(env, '2026-09-21T08:05:00Z'); return (await call(env, 'GET', '/v1/ingest/week-plan?at=2026-09-21T08:05:00Z', { headers: { 'X-Ingest-Secret': env.INGEST_SECRET } })).json; };
   let p = await plan();
   assert.deepEqual([p.weekStart, p.collected, p.collectionComplete], [WEEK, { shopify: 'ok', shopify_updates: 'missing', shipping_cost_report: 'missing' }, false]);
   await updatesScan(env); await sendReport(env, nodes);
   p = await plan();
-  assert.deepEqual([p.collected, p.collectionComplete], [{ shopify: 'ok', shopify_updates: 'ok', shipping_cost_report: 'ok' }, true]);
+  assert.deepEqual([p.collected, p.collectionComplete, p.shippingReportReview], [{ shopify: 'ok', shopify_updates: 'ok', shipping_cost_report: 'ok' }, true, 'pending_review'],
+    'a report waiting for review is delivered: the collector does not export it again');
   assert.equal(p.shopify, undefined, 'no Shopify API search strings');
 });

@@ -265,7 +265,7 @@ export function publicationShippingStatus({ sourceVerified, provisionalEnabled, 
  * The disclosure block shown with every C3 result. Product-cost completeness
  * and shipping-source verification are separate statuses.
  */
-export function shippingDisclosures({ catalogRev, missingCostLines, missingCostRevenue, sourceVerified, lifecycle, publicationAllowed = false, catalogCompleteness = null }) {
+export function shippingDisclosures({ catalogRev, missingCostLines, missingCostRevenue, sourceVerified, lifecycle, publicationAllowed = false, catalogCompleteness = null, shippingReportBasis = null }) {
   // C6d: a catalog whose cost sources are not all refreshed live stays
   // "incomplete" even when every line in the week happens to have a cost.
   const sourcesIncomplete = !!catalogCompleteness && catalogCompleteness.status !== 'complete';
@@ -282,10 +282,18 @@ export function shippingDisclosures({ catalogRev, missingCostLines, missingCostR
     shippingSource: { source: 'shipstation_shipping_cost_report', status: sourceVerified ? 'verified' : 'unverified',
                       label: sourceVerified ? 'Shipping source verified' : 'Shipping source unverified' },
     shippingCoverage: lifecycle,
+    // C8: which report versions this result used, and any newer one in review.
+    ...(shippingReportBasis ? { shippingReport: {
+      used: (shippingReportBasis.used || []).map(u => ({ versionId: u.versionId, sha256: u.sha256 || null, requestedFrom: u.requestedFrom, requestedTo: u.requestedTo,
+                                                         receivedAt: u.receivedAt, state: u.state, weekDatesFrom: u.weekDatesFrom, weekDatesTo: u.weekDatesTo })),
+      newerPending: (shippingReportBasis.newerPending || []).map(v => ({ versionId: v.versionId, sha256: v.sha256 || null, requestedFrom: v.requestedFrom,
+                                                                          requestedTo: v.requestedTo, receivedAt: v.receivedAt, state: v.state })),
+      label: shippingReportBasis.newerPending?.length ? 'Newer shipping report pending review' : 'Accepted shipping report' } } : {}),
     publication: publicationAllowed ? 'enabled' : 'disabled',
     labels: ['Provisional', sourceVerified ? 'Shipping source verified' : 'Shipping source unverified',
              incomplete ? 'Product-cost catalog incomplete' : 'Product costs complete',
              ...(missingCostLines > 0 ? [`${missingCostLines} lines missing product cost`] : []),
+             ...(shippingReportBasis?.newerPending?.length ? ['Newer shipping report pending review'] : []),
              publicationAllowed ? 'Publication enabled' : 'Publication disabled'],
   };
 }

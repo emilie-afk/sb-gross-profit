@@ -16,7 +16,7 @@ import { normalizeShopifyOrders } from '../../shared/adapters/shopifyGraphql.js'
 import { normalizeShipStationRows } from '../../shared/adapters/shipstation.js';
 import { gqlOrder, ssCustom } from '../../tests/fixtures-normalized.mjs';
 
-import { PASSWORD, WEEK, makeEnv, bodies, call, ingest, admin, sessionCookie, catalog, weekOrders, loaded, viaNormalized } from './helpers.mjs';
+import { PASSWORD, WEEK, makeEnv, bodies, call, ingest, admin, sessionCookie, catalog, weekOrders, loaded, viaNormalized, ingestReport } from './helpers.mjs';
 
 // ─── Auth and credential classes ──────────────────────────────────────────────
 
@@ -285,15 +285,20 @@ test('A24/A26: the default snapshot read carries no line rows; scenario input ca
 
 test('history and compare use the operating definition and flag provisional comparisons', async () => {
   const { env, nodes, ship } = await loaded(10);
-  const next = nodes.map(n => ({ ...n, name: n.name.replace('#9', '#8'), createdAt: n.createdAt.replace('2026-09-1', '2026-09-2') }));
-  await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes: next, weekStart: '2026-09-21' }));
-  await ingest(env, '/v1/ingest/shipstation', { format: 'rows', rows: ship.map(r => ({ ...r, 'Shipment ID': 'N' + r['Shipment ID'], 'Order Number': r['Order Number'].replace(/^9/, '8') })), weekStart: '2026-09-21' });
+  // C8: every computed week needs an accepted Shipping Cost Report received after
+  // it closed, so the second week is the one BEFORE WEEK (its report is in).
+  const PREV = '2026-09-07', back = iso => new Date(Date.parse(iso) - 7 * 86400000).toISOString();
+  const prev = nodes.map(n => ({ ...n, name: n.name.replace('#9', '#8'), createdAt: back(n.createdAt) }));
+  await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes: prev, weekStart: PREV }));
+  await ingest(env, '/v1/ingest/shipstation', { format: 'rows', rows: ship.map(r => ({ ...r, 'Shipment ID': 'N' + r['Shipment ID'], 'Order Number': r['Order Number'].replace(/^9/, '8') })), weekStart: PREV });
+  await ingestReport(env, prev.map(o => ({ order: o.name.slice(1), date: o.createdAt.slice(0, 10), cost: 5.1 })),
+                     { from: PREV, to: '2026-09-13', exportedAt: '2026-09-14T15:00:00Z' });
   await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
-  await admin(env, 'POST', '/v1/admin/runs', { weekStart: '2026-09-21' });
+  await admin(env, 'POST', '/v1/admin/runs', { weekStart: PREV });
   const h = await admin(env, 'GET', '/v1/history?includeDrafts=1&from=2026-09-01&to=2026-09-30');
-  assert.deepEqual(h.json.weeks.map(w => w.weekStart), [WEEK, '2026-09-21']);
+  assert.deepEqual(h.json.weeks.map(w => w.weekStart), [PREV, WEEK]);
   assert.equal(h.json.definition, 'operating');
-  const c = await admin(env, 'GET', `/v1/compare?includeDrafts=1&from=${WEEK}&to=2026-09-21`);
+  const c = await admin(env, 'GET', `/v1/compare?includeDrafts=1&from=${PREV}&to=${WEEK}`);
   assert.equal(c.status, 200);
   assert.equal(c.json.provisional, true);
   assert.equal(typeof c.json.delta.operatingRevenue, 'number');

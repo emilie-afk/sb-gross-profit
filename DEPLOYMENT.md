@@ -656,8 +656,9 @@ detected automatically unless a broader manual or backfill export is run.
 
 Readiness (`GET /v1/admin/readiness?weekStart=`) now requires:
 `shopify` (sanitized orders export), `shopify_updates` (updated-order scan),
-`shipping_cost_report` (a version received after the week closed whose
-requested range covers the week; pending review or accepted, not rejected),
+`shipping_cost_report` (C8: accepted report data owning all seven ship dates
+of the week, with the owner of the last date received after the week closed;
+a pending version shows as received but does not make the week ready),
 the week's `catalog_refresh`, and `reporting_period` closed. The mapping export
 appears only as `shipstation_mapping` (`required: false`,
 `satisfiesShippingReadiness: false`).
@@ -678,7 +679,7 @@ secret), kept out of this repository.
 **Required inputs:** a run computes only with all of these:
 - the rolling Shopify export;
 - the updated-order scan (satisfied by the same rolling upload);
-- a Shipping Cost Report received after the week closed and covering it;
+- accepted Shipping Cost Report data covering every ship date of the week (C8; see below);
 - a successful catalog refresh, or an audited reuse approval (`POST /v1/admin/cycles/<week>/accept-catalog-reuse { reason }`);
 - a closed reporting period.
 
@@ -709,17 +710,26 @@ An upload, a catalog refresh or a reuse approval for the week also triggers an a
 | `computing` | compute error | `failed` (resumable) | none |
 | `validated` | publish (controls on, report accepted) | `published` | — |
 
-**Shipping Cost Report states:**
-- `accepted`: computes and may pass the report gate.
-- `pending_review`: satisfies arrival. The provisional draft is computed on the accepted, active report data, and publication is refused (`shipping_report_not_accepted`).
-- `rejected`: the source stays missing, so the run waits, and a manual compute is gate-blocked (`shipping_report_missing`).
+**Cutoff boundary (C8):** every attempt evaluates the uploads, review decisions and catalog results recorded **at or before the tick instant** (the Cron `scheduledTime`). At the Tuesday 15:30 ICT attempt, a report received at 15:29:59.999 or exactly 15:30:00.000 is counted and the draft is computed; only if a required source is still missing after that evaluation does the run become `source_timeout`. An upload recorded after the instant is not counted by that attempt and is not marked as seen, so the next tick resumes the same run.
+
+**Shipping Cost Report basis (C8).** A pending report never silently borrows an older accepted report. Each draft records, and the status card shows, the report version(s) used — sha256, requested period, received time, acceptance state, the week dates each owns — and any newer version pending review.
+
+| Situation | Result |
+| --- | --- |
+| Accepted versions own all seven ship dates; the owner of Sunday was received after the week closed | draft computed on them |
+| …and a newer version overlapping the week is pending review | draft labelled **"Newer shipping report pending review"**; publication refused (`shipping_report_newer_pending`); accepting or rejecting the newer version makes the next tick draft a new revision |
+| Only a pending version covers the week | `shipping_cost_report:pending_review` — waiting, no financial snapshot |
+| Accepted data covers only part of the week, or its Sunday owner arrived before the week closed | `shipping_cost_report:partial` — waiting, no snapshot |
+| Nothing covers the week (or the only version was rejected) | `shipping_cost_report:missing` — waiting, no snapshot |
+
+A manual or revision compute of a week without a usable basis is refused (`409 shipping_report_not_ready`); no prior week or partial report is substituted. At publication the basis is recomputed: a used version no longer accepted, a changed owner, or a newer pending version refuses it. The Windows week plan counts a received pending version as delivered (`collected.shipping_cost_report: "ok"`, `shippingReportReview: "pending_review"`), so the collector does not export it again.
 
 **Catalog:** the catalog revision is pinned at the run's first compute, and retries and recomputes keep it. A newer catalog never changes a computed week; that needs an audited restatement.
 
-**Earlier weeks:** once the cycle has computed, each tick drafts one revision for an earlier week touched by this cycle's uploads. The revision reason names the source, the ingest run and the sanitized source sha256 prefix. Published snapshots are never altered.
+**Earlier weeks:** each tick drafts at most one revision: first a week (last 12 weeks) whose Shipping Cost Report basis changed since its latest snapshot; otherwise, once the cycle has computed, an earlier week touched by this cycle's uploads. The revision reason names the source, the ingest run and the sanitized source sha256 prefix. Published snapshots are never altered.
 
 **Status:**
-- `GET /v1/automation/status?weekStart=` (dashboard session, through the proxy; shown on the Reports screen) returns the schedule, last attempt, next retry, sources received / missing / pending review, timeout state, run state, catalog revision and completeness, and shipping verification. It returns codes and timestamps only.
+- `GET /v1/automation/status?weekStart=` (dashboard session, through the proxy; shown on the Reports screen) returns the schedule, last attempt, next retry, sources received / missing / pending review, the Shipping Cost Report basis (versions used and newer pending: sha256 prefix, period, received time, state), timeout state, run state, catalog revision and completeness, and shipping verification. It returns codes, hashes and timestamps only.
 - `GET /v1/admin/cycles/<week>` adds the run id and the automation events.
 
 ### Make, ShipStation job, backfill

@@ -11,7 +11,7 @@ import { loadOrdersForWeek, loadShipmentsForOrders, loadHpdForOrders, loadCatalo
 import { createRun, createRunStatements, getRun, transition, ownsCycle, canTransition } from './runs.js';
 import { WORKER } from './actor.js';
 import { buildSnapshot, ENGINE_VERSION, SHIPPING_SOURCES } from '../../shared/snapshot.js';
-import { effectiveOrderTotals, activeSegments } from './shippingCost.js';
+import { effectiveOrderTotals, activeSegments, contiguous } from './shippingCost.js';
 import { selectIn } from './db.js';
 import { evaluateGate, canPublish } from '../../shared/gate.js';
 import { addDays } from '../../shared/normalized.js';
@@ -163,11 +163,18 @@ export const REFRESH_TIMEOUT_MINUTES = 45;
 const catalogCapturedAt = async (db, rev) =>
   rev ? (await db.prepare('SELECT captured_at FROM cost_catalog WHERE catalog_rev = ?1').bind(rev).first())?.captured_at || null : null;
 
-export async function latestRefresh(db, weekStart) {
-  const r = await db.prepare('SELECT * FROM catalog_refresh WHERE week_start = ?1 ORDER BY requested_at DESC, refresh_id DESC LIMIT 1').bind(weekStart).first();
+/**
+ * The week's latest catalog refresh as of `now`: a refresh requested later is
+ * not visible, and a decision recorded after `now` still counts as pending.
+ */
+export async function latestRefresh(db, weekStart, now = Date.now()) {
+  const asOf = new Date(now).toISOString();
+  const r = await db.prepare('SELECT * FROM catalog_refresh WHERE week_start = ?1 AND requested_at <= ?2 ORDER BY requested_at DESC, refresh_id DESC LIMIT 1').bind(weekStart, asOf).first();
   if (!r) return null;
-  const expired = r.status === 'pending' && Date.now() - Date.parse(r.requested_at) > REFRESH_TIMEOUT_MINUTES * 60_000;
-  return { ...r, effective_status: expired ? 'expired' : r.status, detail: JSON.parse(r.detail || '{}') };
+  const decided = r.status !== 'pending' && (!r.resolved_at || r.resolved_at <= asOf);
+  const status = decided ? r.status : 'pending';
+  const expired = status === 'pending' && now - Date.parse(r.requested_at) > REFRESH_TIMEOUT_MINUTES * 60_000;
+  return { ...r, effective_status: expired ? 'expired' : status, detail: JSON.parse(r.detail || '{}') };
 }
 
 async function weekAnchor(db, weekStart) {
@@ -254,9 +261,10 @@ export async function acceptCatalogReuse(db, run, info, acceptance, actor, owner
  *   shopify               sanitized Shopify orders export received (ingest run, mode 'week')
  *   shopify_updates       updated-order scan received (mode 'updated_since'; a rolling
  *                         export records it as a companion run)
- *   shipping_cost_report  a ShipStation Shipping Cost Report version received after the
- *                         week closed whose requested ship-date range covers the week
- *                         (pending_review or accepted; a rejected version does not count)
+ *   shipping_cost_report  C8: ACCEPTED Shipping Cost Report data owns all seven ship
+ *                         dates of the week (shippingReportBasis). A pending version
+ *                         is shown as received / pending review but does not make the
+ *                         week ready; a newer pending version is labelled.
  *   catalog_refresh       the week's catalog refresh finished (either way)
  *   reporting_period      the week has closed in the store time zone
  * Informational only: `shipstation_mapping` (the dormant mapping export) never
@@ -269,17 +277,96 @@ const INGEST_SOURCES = [
   { key: 'hpd', source: 'hpd', mode: null, required: false },
 ];
 
-/** The newest Shipping Cost Report version that can serve this week, if any. */
-export async function shippingCostReportFor(db, weekStart, win) {
+// ─── Shipping Cost Report basis (C8) ─────────────────────────────────────────
+//
+// A week's shipping expense is read from the ACTIVE segments (C2/C3). The basis
+// says which accepted versions own the week's seven ship dates, and whether a
+// newer version is waiting for review. A pending version never silently lends
+// the week an older accepted report:
+//   ok              accepted versions own every date of the week, the owner of
+//                   the last date was received after the week closed
+//                   (a draft may be computed; `newerPending` lists any later
+//                   version still in review — labelled, publication blocked)
+//   pending_review  a version covering the week was received but is not yet
+//                   accepted, and accepted data does not cover the week
+//   partial         accepted data covers only part of the week (or the owner of
+//                   its last date was received before the week closed)
+//   missing         nothing covers the week
+// Anything but `ok` keeps the week waiting and no financial snapshot is created.
+// Everything is evaluated as of `now`: a version received, or a decision
+// recorded, after that instant does not count yet.
+
+export const SHIPPING_REPORT_NEWER_PENDING_LABEL = 'Newer shipping report pending review';
+
+const VERSION_COLS = `version_id, status, requested_from, requested_to, imported_at, decided_at, sanitized_sha256,
+  json_extract(comparison, '$.possibleIncompleteTrailingDate') AS trailing_incomplete`;
+
+/** Pure: the basis of one week from the active segments and the version list. */
+export function reportBasisFrom({ weekStart, segments, versions, asOf, closedAt }) {
   const weekEnd = addDays(weekStart, 6);
-  const v = await db.prepare(`SELECT version_id, status, requested_from, requested_to, imported_at, comparison FROM shipping_cost_source_version
-      WHERE requested_from <= ?1 AND requested_to >= ?2 AND imported_at >= ?3 AND status IN ('pending_review', 'accepted')
-      ORDER BY imported_at DESC LIMIT 1`).bind(weekStart, weekEnd, win.endUtcExclusive).first();
-  if (!v) return { required: true, status: 'missing', versionId: null };
-  let trailingComplete = null;
-  try { trailingComplete = !JSON.parse(v.comparison || '{}').possibleIncompleteTrailingDate; } catch { /* unknown */ }
-  return { required: true, status: 'ok', versionId: v.version_id, versionStatus: v.status, requestedFrom: v.requested_from,
-           requestedTo: v.requested_to, receivedAt: v.imported_at, trailingComplete };
+  const byId = new Map(versions.map(v => [v.version_id, v]));
+  const visible = v => !!v && v.imported_at <= asOf;
+  const stateAsOf = v => (v.status !== 'pending_review' && v.decided_at && v.decided_at > asOf) ? 'pending_review' : v.status;
+  const vjson = v => ({ versionId: v.version_id, sha256: v.sanitized_sha256 || null, requestedFrom: v.requested_from, requestedTo: v.requested_to,
+                        receivedAt: v.imported_at, state: stateAsOf(v), decidedAt: v.decided_at && v.decided_at <= asOf ? v.decided_at : null });
+  const segs = segments.filter(x => x.segTo >= weekStart && x.segFrom <= weekEnd).sort((a, b) => (a.segFrom < b.segFrom ? -1 : 1));
+  const covered = segs.length > 0 && segs[0].segFrom <= weekStart && segs[segs.length - 1].segTo >= weekEnd && contiguous(segs);
+  const used = segs.map(x => {
+    const v = byId.get(x.versionId);
+    return { ...(v ? vjson(v) : { versionId: x.versionId, state: 'unknown' }), weekDatesFrom: x.segFrom > weekStart ? x.segFrom : weekStart,
+             weekDatesTo: x.segTo < weekEnd ? x.segTo : weekEnd, visible: visible(v) };
+  });
+  const last = used[used.length - 1];
+  const usable = covered && used.every(u => u.visible && u.state === 'accepted') && !!last && last.receivedAt >= closedAt;
+  const overlapping = versions.filter(v => visible(v) && v.requested_from <= weekEnd && v.requested_to >= weekStart);
+  const pending = overlapping.filter(v => stateAsOf(v) === 'pending_review');
+  const newestUsed = used.reduce((m, u) => (u.receivedAt && u.receivedAt > m ? u.receivedAt : m), '');
+  const strip = ({ visible: _v, ...u }) => u;
+  if (usable) {
+    const newerPending = pending.filter(v => v.imported_at > newestUsed).map(vjson);
+    return { required: true, status: 'ok', received: true, used: used.map(strip), newerPending,
+             trailingComplete: byId.get(last.versionId)?.trailing_incomplete ? false : true,
+             label: newerPending.length ? SHIPPING_REPORT_NEWER_PENDING_LABEL : null,
+             signature: basisSignature(used, newerPending) };
+  }
+  const pendingFull = pending.filter(v => v.requested_from <= weekStart && v.requested_to >= weekEnd && v.imported_at >= closedAt).map(vjson);
+  const acceptedNow = used.filter(u => u.visible && u.state === 'accepted');
+  const status = pendingFull.length ? 'pending_review' : (acceptedNow.length ? 'partial' : 'missing');
+  return { required: true, status, received: pendingFull.length > 0, used: [], acceptedCoverage: acceptedNow.map(strip),
+           pendingReview: pending.map(vjson), newerPending: [],
+           label: status === 'pending_review' ? 'Shipping Cost Report received; pending review'
+                : status === 'partial' ? 'Accepted Shipping Cost Report data does not cover the whole week' : 'No Shipping Cost Report for this week' };
+}
+
+export const basisSignature = (used, newerPending) =>
+  `${used.map(u => `${u.versionId}@${u.weekDatesFrom}..${u.weekDatesTo}`).join(',')}|pending:${newerPending.map(v => v.versionId).join(',')}`;
+
+/** The week's Shipping Cost Report basis as of `now`. */
+export async function shippingReportBasis(db, weekStart, win, now = Date.now()) {
+  const weekEnd = addDays(weekStart, 6);
+  const segments = await activeSegments(db);
+  const versions = (await db.prepare(`SELECT ${VERSION_COLS} FROM shipping_cost_source_version
+      WHERE requested_from <= ?1 AND requested_to >= ?2 AND status <> 'rejected' OR version_id IN (
+        SELECT version_id FROM shipping_cost_active_segment WHERE seg_to >= ?2 AND seg_from <= ?1)`).bind(weekEnd, weekStart).all()).results || [];
+  return reportBasisFrom({ weekStart, segments, versions, asOf: new Date(now).toISOString(), closedAt: win.endUtcExclusive });
+}
+
+/** Several weeks at once (two queries): used by the tick's basis revisions. */
+export async function shippingReportBases(db, weeks, tz, now = Date.now()) {
+  const segments = await activeSegments(db);
+  const versions = (await db.prepare(`SELECT ${VERSION_COLS} FROM shipping_cost_source_version WHERE status <> 'rejected'`).all()).results || [];
+  const asOf = new Date(now).toISOString();
+  return new Map(weeks.map(w => [w, reportBasisFrom({ weekStart: w, segments, versions, asOf, closedAt: weekWindowUtc(w, tz).endUtcExclusive })]));
+}
+
+/** The gate/record form of a basis (never rows, never amounts). */
+export function basisRecord(b) {
+  return { status: b.status === 'ok' ? 'accepted' : b.status, basisStatus: b.status, used: b.used || [], newerPending: b.newerPending || [],
+           label: b.label || null, signature: b.signature || null,
+           // Legacy single-version fields (C7 records): the owner of the week's last date.
+           versionId: b.used?.length ? b.used[b.used.length - 1].versionId : null,
+           requestedFrom: b.used?.length ? b.used[b.used.length - 1].requestedFrom : null,
+           requestedTo: b.used?.length ? b.used[b.used.length - 1].requestedTo : null };
 }
 
 /**
@@ -288,20 +375,23 @@ export async function shippingCostReportFor(db, weekStart, win) {
  */
 export async function readiness(db, weekStart, settings, { now = Date.now() } = {}) {
   const win = weekWindowUtc(weekStart, settings.store_timezone);
+  // C8: everything is evaluated THROUGH `now` (the tick instant): an upload,
+  // review decision or catalog result recorded after it is not counted yet.
+  const asOf = new Date(now).toISOString();
   const sources = {};
   for (const s of INGEST_SOURCES) {
     const r = await db.prepare(`SELECT run_id, status, started_at, finished_at FROM ingest_run
-        WHERE source = ?1 AND week_start = ?2 AND started_at >= ?3 AND (?4 IS NULL OR mode = ?4)
-        ORDER BY started_at DESC LIMIT 1`).bind(s.source, weekStart, win.endUtcExclusive, s.mode).first();
+        WHERE source = ?1 AND week_start = ?2 AND started_at >= ?3 AND (?4 IS NULL OR mode = ?4) AND COALESCE(finished_at, started_at) <= ?5
+        ORDER BY started_at DESC LIMIT 1`).bind(s.source, weekStart, win.endUtcExclusive, s.mode, asOf).first();
     sources[s.key] = { required: s.required, status: r ? r.status : 'missing', runId: r?.run_id || null, finishedAt: r?.finished_at || null,
                        ...(s.satisfiesShippingReadiness === false ? { satisfiesShippingReadiness: false } : {}) };
   }
-  sources.shipping_cost_report = await shippingCostReportFor(db, weekStart, win);
-  const refresh = await latestRefresh(db, weekStart);
+  sources.shipping_cost_report = await shippingReportBasis(db, weekStart, win, now);
+  const refresh = await latestRefresh(db, weekStart, now);
   // C7: a successful refresh for the week, or an administrator's audited
   // acceptance of reusing the pinned catalog. A rejected or expired refresh
   // without that acceptance keeps the week waiting.
-  const reuse = await db.prepare('SELECT catalog_rev, at FROM catalog_reuse_acceptance WHERE week_start = ?1 ORDER BY id DESC LIMIT 1').bind(weekStart).first();
+  const reuse = await db.prepare('SELECT catalog_rev, at FROM catalog_reuse_acceptance WHERE week_start = ?1 AND at <= ?2 ORDER BY id DESC LIMIT 1').bind(weekStart, asOf).first();
   const catalog = { status: refresh ? refresh.effective_status : 'missing', refreshId: refresh?.refresh_id || null,
                     catalogRev: refresh?.catalog_rev || null, requestedAt: refresh?.requested_at || null,
                     reuseAccepted: !!reuse, ...(reuse ? { reuseCatalogRev: reuse.catalog_rev, reuseAcceptedAt: reuse.at } : {}) };
@@ -356,6 +446,12 @@ export async function computeWeek(env, { weekStart, runId = null, trigger = 'man
   try {
     if (acceptance) await acceptCatalogReuse(db, run, info, acceptance, actor, ownership);
     if (!info.rev) throw new ApiError(409, 'no_catalog', 'No accepted cost catalog; push one before computing');
+    // C8: no financial snapshot unless ACCEPTED Shipping Cost Report data owns
+    // every ship date of the week. A pending or partial report never lends the
+    // week an older accepted report or a prior week's data.
+    const basis = await shippingReportBasis(db, weekStart, weekWindowUtc(weekStart, settings.store_timezone));
+    if (basis.status !== 'ok') throw new ApiError(409, 'shipping_report_not_ready', `No snapshot: the week's Shipping Cost Report is ${basis.status} (${basis.label})`, { shippingReport: basis.status });
+    const shippingReport = basisRecord(basis);
     const catalog = await loadCatalog(db, info.rev);
     const catalogCompleteness = (await catalogMeta(db, info.rev))?.meta?.completeness || null;   // C6d: set on vendor-overlay catalogs
     const orders = await loadOrdersForWeek(db, weekStart);
@@ -375,17 +471,13 @@ export async function computeWeek(env, { weekStart, runId = null, trigger = 'man
                                  shippingSource: SHIPPING_SOURCES.REPORT, shippingCostReport: report.byOrder,
                                  c3: { asOf: nowIso(), policySettings: settings, previousShippingExpense: report.previousShippingExpense,
                                        unmatchedReportOrders: report.unmatched, sourceVerified: settings.shipping_cost_report_source_verified === true, catalogCompleteness,
-                                       provisionalEnabled: settings.provisional_publication_enabled === true,
+                                       provisionalEnabled: settings.provisional_publication_enabled === true, shippingReportBasis: shippingReport,
                                        publicationAllowed: settings.publication_enabled === true && env.PUBLICATION_ALLOWED === 'true' } });
     const sources = { ...(await sourceStatus(db, weekStart, { orders, shipments, hpd })), shipstation: report.covers ? 'ok' : 'pending' };
     const freshness = await catalogFreshness(db, run.run_id, info);
     const catalogInfo = { ...info, freshness };
     const ordersInOtherTimezone = (await db.prepare(`SELECT COUNT(*) AS n FROM shopify_order WHERE week_start = ?1
       AND (normalized_timezone IS NULL OR normalized_timezone <> ?2)`).bind(weekStart, settings.store_timezone).first())?.n || 0;
-    // C7: which Shipping Cost Report version serves this week, and its state.
-    const rep = await shippingCostReportFor(db, weekStart, weekWindowUtc(weekStart, settings.store_timezone));
-    const shippingReport = rep.status === 'ok' ? { versionId: rep.versionId, status: rep.versionStatus, requestedFrom: rep.requestedFrom, requestedTo: rep.requestedTo }
-                                               : { versionId: null, status: 'missing' };
     const gate = evaluateGate({ totals: snap.totals, reconciliation: snap.reconciliation, sources,
                                 catalog: { accepted: true, rev: info.rev, freshness }, settings, ordersInOtherTimezone,
                                 shippingC3: snap.shipping.c3, shippingReport });
@@ -494,10 +586,20 @@ export async function publishSnapshot(env, snapshotId, actor) {
   const settings = await getSettings(db);
   const verdict = canPublish(gate, settings, env.PUBLICATION_ALLOWED);
   if (!verdict.allowed) throw new ApiError(409, 'not_publishable', `Publication refused: ${verdict.reason}`, { reason: verdict.reason });
-  // C7: the report the snapshot was computed on must still be accepted now (not rolled back or superseded by a rejection).
+  // C7/C8: the report basis the snapshot was computed on must still be the
+  // week's basis NOW: every used version still accepted and still owning its
+  // dates, and no newer version pending review. Anything else needs a revision.
   if (gate.shippingReport?.versionId) {
-    const v = await db.prepare('SELECT status FROM shipping_cost_source_version WHERE version_id = ?1').bind(gate.shippingReport.versionId).first();
-    if (v?.status !== 'accepted') throw new ApiError(409, 'not_publishable', 'Publication refused: shipping_report_not_accepted', { reason: 'shipping_report_not_accepted' });
+    const ids = (gate.shippingReport.used?.length ? gate.shippingReport.used.map(u => u.versionId) : [gate.shippingReport.versionId]);
+    const rows = await selectIn(db, 'SELECT version_id, status FROM shipping_cost_source_version WHERE version_id IN (SELECT value FROM json_each(?1))', ids);
+    if (rows.length !== ids.length || rows.some(v => v.status !== 'accepted')) throw new ApiError(409, 'not_publishable', 'Publication refused: shipping_report_not_accepted', { reason: 'shipping_report_not_accepted' });
+    if (gate.shippingReport.signature) {
+      const now = await shippingReportBasis(db, snap.week_start, weekWindowUtc(snap.week_start, settings.store_timezone));
+      if (now.status !== 'ok' || now.signature !== gate.shippingReport.signature) {
+        const reason = now.status === 'ok' && now.newerPending.length ? 'shipping_report_newer_pending' : 'shipping_report_basis_changed';
+        throw new ApiError(409, 'not_publishable', `Publication refused: ${reason}`, { reason });
+      }
+    }
   }
   if (snap.status !== 'draft' || run.state !== 'validated') throw new ApiError(409, 'not_publishable', 'Only a validated draft can be published');
   // The run's gate belongs to its latest snapshot only. An older draft of the
@@ -604,7 +706,11 @@ export async function computeScheduledWeek(env, { weekStart, actor, now = null }
   const settings = await getSettings(db);
   // Read the change marker BEFORE readiness: an upload landing after this read
   // leaves a newer marker, so the next tick retries instead of missing it.
-  const seenBefore = (await db.prepare('SELECT sources_changed_at FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first())?.sources_changed_at || null;
+  // C8: a change recorded AFTER the tick instant is not seen by this attempt
+  // (readiness counts nothing after `at`), so the previous marker is kept and
+  // the next tick retries.
+  const marker = await db.prepare('SELECT sources_changed_at, changes_seen_at FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first();
+  const seenBefore = marker?.sources_changed_at && marker.sources_changed_at <= at.toISOString() ? marker.sources_changed_at : (marker?.changes_seen_at || null);
   const ready = await readiness(db, weekStart, settings, { now: at.getTime() });
   if (!ready.due) throw new ApiError(409, 'too_early', `The scheduled run for ${weekStart} is due at ${ready.scheduledAt}`, { scheduledAt: ready.scheduledAt });
 

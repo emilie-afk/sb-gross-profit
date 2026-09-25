@@ -25,7 +25,7 @@
 import { ApiError, json, readJson, WEEK_RE } from './http.js';
 import { newId, nowIso, getSettings, markCyclesChanged } from './db.js';
 import { actorFor } from './actor.js';
-import { computeScheduledWeek, readiness, chooseCatalog } from './compute.js';
+import { computeScheduledWeek, computeWeek, readiness, chooseCatalog, shippingReportBases } from './compute.js';
 import { catalogMeta } from './store.js';
 import { reviseTouched } from './admin.js';
 import { lastClosedWeek, retryTimeline, RETRY_POLICY } from '../../shared/schedule.js';
@@ -96,8 +96,16 @@ export async function scheduledTick(env, at = new Date()) {
         ORDER BY week_start DESC LIMIT 3`).bind(week).all()).results || [];
     for (const c of late) await attempt(c.week_start);
 
+    // C8: a week whose Shipping Cost Report basis changed since its latest
+    // snapshot (a newer version accepted or rejected, a rollback) gets a new
+    // draft revision first; at most one revision per tick in total.
+    const basisRev = await reviseReportBasis(env, { at, tz });
+    for (const v of basisRev) {
+      await event(db, v.weekStart, 'revision', v.error ? 'error' : (v.state || 'draft'), { reason: 'shipping_report_basis_changed', from: v.fromSignature, to: v.toSignature, published: false });
+      out.revisions.push({ weekStart: v.weekStart, state: v.state || null, error: v.error || null, basisChanged: true });
+    }
     const now = await db.prepare('SELECT status FROM schedule_cycle WHERE week_start = ?1').bind(week).first();
-    if (now?.status === 'computed') {
+    if (now?.status === 'computed' && !basisRev.length) {
       const r = await reviseTouched(env, { cycleWeek: week, actor: CRON_ACTOR, maxWeeks: 1 });
       for (const v of r.revised) {
         await event(db, v.weekStart, 'revision', v.error ? 'error' : (v.state || 'draft'), { cycleWeek: week, sourceHashes: v.sourceHashes || [], published: false });
@@ -110,6 +118,41 @@ export async function scheduledTick(env, at = new Date()) {
   }
 }
 
+/**
+ * C8: draft a new revision for the most recent week (within BASIS_LOOKBACK_WEEKS)
+ * whose latest snapshot was computed on a different Shipping Cost Report basis
+ * than the week has now — e.g. the newer version that was pending review has
+ * been accepted (it now owns the dates) or rejected (the "newer pending" label
+ * no longer applies). Only when the current basis is usable; never publishes.
+ * A basis already attempted (same target signature) is not retried.
+ */
+export const BASIS_LOOKBACK_WEEKS = 12;
+export async function reviseReportBasis(env, { at = new Date(), tz, maxWeeks = 1 } = {}) {
+  const db = env.DB;
+  const since = new Date(at.getTime() - BASIS_LOOKBACK_WEEKS * 7 * 86_400_000).toISOString().slice(0, 10);
+  const latest = (await db.prepare(`SELECT s.week_start, r.gate FROM snapshot s JOIN reporting_run r ON r.run_id = s.run_id
+      WHERE s.week_start >= ?1 AND s.revision = (SELECT MAX(revision) FROM snapshot x WHERE x.week_start = s.week_start)
+      ORDER BY s.week_start DESC`).bind(since).all()).results || [];
+  if (!latest.length) return [];
+  const bases = await shippingReportBases(db, latest.map(l => l.week_start), tz, at.getTime());
+  const out = [];
+  for (const l of latest) {
+    if (out.length >= maxWeeks) break;
+    let g = {}; try { g = JSON.parse(l.gate || '{}'); } catch { g = {}; }
+    const was = g.shippingReport?.signature;
+    const b = bases.get(l.week_start);
+    if (!was || b?.status !== 'ok' || b.signature === was) continue;          // pre-C8 records are revised by their own triggers
+    const reason = `Shipping Cost Report basis changed: ${was} -> ${b.signature}`.slice(0, 500);
+    const tried = await db.prepare("SELECT 1 AS x FROM reporting_run WHERE week_start = ?1 AND trigger = 'source_update' AND reason = ?2 LIMIT 1").bind(l.week_start, reason).first();
+    if (tried) continue;
+    try {
+      const r = await computeWeek(env, { weekStart: l.week_start, trigger: 'source_update', actor: CRON_ACTOR, reason });
+      out.push({ weekStart: l.week_start, state: r.run.state, snapshotId: r.snapshotId, fromSignature: was, toSignature: b.signature });
+    } catch (e) { out.push({ weekStart: l.week_start, error: e.code || 'compute_failed', fromSignature: was, toSignature: b.signature }); }
+  }
+  return out;
+}
+
 // ─── Status ───────────────────────────────────────────────────────────────────
 
 export async function cycleStatus(env, weekStart, { admin = false, at = new Date() } = {}) {
@@ -119,7 +162,10 @@ export async function cycleStatus(env, weekStart, { admin = false, at = new Date
   const timeline = retryTimeline(weekStart, sched, tz);
   const ready = await readiness(db, weekStart, settings, { now: at.getTime() });
   const cycle = await db.prepare('SELECT * FROM schedule_cycle WHERE week_start = ?1').bind(weekStart).first();
-  const run = cycle ? await db.prepare('SELECT run_id, state, snapshot_id, catalog_rev FROM reporting_run WHERE run_id = ?1').bind(cycle.run_id).first() : null;
+  const run = cycle ? await db.prepare('SELECT run_id, state, snapshot_id, catalog_rev, gate FROM reporting_run WHERE run_id = ?1').bind(cycle.run_id).first() : null;
+  const pendingJson = v => ({ versionId: admin ? v.versionId : undefined, sha256: v.sha256 ? v.sha256.slice(0, 16) : null,
+    requestedFrom: v.requestedFrom, requestedTo: v.requestedTo, receivedAt: v.receivedAt, state: v.state });
+  let snapReport = null; try { snapReport = run?.gate ? JSON.parse(run.gate).shippingReport || null : null; } catch { snapReport = null; }
   const snap = run?.snapshot_id ? await db.prepare('SELECT status, revision FROM snapshot WHERE snapshot_id = ?1').bind(run.snapshot_id).first() : null;
   const rep = ready.sources.shipping_cost_report;
   const received = Object.entries(ready.sources).filter(([, v]) => v.status === 'ok').map(([k]) => k);
@@ -139,11 +185,18 @@ export async function cycleStatus(env, weekStart, { admin = false, at = new Date
     sources: {
       received,
       missing: ready.missing,
-      pendingReview: rep?.status === 'ok' && rep.versionStatus === 'pending_review' ? ['shipping_cost_report'] : [],
+      pendingReview: rep?.status === 'pending_review' || rep?.newerPending?.length ? ['shipping_cost_report'] : [],
       informational: { shipstation_mapping: ready.sources.shipstation_mapping.status, hpd: ready.sources.hpd.status },
     },
     catalog: { rev: catalogRev, refreshStatus: ready.catalog.status, reuseAccepted: !!ready.catalog.reuseAccepted,
                completeness: comp ? { status: comp.status, label: comp.label, unresolvedSources: comp.unresolvedSources.length } : { status: 'unknown', label: 'Catalog completeness not recorded' } },
+    // C8: the report basis — versions used (hash, period, received, state) and any newer one in review.
+    shippingReport: { status: rep.status, label: rep.label || null,
+      used: (rep.used || []).map(u => ({ versionId: admin ? u.versionId : undefined, sha256: u.sha256 ? u.sha256.slice(0, 16) : null, requestedFrom: u.requestedFrom,
+        requestedTo: u.requestedTo, receivedAt: u.receivedAt, state: u.state, weekDatesFrom: u.weekDatesFrom, weekDatesTo: u.weekDatesTo })),
+      newerPending: (rep.newerPending || []).map(pendingJson),
+      pendingReview: (rep.pendingReview || []).map(pendingJson),
+      snapshotUsed: snapReport ? { label: snapReport.label || null, newerPending: (snapReport.newerPending || []).length, versions: (snapReport.used || []).length } : null },
     shippingVerification: settings.shipping_cost_report_source_verified === true ? 'verified' : 'unverified',
     publication: { enabled: settings.publication_enabled === true && env.PUBLICATION_ALLOWED === 'true', automationEnabled: env.AUTOMATION_ENABLED === 'true' },
   };

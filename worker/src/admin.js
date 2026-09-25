@@ -122,8 +122,11 @@ export async function weekPlan(request, env) {
   // C7: what the Windows collector still has to deliver for this week (status codes only),
   // so a run missed while the PC was off catches up on the next start without repeating uploads.
   const r = await readiness(env.DB, plan.weekStart, s, { now: at.getTime() });
-  const collected = { shopify: r.sources.shopify.status, shopify_updates: r.sources.shopify_updates.status, shipping_cost_report: r.sources.shipping_cost_report.status };
-  return json({ ...plan, collected, collectionComplete: Object.values(collected).every(v => v === 'ok') });
+  // A report received for the week counts as delivered even while it waits for
+  // review (C8): collecting it again would only add versions to review.
+  const rep = r.sources.shipping_cost_report;
+  const collected = { shopify: r.sources.shopify.status, shopify_updates: r.sources.shopify_updates.status, shipping_cost_report: rep.received ? 'ok' : rep.status };
+  return json({ ...plan, collected, collectionComplete: Object.values(collected).every(v => v === 'ok'), shippingReportReview: rep.status });
 }
 
 export async function getReadiness(request, env) {

@@ -1,6 +1,6 @@
 /**
- * C5 readiness: the week needs the Shopify export, the updated-order scan, a
- * Shipping Cost Report received for the week, the catalog refresh, and a closed
+ * C5 readiness: the week needs the Shopify export, the updated-order scan, an
+ * accepted Shipping Cost Report covering the week (C8), the catalog refresh, and a closed
  * reporting period. The dormant ShipStation mapping export never satisfies
  * shipping readiness. Synthetic data only.
  */
@@ -40,16 +40,23 @@ test('C5: the mapping export alone never satisfies shipping readiness', async ()
   assert.deepEqual([sched.status, sched.json.state, sched.json.missing], [200, 'waiting_for_sources', ['shipping_cost_report:missing']]);
 });
 
-test('C5: a Shipping Cost Report received for the week satisfies it, even while pending review', async () => {
+test('C5/C8: a report received for the week shows as received; only its acceptance makes the week ready', async () => {
   const { env } = await loaded(20, {}, { shippingReport: false });
   await updatesScan(env);
   const v = await sendReport(env);
   assert.equal(v.status, 'pending_review');
-  const r = await ready(env);
+  let r = await ready(env);
+  assert.equal(r.ready, false, 'C8: a pending version never makes the week ready');
+  assert.deepEqual(r.missing, ['shipping_cost_report:pending_review']);
+  assert.deepEqual([r.sources.shipping_cost_report.status, r.sources.shipping_cost_report.received, r.sources.shipping_cost_report.pendingReview.map(p => p.versionId)],
+    ['pending_review', true, [v.versionId]]);
+  assert.equal((await admin(env, 'POST', `/v1/admin/shipping-cost/versions/${v.versionId}/accept`, { reason: 'test: reviewed' })).status, 200);
+  r = await ready(env);
   assert.equal(r.ready, true, JSON.stringify(r.missing));
-  assert.deepEqual([r.sources.shipping_cost_report.status, r.sources.shipping_cost_report.versionStatus, r.sources.shipping_cost_report.versionId],
-    ['ok', 'pending_review', v.versionId]);
-  assert.equal(r.sources.shipping_cost_report.trailingComplete, true);
+  const b = r.sources.shipping_cost_report;
+  assert.deepEqual([b.status, b.used.map(u => [u.versionId, u.state, u.weekDatesFrom, u.weekDatesTo]), b.newerPending, b.trailingComplete],
+    ['ok', [[v.versionId, 'accepted', WEEK, '2026-09-20']], [], true]);
+  assert.match(b.used[0].sha256, /^[0-9a-f]{64}$/);
   assert.equal(r.periodClosed, true);
 });
 

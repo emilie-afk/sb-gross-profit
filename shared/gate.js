@@ -74,12 +74,13 @@ export function evaluateGate({ totals, reconciliation, sources, catalog, setting
     }
     warnings.push({ code: 'partial_fulfillment_unverified', message: 'Coverage is order level; partial-shipment verification is unavailable' });
   }
-  // C7: the week's Shipping Cost Report. accepted → may pass; pending_review →
-  // a provisional draft is allowed but publication is refused (canPublish);
-  // missing or rejected → blocked.
+  // C8: the week's Shipping Cost Report basis. Only accepted data that owns
+  // every date of the week reaches here (computeWeek refuses anything else);
+  // a newer version still in review is a labelled warning and blocks
+  // publication (canPublish). Any other status fails defensively.
   if (shippingReport) {
-    if (shippingReport.status === 'pending_review') warnings.push({ code: 'shipping_report_pending_review', message: 'The Shipping Cost Report for this week is pending review; this is a provisional draft and cannot be published' });
-    else if (shippingReport.status !== 'accepted') failures.push({ code: 'shipping_report_missing', message: `No accepted or pending Shipping Cost Report covers this week (${shippingReport.status})` });
+    if (shippingReport.status !== 'accepted') failures.push({ code: 'shipping_report_missing', message: `No accepted Shipping Cost Report covers this week (${shippingReport.status})` });
+    else if (shippingReport.newerPending?.length) warnings.push({ code: 'shipping_report_newer_pending', message: `Newer shipping report pending review (${shippingReport.newerPending.length}); this draft uses the accepted report and cannot be published` });
   }
 
   if (sources?.shopify !== 'ok') failures.push({ code: 'source_shopify', message: `Shopify ingest is ${sources?.shopify || 'missing'}` });
@@ -147,6 +148,8 @@ export function canPublish(gate, settings, envAllowed) {
   if (!gate?.passed) return { allowed: false, reason: 'gate_failed' };
   // C7: only a snapshot computed on an ACCEPTED Shipping Cost Report may publish.
   if (gate?.shippingReport && gate.shippingReport.status !== 'accepted') return { allowed: false, reason: 'shipping_report_not_accepted' };
+  // C8: a newer Shipping Cost Report version still in review blocks publication.
+  if (gate?.shippingReport?.newerPending?.length) return { allowed: false, reason: 'shipping_report_newer_pending' };
   // C3: an unverified Shipping Cost Report source is publishable only as
   // provisional, and only when provisional publication is enabled NOW.
   if (gate?.shippingSource === 'shipping_cost_report' && s.shipping_cost_report_source_verified !== true && s.provisional_publication_enabled !== true) {

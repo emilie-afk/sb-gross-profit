@@ -24,6 +24,22 @@ const STATE_LABEL = {
   published: 'Published', created: 'Created',
 };
 
+// C8: which report version(s) a draft used, and any newer one waiting for review.
+const range = v => `${esc(v.requestedFrom)} – ${esc(v.requestedTo)}`;
+function reportUsed(r) {
+  if (!r) return '—';
+  if (!(r.used || []).length) return esc(r.label || 'None accepted for this week — no financial snapshot');
+  return r.used.map(u => `${range(u)} · received ${esc(when(u.receivedAt))} · ${esc(String(u.state).replace(/_/g, ' '))} · sha256 ${esc(u.sha256 || '—')}`).join('<br>');
+}
+function pendingText(s) {
+  const r = s.shippingReport;
+  if (r?.status === 'ok' && (r.newerPending || []).length) {
+    return `<strong>Newer shipping report pending review</strong> — ${r.newerPending.map(v => `${range(v)} · received ${esc(when(v.receivedAt))}`).join('; ')}. This draft uses the accepted report above and cannot be published; accepting the newer report creates a new draft revision.`;
+  }
+  if (r?.status === 'pending_review') return 'ShipStation Shipping Cost Report received and pending review — no financial snapshot until it is accepted';
+  return (s.sources?.pendingReview || []).length ? `${(s.sources.pendingReview).map(k => esc(SOURCE_LABEL[k] || k)).join(', ')} — cannot publish` : 'None';
+}
+
 export function renderAutomationStatus(s) {
   if (!s || typeof s !== 'object') return '<p class="meta">No status.</p>';
   const rows = [
@@ -36,7 +52,8 @@ export function renderAutomationStatus(s) {
     ['State', esc(STATE_LABEL[s.run?.state] || (s.cycle ? s.cycle.status : 'Not started'))],
     ['Sources received', (s.sources?.received || []).map(k => esc(SOURCE_LABEL[k] || k)).join(', ') || '—'],
     ['Sources missing', (s.sources?.missing || []).map(c => esc(labelOf(c))).join(', ') || 'None'],
-    ['Pending review', (s.sources?.pendingReview || []).length ? `${(s.sources.pendingReview).map(k => esc(SOURCE_LABEL[k] || k)).join(', ')} — draft only, cannot publish` : 'None'],
+    ['Shipping Cost Report used', reportUsed(s.shippingReport)],
+    ['Pending review', pendingText(s)],
     ['Catalog', `${esc(s.catalog?.rev || '—')} · ${esc(s.catalog?.completeness?.label || '')}${s.catalog?.reuseAccepted ? ' · reuse approved' : ''}`],
     ['Shipping source', s.shippingVerification === 'verified' ? 'Verified' : 'Unverified (provisional)'],
     ['Publication', s.publication?.enabled ? 'Enabled' : 'Disabled'],

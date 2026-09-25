@@ -274,6 +274,10 @@ export async function rejectVersion(request, env, id) {
   const u = await env.DB.prepare(`UPDATE shipping_cost_source_version SET status = 'rejected', decided_at = ?2, decided_by_class = ?3, decided_by_label = ?4,
       decision_reason = ?5 WHERE version_id = ?1 AND status = 'pending_review'`).bind(id, nowIso(), actor.cls, actor.label, reason).run();
   if (u.meta.changes !== 1) throw new ApiError(409, 'not_pending', 'Only a pending_review version can be rejected');
+  // C8: a waiting week re-evaluates its report basis; a draft labelled "newer
+  // report pending review" is revised by the tick (the label no longer applies).
+  const v = await env.DB.prepare('SELECT requested_from, requested_to FROM shipping_cost_source_version WHERE version_id = ?1').bind(id).first();
+  if (v) await markCyclesChanged(env.DB, weeksInRange(v.requested_from, v.requested_to));
   return json({ versionId: id, status: 'rejected' });
 }
 export async function rollbackActivation(request, env, activationId) {

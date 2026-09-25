@@ -4,7 +4,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { makeEnv, ingest, admin, catalog, WEEK } from './helpers.mjs';
+import { makeEnv, ingest, admin, catalog, ingestReport, WEEK } from './helpers.mjs';
 import { csvOrder, ssCustom, ssTemplate } from '../../tests/fixtures-normalized.mjs';
 import { csvRowsToNormalizedOrders } from '../../shared/adapters/legacy.js';
 import { sanitizeShopifyOrderRows, toCsvText, SHOPIFY_ORDERS_CSV_COLUMNS } from '../../shared/adapters/shopifyCsv.js';
@@ -132,12 +132,16 @@ test('manual-upload and automated csv_text paths reconcile to the same snapshot 
   // Manual: the same export normalized by the manual/backfill adapter.
   assert.equal((await ingest(manual, '/v1/ingest/shopify', { format: 'normalized', orders: csvRowsToNormalizedOrders(rows), storeTimezone: 'America/Los_Angeles', weekStart: WEEK })).status, 200);
   assert.equal((await ingest(manual, '/v1/ingest/shipstation', { format: 'rows', rows: shipRows(), weekStart: WEEK })).status, 200);
+  // C8: a week is computed only on an accepted Shipping Cost Report covering it.
+  for (const env of [auto, manual]) await ingestReport(env, [{ order: '910001', date: '2026-09-16', cost: 5.1 }, { order: '910002', date: '2026-09-17', cost: 4.2 }]);
   const a = await admin(auto, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   const m = await admin(manual, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   assert.equal(a.status, 200, JSON.stringify(a.json));
   const totals = async (env, snapshotId) => {
     const { snapshot_id: _id, ...t } = await env.DB.prepare('SELECT * FROM snapshot_totals WHERE snapshot_id = ?1').bind(snapshotId).first();
-    return t;
+    const labels = JSON.parse(t.labels);
+    delete labels.c3.disclosures.shippingReport;                // C8: names this environment's report version id and receipt time
+    return { ...t, labels };
   };
   const ta = await totals(auto, a.json.snapshotId);
   assert.ok(ta.operating_revenue > 0);

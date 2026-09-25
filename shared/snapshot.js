@@ -177,7 +177,8 @@ export function buildSnapshot({ weekStart, orders, shipments = [], hpdOrders = [
     const sourceVerified = c3.sourceVerified === true;
     const disclosures = shippingDisclosures({ catalogRev: catalog?.rev || null, missingCostLines: totals.missingCostLines,
       missingCostRevenue: totals.missingCostRevenue, sourceVerified, lifecycle, publicationAllowed: c3.publicationAllowed === true,
-      ...(c3.catalogCompleteness ? { catalogCompleteness: c3.catalogCompleteness } : {}) });
+      ...(c3.catalogCompleteness ? { catalogCompleteness: c3.catalogCompleteness } : {}),
+      ...(c3.shippingReportBasis ? { shippingReportBasis: c3.shippingReportBasis } : {}) });
     snap.shipping.c3 = {
       source: SHIPPING_SOURCES.REPORT, rules: SHIPPING_RULES.C3,
       coverage: policyResult.coverage,

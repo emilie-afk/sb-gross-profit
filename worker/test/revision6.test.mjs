@@ -226,6 +226,7 @@ test('stale catalog: no refresh, a pending refresh, and a rejected refresh all b
   const { nodes, ship } = weekOrders(20);
   await ingest(env2, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: WEEK }));
   await ingest(env2, '/v1/ingest/shipstation', { format: 'rows', rows: ship, weekStart: WEEK });
+  await ingestReport(env2, nodes.map((o, i) => ({ order: o.name.slice(1), date: `2026-09-${15 + (i % 5)}`, cost: 5.1 })));   // C8: accepted report
   const r2 = await admin(env2, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   assert.deepEqual([r2.json.state, r2.json.gate.catalog.freshness.reason], ['blocked', 'refresh_rejected']);
 });
@@ -284,6 +285,7 @@ test('HPD pass-through is stored as assumed and never reported as confirmed actu
   const nodes = [gqlOrder({ name: '#900500', createdAt: '2026-09-15T17:00:00Z', subtotal: 9, shipping: 6, total: 15,
                             lines: [{ sku: 'FH-POTHOS', price: 9, vendor: 'House Plant Dropship' }] })];
   await ingest(env, '/v1/ingest/shopify', viaNormalized({ nodes, weekStart: WEEK }));
+  await ingestReport(env, [{ order: '999001', date: '2026-09-16', cost: 1 }]);        // C8: an accepted report covers the week
   const r = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   const s = (await admin(env, 'GET', `/v1/snapshot/${WEEK}?includeDrafts=1`)).json;
   assert.equal(s.totals.hpdOrdersPassThrough, 1);

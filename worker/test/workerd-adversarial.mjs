@@ -92,9 +92,21 @@ async function world({ partial = false } = {}) {
   if (!partial) { await updates(); await report(); }
   // Test-only stand-in for the future source-verification checklist, so runs reach `validated`.
   await db.prepare("UPDATE settings SET value = 'true' WHERE key = 'shipping_cost_report_source_verified'").run();
-  const schedule = (label, at) => call('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label, ...(at ? { at } : {}) }, headers: A });
+  // C8: readiness counts only what was recorded through the tick instant. The
+  // simulated ticks are in the past, uploads carry the real clock: move every
+  // later timestamp to just before the instant (order kept), as helpers.asOf does.
+  const CLOCK = [['ingest_run', ['started_at', 'finished_at']], ['shipping_cost_source_version', ['imported_at', 'decided_at']],
+    ['shipping_cost_activation', ['activated_at']], ['catalog_refresh', ['requested_at', 'resolved_at']], ['catalog_reuse_acceptance', ['at']], ['schedule_cycle', ['sources_changed_at']]];
+  const asOf = async iso => {
+    const t = Date.parse(iso), real = Date.now(), cut = new Date(t).toISOString();
+    for (const [table, cols] of CLOCK) for (const c of cols) {
+      const rows = (await db.prepare(`SELECT rowid AS id, ${c} AS v FROM ${table} WHERE ${c} > ?1`).bind(cut).all()).results || [];
+      for (const r of rows) await db.prepare(`UPDATE ${table} SET ${c} = ?2 WHERE rowid = ?1`).bind(r.id, new Date(t - 1 - Math.max(0, real - Date.parse(r.v))).toISOString()).run();
+    }
+  };
+  const schedule = async (label, at) => { if (at) await asOf(at); return call('POST', '/v1/admin/runs', { body: { weekStart: W, trigger: 'schedule', actorLabel: label, ...(at ? { at } : {}) }, headers: A }); };
   const fetcher = await mf.getWorker();
-  const tick = at => fetcher.scheduled({ scheduledTime: new Date(at) });
+  const tick = async at => { await asOf(at); return fetcher.scheduled({ scheduledTime: new Date(at) }); };
   const q = async (sql, ...p) => (await db.prepare(sql).bind(...p).all()).results;
   const digest = async () => JSON.stringify(await Promise.all(['reporting_run', 'run_transition', 'snapshot', 'snapshot_totals', 'snapshot_order', 'schedule_cycle']
     .map(t => q(`SELECT * FROM ${t} ORDER BY 1, 2`))));
@@ -253,8 +265,7 @@ for (let i = 0; i < 3; i++) {
   burst.push(w.report());
   await Promise.all(burst);
   for (let k = 0; k < 3; k++) await Promise.all([w.tick('2026-09-21T09:00:00Z'), w.tick('2026-09-21T09:00:00Z'), w.schedule('cron:Hx', '2026-09-21T09:00:00Z')]);
-  // The report may be computed on while its acceptance is still in flight (pending_review satisfies arrival),
-  // so the one draft is validated or gate-blocked; either way there is exactly one of everything.
+  // The one draft is validated or gate-blocked; either way there is exactly one of everything.
   const c = await w.consistent();
   assert.deepEqual([c.cycles, c.runs, c.snapshots, c.orphans, c.dupSeq, c.contiguous, c.stuck], [1, 1, 1, 0, 0, true, 0], `H#${i}: ${JSON.stringify(c)}`);
   assert.ok(['validated', 'blocked'].includes(c.state), `H#${i}: ${c.state}`);

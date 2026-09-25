@@ -41,6 +41,33 @@ export async function makeEnv(extra = {}) {
   };
 }
 
+/**
+ * C8: readiness counts only what was recorded at or before the tick instant.
+ * Tests simulate ticks in the past, while the Worker stamps uploads with the
+ * real clock. asOf(env, iso) moves every timestamp later than `iso` to just
+ * before it, keeping their order, so "uploaded, then ticked" stays true.
+ * Boundary tests set exact timestamps themselves instead.
+ */
+const CLOCK_COLUMNS = [['ingest_run', ['started_at', 'finished_at']], ['shipping_cost_source_version', ['imported_at', 'decided_at']],
+  ['shipping_cost_activation', ['activated_at']], ['catalog_refresh', ['requested_at', 'resolved_at']], ['catalog_reuse_acceptance', ['at']],
+  ['schedule_cycle', ['sources_changed_at']]];
+export async function asOf(env, iso) {
+  const t = Date.parse(iso), real = Date.now(), cut = new Date(t).toISOString();
+  for (const [table, cols] of CLOCK_COLUMNS) for (const c of cols) {
+    const rows = (await env.DB.prepare(`SELECT rowid AS id, ${c} AS v FROM ${table} WHERE ${c} > ?1`).bind(cut).all()).results || [];
+    for (const r of rows) {
+      const shifted = new Date(t - 1 - Math.max(0, real - Date.parse(r.v))).toISOString();
+      await env.DB.prepare(`UPDATE ${table} SET ${c} = ?2 WHERE rowid = ?1`).bind(r.id, shifted).run();
+    }
+  }
+}
+/** Set every clock column of the rows written since `sinceIso` (real clock) to exactly `iso`. */
+export async function stampSince(env, sinceIso, iso) {
+  for (const [table, cols] of CLOCK_COLUMNS) for (const c of cols) {
+    await env.DB.prepare(`UPDATE ${table} SET ${c} = ?2 WHERE ${c} >= ?1`).bind(sinceIso, iso).run();
+  }
+}
+
 export const bodies = [];
 export async function call(env, method, p, { body, headers = {}, cookie } = {}) {
   const h = { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.7', ...headers };
@@ -52,7 +79,10 @@ export async function call(env, method, p, { body, headers = {}, cookie } = {}) 
   return { status: res.status, headers: res.headers, json: j };
 }
 export const ingest = (env, p, body) => call(env, 'POST', p, { body, headers: { 'X-Ingest-Secret': env.INGEST_SECRET } });
-export const admin = (env, method, p, body) => call(env, method, p, { body, headers: { 'X-Admin-Secret': env.ADMIN_SECRET } });
+export const admin = async (env, method, p, body) => {
+  if (body?.at && env.TEST_HOOKS_ENABLED === 'true') await asOf(env, body.at);     // a simulated tick instant (see asOf)
+  return call(env, method, p, { body, headers: { 'X-Admin-Secret': env.ADMIN_SECRET } });
+};
 export async function sessionCookie(env) {
   const r = await call(env, 'POST', '/v1/auth/login', { body: { password: PASSWORD } });
   assert.equal(r.status, 200);
