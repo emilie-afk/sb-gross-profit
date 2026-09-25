@@ -593,6 +593,39 @@ record `weeks_touched` on their ingest runs.
 earlier weeks. It uses the reason and source runs, never publishes, and skips
 weeks it has already revised.
 
+### Automated collection (C5)
+
+Two Windows jobs, both Monday 15:05 Ho Chi Minh (08:05 UTC), no Shopify or
+ShipStation API:
+
+- Shopify orders: `automation/shopify-export/README.md`. Playwright requests
+  the rolling eight-week orders export with a dedicated staff account; the
+  "export ready" email is read with Gmail **read-only** access and a fixed
+  search; the file is downloaded into memory, sanitized on the PC and uploaded
+  as `POST /v1/ingest/shopify { format: 'csv_text', mode: 'rolling' }` (the
+  week's orders plus the updated-order scan). Local manifest (hashes, window,
+  counts, statuses), 72-hour quarantine of the sanitized file only, and a stop
+  on 2FA, captcha, unknown pages, missing columns or unknown export formats.
+- ShipStation: `automation/shipstation-export/README.md`. The Analytics
+  Shipping Cost Report, sanitized to the 15 approved columns on the PC
+  (Recipient, Shipping Paid and +/- never leave it). The mapping export is
+  dormant; the job refuses it unless re-enabled for rollback diagnostics, and
+  it never feeds expense (Rate, estimated cost, Carrier Fee, Shipping Paid and
+  +/- are never expense).
+
+Readiness (`GET /v1/admin/readiness?weekStart=`) now requires:
+`shopify` (sanitized orders export), `shopify_updates` (updated-order scan),
+`shipping_cost_report` (a version received after the week closed whose
+requested range covers the week; pending review or accepted, not rejected),
+the week's `catalog_refresh`, and `reporting_period` closed. The mapping export
+appears only as `shipstation_mapping` (`required: false`,
+`satisfiesShippingReadiness: false`).
+
+Products Master is an approved public source: its CSV exports are fetched
+without authentication; the spreadsheet ID and tab gids are deployment
+configuration (Netlify environment and the Worker `CATALOG_SOURCES_JSON`
+secret), kept out of this repository.
+
 ### Make, ShipStation job, backfill
 
 - Make scenarios S0–S4: `docs/make-scenarios.md`.

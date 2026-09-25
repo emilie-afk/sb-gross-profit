@@ -83,7 +83,8 @@
       ]
     },
     "shipstation_mapping_export": {
-      "_comment": "Dormant (mapping only, never expense). Uses the top-level exportSteps below until it is retired."
+      "_comment": "Dormant (mapping only, never expense, never satisfies shipping readiness). The job refuses this kind unless enabled is true (rollback diagnostics only). Uses the top-level exportSteps.",
+      "enabled": false
     }
   }
 }

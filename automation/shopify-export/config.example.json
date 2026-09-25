@@ -1,0 +1,39 @@
+{
+  "_comment": "Copy to config.local.json (gitignored). URLs, selectors and folders only. Credentials live in Windows Credential Manager (see README). The Gmail search is fixed in code and cannot be set here; the job refuses a config that tries.",
+  "adminUrl": "https://admin.shopify.com/store/<store-handle>",
+  "credentialTarget": "sb-shopify-export",
+  "ingestCredentialTarget": "sb-gp-ingest",
+  "workerUrl": "https://sb-gp-worker-staging.<account>.workers.dev",
+  "timeZone": "America/Los_Angeles",
+  "localDir": null,
+  "gmail": {
+    "_comment": "The export mailbox that receives Shopify's 'export ready' email. Read-only access, fixed search.",
+    "mailbox": "<export mailbox address>",
+    "clientCredentialTarget": "sb-gmail-oauth-client",
+    "credentialTarget": "sb-gmail-readonly",
+    "pollSeconds": 60,
+    "timeoutMinutes": 45
+  },
+  "loginForm": {
+    "emailField": "input#account_email",
+    "emailSubmit": "button[type=\"submit\"]",
+    "passwordField": "input#account_password",
+    "submit": "button[type=\"submit\"]"
+  },
+  "auth": {
+    "selectors": {}
+  },
+  "exportSteps": [
+    {
+      "_comment": "RECORD THESE ON THE WINDOWS HOST with `npm run codegen`. Open Orders, filter Date created from {{windowFromUS}} (or {{windowFrom}}) to {{windowToUS}} ({{windowTo}}), choose Export → Current search → CSV for Excel, numbers, or other spreadsheet programs, then Export orders. The last step must be requestExport."
+    },
+    { "action": "goto", "url": "https://admin.shopify.com/store/<store-handle>/orders" },
+    { "action": "click", "selector": "REPLACE: date created filter" },
+    { "action": "fill", "selector": "REPLACE: date from", "value": "{{windowFrom}}" },
+    { "action": "fill", "selector": "REPLACE: date to", "value": "{{windowTo}}" },
+    { "action": "click", "selector": "REPLACE: Export button" },
+    { "action": "check", "selector": "REPLACE: Current search radio" },
+    { "action": "check", "selector": "REPLACE: CSV for Excel radio" },
+    { "action": "requestExport", "selector": "REPLACE: Export orders button", "directDownloadWaitMs": 20000 }
+  ]
+}

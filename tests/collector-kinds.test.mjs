@@ -54,3 +54,12 @@ test('end to end: prepared report → Worker version; re-sending is source_no_ch
   const rows = (await env.DB.prepare('SELECT COUNT(*) n, SUM(shipping_cost_cents) c FROM shipping_cost_row').first());
   assert.deepEqual([rows.n, rows.c], [3, 1645]);
 });
+
+test('C5: the mapping export is dormant unless re-enabled explicitly', async () => {
+  const { assertKindEnabled } = await import('../automation/shipstation-export/src/kinds.mjs');
+  assert.equal(assertKindEnabled('shipstation_shipping_cost_report', {}), true);
+  assert.throws(() => assertKindEnabled('shipstation_mapping_export', {}), e => e.code === 'mapping_export_dormant');
+  assert.throws(() => assertKindEnabled('shipstation_mapping_export', { kinds: { shipstation_mapping_export: { enabled: 'yes' } } }), e => e.code === 'mapping_export_dormant');
+  assert.equal(assertKindEnabled('shipstation_mapping_export', { kinds: { shipstation_mapping_export: { enabled: true } } }), true);
+  assert.throws(() => assertKindEnabled('nope', {}), /Unknown export kind/);
+});

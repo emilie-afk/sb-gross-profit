@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test \"tests/*.test.mjs\" \"worker/test/*.test.mjs\"",
-    "test:automation": "cd automation/shipstation-export && node --test test/*.test.mjs",
+    "test:automation": "cd automation/shipstation-export && node --test test/*.test.mjs && cd ../shopify-export && node --test test/*.test.mjs",
     "build": "python3 build.py",
     "historical": "node tools/historical_totals.mjs",
     "hash-password": "node tools/hash-password.mjs",

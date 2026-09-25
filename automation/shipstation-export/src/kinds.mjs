@@ -26,6 +26,22 @@ export const KINDS = Object.freeze({
 });
 export const DEFAULT_KIND = 'shipstation_shipping_cost_report';
 
+/**
+ * C5: the mapping export is dormant. It never feeds profitability (the Worker
+ * computes expense from the Shipping Cost Report only, and the mapping export
+ * does not satisfy shipping readiness). The collector runs it only when the
+ * operator re-enables it explicitly for rollback diagnostics.
+ */
+export function assertKindEnabled(kind, config = {}) {
+  if (!KINDS[kind]) throw new Error(`Unknown export kind ${kind}`);
+  if (kind === 'shipstation_mapping_export' && config.kinds?.shipstation_mapping_export?.enabled !== true) {
+    const e = new Error('shipstation_mapping_export is dormant; set kinds.shipstation_mapping_export.enabled = true only for rollback diagnostics');
+    e.code = 'mapping_export_dormant';
+    throw e;
+  }
+  return true;
+}
+
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 const us = iso => { const [y, m, d] = iso.split('-'); return `${m}/${d}/${y}`; };
 

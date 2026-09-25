@@ -29,7 +29,7 @@ import { detectAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
 import { readWindowsCredential } from './credentials.mjs';
 import { lastCompletedWeek, weekFromStart, render, localPaths, assertNoSecretsInConfig, purgeOlderThan, resolveDelivery } from './lib.mjs';
 import { uploadToWorker, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
-import { prepareExport, reportWindow, KINDS, DEFAULT_KIND } from './kinds.mjs';
+import { prepareExport, reportWindow, KINDS, DEFAULT_KIND, assertKindEnabled } from './kinds.mjs';
 
 function argv() {
   const a = process.argv.slice(2), o = {};
@@ -69,6 +69,7 @@ async function main() {
   const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone);
   const kind = typeof args.kind === 'string' ? args.kind : DEFAULT_KIND;
   if (!KINDS[kind]) throw new Error(`--kind must be one of ${Object.keys(KINDS).join(', ')}`);
+  assertKindEnabled(kind, config);                                         // mapping export: dormant unless re-enabled
   const steps = config.kinds?.[kind]?.exportSteps || (kind === 'shipstation_mapping_export' ? config.exportSteps : null) || [];
   const win = reportWindow(week);
   const vars = { ...week, reportFrom: win.from, reportTo: win.to, reportFromUS: win.fromUS, reportToUS: win.toUS };

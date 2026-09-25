@@ -5,10 +5,10 @@ Two export roles (`--kind`):
 | Kind | What | Role |
 | --- | --- | --- |
 | `shipstation_shipping_cost_report` (default) | Analytics → Reports → Shipping Cost Report, rolling 8 weeks of ship dates ending last Sunday | Proposed carrier-expense source (Revision 9). Sanitized **on this PC** to the 15 approved columns: `Recipient`, `Shipping Paid` and `+/-` never leave the machine. Uploaded to `/v1/ingest/shipping-cost-report`. Source verification is still pending, so the dashboard labels it unverified. |
-| `shipstation_mapping_export` | The saved "SB GP weekly" custom export described below | Dormant: mapping only, never an expense source. Kept for rollback until retired. |
+| `shipstation_mapping_export` | The saved "SB GP weekly" custom export described below | Dormant: mapping only, never an expense source, and it never satisfies the Worker's shipping readiness. The job refuses this kind unless `kinds.shipstation_mapping_export.enabled` is `true` (rollback diagnostics only). |
 
 
-Downloads last week's ShipStation shipments with the saved custom export template, checks the file, and uploads it straight to the Worker (`POST /v1/ingest/shipstation`). It runs on the office Windows PC because ShipStation's custom exports are only available in the web app, and there is no ShipStation API access.
+By default it exports the Shipping Cost Report for the rolling eight weeks ending last Sunday, sanitizes it and uploads it to `POST /v1/ingest/shipping-cost-report`. The Worker's weekly readiness needs this report; the mapping export never satisfies it. The sections below on the saved custom template apply only to the dormant mapping export. It runs on the office Windows PC because these exports are only available in the web app, and there is no ShipStation API access.
 
 **Nothing secret lives in this folder or in the repository.** The ShipStation login and the Worker ingest secret are in Windows Credential Manager; the browser session is in a profile under `%LOCALAPPDATA%\sb-shipstation-export\profile`; run logs are under `%LOCALAPPDATA%\sb-shipstation-export\runs`. No password, 2FA code, cookie or token is ever written to the config, a log or the manifest.
 

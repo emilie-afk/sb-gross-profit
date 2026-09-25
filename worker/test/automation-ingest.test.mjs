@@ -107,7 +107,7 @@ test('Shopify rolling csv_text records the week run and an updated_since compani
   const ready = await admin(env, 'GET', `/v1/admin/readiness?weekStart=${WEEK}`);
   assert.equal(ready.json.sources.shopify.status, 'ok');
   assert.equal(ready.json.sources.shopify_updates.status, 'ok');
-  assert.ok(ready.json.missing.some(m => m.startsWith('shipstation')), 'still waits for ShipStation');
+  assert.ok(ready.json.missing.includes('shipping_cost_report:missing'), 'still waits for the Shipping Cost Report');
   // Re-sending the same sanitized export: success, no_change, nothing rewritten.
   const again = await ingest(env, '/v1/ingest/shopify', { format: 'csv_text', mode: 'rolling', text: toCsvText(s.rows, s.columns), weekStart: WEEK });
   assert.deepEqual([again.status, again.json.sourceStatus, again.json.rowsWritten], [200, 'source_no_change', 0]);

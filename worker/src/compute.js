@@ -247,36 +247,67 @@ export async function acceptCatalogReuse(db, run, info, acceptance, actor, owner
   catch (e) { if (isGuardAbort(e)) throw new ApiError(409, 'ownership_lost', 'Another request now owns this scheduled cycle; nothing was written'); throw e; }
 }
 
-// ─── Readiness and schedule (Revision 6) ──────────────────────────────────────
+// ─── Readiness and schedule (Revision 6; C5 inputs) ───────────────────────────
 
+/**
+ * C5 required inputs for a reporting week:
+ *   shopify               sanitized Shopify orders export received (ingest run, mode 'week')
+ *   shopify_updates       updated-order scan received (mode 'updated_since'; a rolling
+ *                         export records it as a companion run)
+ *   shipping_cost_report  a ShipStation Shipping Cost Report version received after the
+ *                         week closed whose requested ship-date range covers the week
+ *                         (pending_review or accepted; a rejected version does not count)
+ *   catalog_refresh       the week's catalog refresh finished (either way)
+ *   reporting_period      the week has closed in the store time zone
+ * Informational only: `shipstation_mapping` (the dormant mapping export) never
+ * satisfies shipping readiness, and `hpd` is optional.
+ */
 const INGEST_SOURCES = [
   { key: 'shopify', source: 'shopify', mode: 'week', required: true },
   { key: 'shopify_updates', source: 'shopify', mode: 'updated_since', required: true },
-  { key: 'shipstation', source: 'shipstation', mode: null, required: true },
+  { key: 'shipstation_mapping', source: 'shipstation', mode: null, required: false, satisfiesShippingReadiness: false },
   { key: 'hpd', source: 'hpd', mode: null, required: false },
 ];
 
+/** The newest Shipping Cost Report version that can serve this week, if any. */
+async function shippingCostReportFor(db, weekStart, win) {
+  const weekEnd = addDays(weekStart, 6);
+  const v = await db.prepare(`SELECT version_id, status, requested_from, requested_to, imported_at, comparison FROM shipping_cost_source_version
+      WHERE requested_from <= ?1 AND requested_to >= ?2 AND imported_at >= ?3 AND status IN ('pending_review', 'accepted')
+      ORDER BY imported_at DESC LIMIT 1`).bind(weekStart, weekEnd, win.endUtcExclusive).first();
+  if (!v) return { required: true, status: 'missing', versionId: null };
+  let trailingComplete = null;
+  try { trailingComplete = !JSON.parse(v.comparison || '{}').possibleIncompleteTrailingDate; } catch { /* unknown */ }
+  return { required: true, status: 'ok', versionId: v.version_id, versionStatus: v.status, requestedFrom: v.requested_from,
+           requestedTo: v.requested_to, receivedAt: v.imported_at, trailingComplete };
+}
+
 /**
- * Has every required source for a week finished successfully AFTER the week
- * closed, and has the week's catalog refresh finished (either way)?
+ * Has every required input for a week arrived AFTER the week closed, and has
+ * the week's catalog refresh finished (either way)?
  */
-export async function readiness(db, weekStart, settings) {
+export async function readiness(db, weekStart, settings, { now = Date.now() } = {}) {
   const win = weekWindowUtc(weekStart, settings.store_timezone);
   const sources = {};
   for (const s of INGEST_SOURCES) {
     const r = await db.prepare(`SELECT run_id, status, started_at, finished_at FROM ingest_run
         WHERE source = ?1 AND week_start = ?2 AND started_at >= ?3 AND (?4 IS NULL OR mode = ?4)
         ORDER BY started_at DESC LIMIT 1`).bind(s.source, weekStart, win.endUtcExclusive, s.mode).first();
-    sources[s.key] = { required: s.required, status: r ? r.status : 'missing', runId: r?.run_id || null, finishedAt: r?.finished_at || null };
+    sources[s.key] = { required: s.required, status: r ? r.status : 'missing', runId: r?.run_id || null, finishedAt: r?.finished_at || null,
+                       ...(s.satisfiesShippingReadiness === false ? { satisfiesShippingReadiness: false } : {}) };
   }
+  sources.shipping_cost_report = await shippingCostReportFor(db, weekStart, win);
   const refresh = await latestRefresh(db, weekStart);
   const catalog = { status: refresh ? refresh.effective_status : 'missing', refreshId: refresh?.refresh_id || null,
                     catalogRev: refresh?.catalog_rev || null, requestedAt: refresh?.requested_at || null };
-  const missing = Object.entries(sources).filter(([, v]) => v.required && v.status !== 'ok').map(([k, v]) => `${k}:${v.status}`);
+  const periodClosed = now >= Date.parse(win.endUtcExclusive);
+  const missing = [];
+  if (!periodClosed) missing.push('reporting_period:open');
+  for (const [k, v] of Object.entries(sources)) if (v.required && v.status !== 'ok') missing.push(`${k}:${v.status}`);
   if (catalog.status === 'missing' || catalog.status === 'pending') missing.push(`catalog_refresh:${catalog.status}`);
   const schedule = { timeZone: settings.schedule_timezone, weekday: Number(settings.schedule_weekday), time: settings.schedule_time };
   const scheduledAt = scheduledRunFor(weekStart, schedule, settings.store_timezone).toISOString();
-  return { weekStart, window: win, scheduledAt, due: Date.now() >= Date.parse(scheduledAt), sources, catalog,
+  return { weekStart, window: win, scheduledAt, due: now >= Date.parse(scheduledAt), periodClosed, sources, catalog,
            ready: missing.length === 0, missing };
 }
 

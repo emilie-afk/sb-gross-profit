@@ -1,5 +1,14 @@
 # Make scenarios — weekly SB GP automation (Revision 8)
 
+> **Superseded in part (C5, 2026-09-25).** There is no Shopify API and no Drive
+> watch: S1 (GraphQL) and S2 (Drive → `/v1/ingest/shipstation`) are retired.
+> The Windows collectors upload directly: `automation/shopify-export` (rolling
+> orders export, `mode: "rolling"`) and `automation/shipstation-export`
+> (Shipping Cost Report). Readiness keys are now `shopify`, `shopify_updates`,
+> `shipping_cost_report`, `catalog_refresh` and `reporting_period`; the mapping
+> export (`shipstation_mapping`) never satisfies shipping readiness. Weekly
+> orchestration moves to the Worker (C7).
+
 Nothing here publishes. Publication is a separate, deliberate admin action and
 stays locked (`publication_enabled = false`, `PUBLICATION_ALLOWED = "false"`,
 and the Carrier Fee priority lock) until the go-live gate passes.
