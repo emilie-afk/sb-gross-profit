@@ -530,7 +530,7 @@ export function parseAdditionalCosts(rows) {
 
 // ─── ShipStation parser ───────────────────────────────────────────────────────
 
-/** Shopify writes order names as "#472351"; ShipStation writes "472351". */
+/** Shopify writes order names as "#912351"; ShipStation writes "912351". */
 export function normalizeOrderNumber(num) {
   return String(num ?? '').trim().replace(/^#+/, '');
 }

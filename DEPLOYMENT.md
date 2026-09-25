@@ -130,7 +130,7 @@ Every difference is accounted for:
 | --- | ---: |
 | House Plant Dropship shipping moved off the weight-tier estimate onto pass-through (pure HPD $5,039.90 → $5,333.54; mixed 17381+HPD $1,311.40 → $1,917.43; mixed HPD+free ship $49.67 → $43.60) | −$893.60 |
 | Newly matched vendor costs — Surfside `SUR-HEART-LARGE` (3 units, $180.00) and `SUR-WHITEPOT-ROSETTE+DONKEY` (2 units, $38.00) | −$218.00 |
-| 3 cancelled orders excluded (#472437, #472436, #471182) and 10 order-level refunds totalling $222.91 prorated across lines | −$328.26 |
+| 3 cancelled orders excluded (#912437, #912436, #911182) and 10 order-level refunds totalling $222.91 prorated across lines | −$328.26 |
 
 ShipStation deduplication produced **no** change: shipping expense for every
 non-HPD order category is identical before and after, so no shipment cost was
