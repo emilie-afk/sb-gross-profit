@@ -77,11 +77,16 @@ export const SETTABLE_KEYS = new Set([
   'ss_coverage_threshold', 'catalog_shrink_tolerance', 'publication_enabled',
   'carrier_fee_priority_locked', 'insurance_treatment', 'store_timezone',
   'store_timezone_confirmed', 'schedule_timezone', 'schedule_weekday', 'schedule_time',
+  'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
 ]);
 
 /** Changing these needs a stated reason; every change is audited either way. */
 export const REASON_REQUIRED = new Set(['publication_enabled', 'carrier_fee_priority_locked', 'store_timezone',
-  'store_timezone_confirmed', 'schedule_timezone', 'schedule_weekday', 'schedule_time', 'ss_coverage_threshold']);
+  'store_timezone_confirmed', 'schedule_timezone', 'schedule_weekday', 'schedule_time', 'ss_coverage_threshold',
+  'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified']);
+
+/** Changing one of these clears shipping_cost_report_source_verified (reconciliation must be repeated). */
+export const CLEARS_SHIPPING_VERIFICATION = new Set(['shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store']);
 
 const validZone = z => { try { new Intl.DateTimeFormat('en-US', { timeZone: z }); return true; } catch { return false; } };
 
@@ -95,6 +100,10 @@ export function validateSetting(key, value) {
   if (key === 'schedule_time' && !(typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value))) return 'schedule_time must be HH:MM (24-hour)';
   // Revision 5: Insurance Cost is not added until the non-duplication test is
   // complete. Until then the setting cannot be changed through the API.
+  if (key === 'shipping_report_currency' && !(typeof value === 'string' && /^[A-Z]{3}$/.test(value))) return 'shipping_report_currency must be a 3-letter ISO code';
+  if (key === 'shipping_report_timezone' && !(typeof value === 'string' && validZone(value))) return 'shipping_report_timezone must be an IANA time zone';
+  if (key === 'shipping_report_store' && !(typeof value === 'string' && value.trim() && value.length <= 80)) return 'shipping_report_store must be a non-empty store name';
+  if (key === 'shipping_cost_report_source_verified' && value !== false) return 'shipping_cost_report_source_verified can only be set true through the verification checklist (not available before C3)';
   if (key === 'insurance_treatment' && value !== 'awaiting_confirmation') return 'insurance_treatment is locked at awaiting_confirmation until the Insurance Cost non-duplication test is complete';
   return null;
 }

@@ -21,6 +21,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
   schedule_timezone: 'Asia/Ho_Chi_Minh',
   schedule_weekday: 1,
   schedule_time: '15:30',
+  // Revision 9 (C2): Shipping Cost Report source. Audited operator settings; the
+  // source-verified flag has no effect until C3 and cannot be set true yet.
+  shipping_report_currency: 'USD',
+  shipping_report_timezone: 'America/Los_Angeles',
+  shipping_report_store: 'Succulents Box (Shopify)',
+  shipping_cost_report_source_verified: false,
 });
 
 /**

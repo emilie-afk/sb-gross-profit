@@ -2,7 +2,7 @@
  * SB GP Worker — router
  * =====================
  * Credential classes (never interchangeable):
- *   /v1/ingest/*            X-Ingest-Secret     Make
+ *   /v1/ingest/*            X-Ingest-Secret     Windows collector, backfill tool
  *   /v1/admin/*             X-Admin-Secret      operator, Make S4
  *   /v1/auth/*              password → session  dashboard
  *   /v1/weeks, /v1/snapshot/*, /v1/history, /v1/compare
@@ -13,6 +13,7 @@
 import { ApiError, json, errorResponse, withCors, preflight } from './http.js';
 import { requireSecret, requireReader, login, logout, sessionInfo } from './auth.js';
 import { ingestShopify, ingestShipStation, ingestHpd, ingestCatalog } from './ingest.js';
+import { ingestShippingCostReport, listVersions, getVersion, acceptVersion, rejectVersion, rollbackActivation, getSegments, getEffectiveSummary } from './shippingCost.js';
 import { listWeeks, getSnapshot, listOrders, getOrder, listIssues, scenarioInput, history, compare } from './read.js';
 import { createAndCompute, recompute, revise, restateCosts, listRestatements, weekPlan, getReadiness, createCatalogRefresh, getCatalogRefresh,
          reviseTouchedWeeks, catalogPushes, getRunDetail, publish, settings, backfill, shipstationFieldComparison, storage } from './admin.js';
@@ -40,6 +41,7 @@ async function route(request, env) {
     if (p === '/v1/ingest/shipstation') return ingestShipStation(request, env);
     if (p === '/v1/ingest/hpd') return ingestHpd(request, env);
     if (p === '/v1/ingest/catalog') return ingestCatalog(request, env);
+    if (p === '/v1/ingest/shipping-cost-report') return ingestShippingCostReport(request, env);
   }
 
   // ── Admin ──
@@ -62,6 +64,13 @@ async function route(request, env) {
     if (p === '/v1/admin/backfill' && m === 'POST') return backfill(request, env);
     if (p === '/v1/admin/shipstation-field-comparison' && m === 'POST') return shipstationFieldComparison(request, env);
     if (p === '/v1/admin/storage' && m === 'GET') return storage(request, env);
+    if (p === '/v1/admin/shipping-cost/versions' && m === 'GET') return listVersions(env);
+    if ((g = p.match(/^\/v1\/admin\/shipping-cost\/versions\/([\w-]+)$/)) && m === 'GET') return getVersion(env, g[1]);
+    if ((g = p.match(/^\/v1\/admin\/shipping-cost\/versions\/([\w-]+)\/accept$/)) && m === 'POST') return acceptVersion(request, env, g[1]);
+    if ((g = p.match(/^\/v1\/admin\/shipping-cost\/versions\/([\w-]+)\/reject$/)) && m === 'POST') return rejectVersion(request, env, g[1]);
+    if ((g = p.match(/^\/v1\/admin\/shipping-cost\/activations\/([\w-]+)\/rollback$/)) && m === 'POST') return rollbackActivation(request, env, g[1]);
+    if (p === '/v1/admin/shipping-cost/segments' && m === 'GET') return getSegments(env);
+    if (p === '/v1/admin/shipping-cost/effective' && m === 'GET') return getEffectiveSummary(env);
   }
 
   // ── Reads ──

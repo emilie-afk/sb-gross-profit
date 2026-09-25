@@ -2,7 +2,8 @@
 /**
  * export.mjs — weekly ShipStation custom shipment export (Windows host)
  * ====================================================================
- *   node src/export.mjs --config config.local.json [--week 2026-09-14] [--headed]
+ *   node src/export.mjs --config config.local.json [--kind shipstation_shipping_cost_report|shipstation_mapping_export]
+ *                       [--week 2026-09-14] [--headed]
  *
  * 1. Opens a persistent browser profile kept OUTSIDE the repository
  *    (%LOCALAPPDATA%\sb-shipstation-export\profile).
@@ -26,8 +27,9 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { detectAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
 import { readWindowsCredential } from './credentials.mjs';
-import { lastCompletedWeek, weekFromStart, render, customerHeaders, csvHeaderNames, sha256, localPaths, assertNoSecretsInConfig, invalidExportReason, purgeOlderThan, resolveDelivery, MAPPING_EXPORT_COLUMNS, unexpectedColumns } from './lib.mjs';
-import { uploadShipStationCsv, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
+import { lastCompletedWeek, weekFromStart, render, localPaths, assertNoSecretsInConfig, purgeOlderThan, resolveDelivery } from './lib.mjs';
+import { uploadToWorker, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
+import { prepareExport, reportWindow, KINDS, DEFAULT_KIND } from './kinds.mjs';
 
 function argv() {
   const a = process.argv.slice(2), o = {};
@@ -65,8 +67,13 @@ async function main() {
   if (delivery === 'worker') workerEndpoint(config.workerUrl);            // fail fast on a bad URL
   purgeOlderThan(paths.quarantine, 72 * 3600_000);                        // also runs daily from purge.mjs
   const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone);
+  const kind = typeof args.kind === 'string' ? args.kind : DEFAULT_KIND;
+  if (!KINDS[kind]) throw new Error(`--kind must be one of ${Object.keys(KINDS).join(', ')}`);
+  const steps = config.kinds?.[kind]?.exportSteps || (kind === 'shipstation_mapping_export' ? config.exportSteps : null) || [];
+  const win = reportWindow(week);
+  const vars = { ...week, reportFrom: win.from, reportTo: win.to, reportFromUS: win.fromUS, reportToUS: win.toUS };
   const runId = `ssx_${new Date().toISOString().replace(/[:.]/g, '-')}`;
-  const manifest = { runId, weekStart: week.weekStart, weekEnd: week.weekEnd, startedAt: new Date().toISOString(), status: 'running' };
+  const manifest = { runId, kind, weekStart: week.weekStart, weekEnd: week.weekEnd, startedAt: new Date().toISOString(), status: 'running' };
   const finish = (status, exitCode, extra = {}) => {
     Object.assign(manifest, { status, exitCode, finishedAt: new Date().toISOString(), ...extra });
     fs.writeFileSync(path.join(paths.runs, `${runId}.json`), JSON.stringify(manifest, null, 2));
@@ -96,38 +103,32 @@ async function main() {
     if (state === 'captcha') return finish('needs_human_captcha', EXIT.CAPTCHA);
     if (NEEDS_HUMAN.has(state) || state !== 'authenticated') return finish('unknown_page', EXIT.UNKNOWN_PAGE, { evidence });
 
-    const file = await runSteps(page, config.exportSteps || [], week, paths.downloads);
+    const file = await runSteps(page, steps, vars, paths.downloads);
     const buf = fs.readFileSync(file);
-    const headers = csvHeaderNames(buf.toString('utf8'));
-    const pii = [...new Set([...customerHeaders(headers), ...unexpectedColumns(headers, MAPPING_EXPORT_COLUMNS)])];
-    if (pii.length) {
-      fs.rmSync(file);                                        // never forward customer columns
-      return finish('refused_customer_columns', EXIT.EXPORT_FAILED, { headers, customerHeaders: pii,
-        note: 'The export must contain exactly the saved template columns; remove these columns from it' });
-    }
-    const text = buf.toString('utf8');
-    const rows = text.split(/\r?\n/).filter(l => l.trim()).length - 1;
-    const invalid = invalidExportReason(headers, rows);
-    if (invalid) {
-      fs.rmSync(file);
-      return finish('invalid_export', EXIT.EXPORT_FAILED, { headers, rowCount: rows, reason: invalid });
-    }
     const exportedAt = new Date().toISOString();
-    const outName = `shipstation_${week.weekStart}_${runId}.csv`;
-    const facts = { exportedAt, bytes: buf.length, sha256: sha256(buf), headers, rowCount: rows };
-    if (delivery === 'drive') {                                            // rollback path only
+    const prep = prepareExport(kind, buf.toString('utf8'), { week, exportedAt });
+    if (prep.refused) {
+      fs.rmSync(file);                                                     // a refused raw file is never kept or forwarded
+      return finish(prep.refused, EXIT.EXPORT_FAILED, { reason: prep.reason, columns: prep.columns });
+    }
+    const outName = `${kind}_${week.weekStart}_${runId}.csv`;
+    const facts = { exportedAt, bytes: buf.length, ...prep.facts };
+    if (kind === 'shipstation_shipping_cost_report') fs.rmSync(file);    // raw report holds Recipient: gone once sanitized
+    if (delivery === 'drive') {                                            // rollback path only (mapping export)
+      if (kind !== 'shipstation_mapping_export') return finish('drive_not_supported', EXIT.CONFIG, { note: 'Drive rollback exists only for the mapping export' });
       fs.mkdirSync(config.outputDir, { recursive: true });
       fs.copyFileSync(file, path.join(config.outputDir, outName));
       fs.rmSync(file);
       return finish('ok', EXIT.OK, { ...facts, delivery, file: outName });
     }
     const { password: ingestSecret } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
-    const ingest = await uploadShipStationCsv({ workerUrl: config.workerUrl, ingestSecret, weekStart: week.weekStart, text, exportedAt });
+    const ingest = await uploadToWorker({ workerUrl: config.workerUrl, ingestSecret, path: prep.path, payload: prep.payload });
     if (!ingest.ok) {
-      fs.renameSync(file, path.join(paths.quarantine, outName));            // kept ≤72h for a manual retry, never synced
+      const q = path.join(paths.quarantine, outName);                      // ≤72h, never synced; sanitized content only for the report
+      if (prep.sanitizedText) fs.writeFileSync(q, prep.sanitizedText); else fs.renameSync(file, q);
       return finish('upload_failed', UPLOAD_EXIT, { ...facts, delivery, ingest, quarantined: outName });
     }
-    fs.rmSync(file);
+    if (fs.existsSync(file)) fs.rmSync(file);
     return finish('ok', EXIT.OK, { ...facts, delivery, ingest });
   } catch (e) {
     return finish('export_failed', EXIT.EXPORT_FAILED, { error: e.message.slice(0, 300) });

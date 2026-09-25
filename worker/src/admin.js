@@ -2,7 +2,7 @@
  * admin.js — /v1/admin routes (X-Admin-Secret)
  */
 import { ApiError, json, readJson, WEEK_RE } from './http.js';
-import { getSettings, validateSetting, REASON_REQUIRED, nowIso, newId, selectIn, atomic } from './db.js';
+import { getSettings, validateSetting, REASON_REQUIRED, CLEARS_SHIPPING_VERIFICATION, nowIso, newId, selectIn, atomic } from './db.js';
 import { computeWeek, computeScheduledWeek, recomputeScheduledRun, publishSnapshot, readiness, latestRefresh, weekAnchor, REFRESH_TIMEOUT_MINUTES } from './compute.js';
 import { actorFor, actorJson } from './actor.js';
 import { getRun, createRun } from './runs.js';
@@ -227,6 +227,11 @@ export async function settings(request, env) {
     const i = writes.findIndex(([k]) => k === 'store_timezone_confirmed');
     if (i >= 0) writes.splice(i, 1);
     writes.push(['store_timezone_confirmed', false, `automatic: store_timezone changed to ${changes.store_timezone}; reconfirmation required`]);
+  }
+  // A changed report currency / time zone / store invalidates the source verification.
+  const cleared = Object.keys(changes).filter(k => CLEARS_SHIPPING_VERIFICATION.has(k) && JSON.stringify(changes[k]) !== JSON.stringify(before[k]));
+  if (cleared.length && !('shipping_cost_report_source_verified' in changes)) {
+    writes.push(['shipping_cost_report_source_verified', false, `automatic: ${cleared.join(', ')} changed; reconciliation required again`]);
   }
   const at = nowIso();
   await atomic(env.DB, writes.flatMap(([k, v, r]) => [

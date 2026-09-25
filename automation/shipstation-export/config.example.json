@@ -53,5 +53,37 @@
       "action": "download",
       "selector": "REPLACE: export / download button"
     }
-  ]
+  ],
+  "kinds": {
+    "shipstation_shipping_cost_report": {
+      "_comment": "Analytics \u2192 Reports \u2192 Shipping Cost Report. RECORD THESE with `npm run codegen`. Set the ship-date range to {{reportFromUS}}\u2013{{reportToUS}} (the 8 weeks ending last Sunday) and download the CSV.",
+      "exportSteps": [
+        {
+          "action": "goto",
+          "url": "https://ship.shipstation.com/analytics/reports"
+        },
+        {
+          "action": "click",
+          "selector": "REPLACE: Shipping Cost Report"
+        },
+        {
+          "action": "fill",
+          "selector": "REPLACE: ship date from",
+          "value": "{{reportFromUS}}"
+        },
+        {
+          "action": "fill",
+          "selector": "REPLACE: ship date to",
+          "value": "{{reportToUS}}"
+        },
+        {
+          "action": "download",
+          "selector": "REPLACE: export / download button"
+        }
+      ]
+    },
+    "shipstation_mapping_export": {
+      "_comment": "Dormant (mapping only, never expense). Uses the top-level exportSteps below until it is retired."
+    }
+  }
 }
