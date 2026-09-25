@@ -29,7 +29,7 @@ export function refuseRepoPath(p) {
   return abs;
 }
 
-const read = p => fs.readFileSync(refuseRepoPath(p), 'utf8').replace(/^﻿/, '');
+const read = p => fs.readFileSync(refuseRepoPath(p), 'utf8').replace(/^\uFEFF/, '');
 const c2 = c => fromCents(c).toFixed(2);
 
 /** Pure: aggregates only. */

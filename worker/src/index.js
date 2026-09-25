@@ -17,6 +17,7 @@ import { ingestShippingCostReport, listVersions, getVersion, acceptVersion, reje
 import { listWeeks, getSnapshot, listOrders, getOrder, listIssues, scenarioInput, history, compare } from './read.js';
 import { createAndCompute, recompute, revise, restateCosts, listRestatements, weekPlan, getReadiness, createCatalogRefresh, getCatalogRefresh,
          reviseTouchedWeeks, catalogPushes, getRunDetail, publish, settings, backfill, shipstationFieldComparison, storage } from './admin.js';
+import { adminCatalogFetch } from './catalogFetch.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
 
 async function route(request, env) {
@@ -58,6 +59,7 @@ async function route(request, env) {
     if (p === '/v1/admin/readiness' && m === 'GET') return getReadiness(request, env);
     if (p === '/v1/admin/catalog-refresh' && m === 'POST') return createCatalogRefresh(request, env);
     if (p === '/v1/admin/catalog-pushes' && m === 'GET') return catalogPushes(request, env);
+    if (p === '/v1/admin/catalog/fetch' && m === 'POST') return adminCatalogFetch(request, env);
     if ((g = p.match(/^\/v1\/admin\/catalog-refresh\/([\w-]+)$/)) && m === 'GET') return getCatalogRefresh(env, g[1]);
     if (p === '/v1/admin/publish' && m === 'POST') return publish(request, env);
     if (p === '/v1/admin/settings' && (m === 'GET' || m === 'POST')) return settings(request, env);

@@ -12,7 +12,7 @@ import { planCycle } from '../../shared/schedule.js';
 import { compareCarrierFeeToRate, classifyInsuranceTreatment } from '../../shared/adapters/shipstation.js';
 
 const TRIGGERS = new Set(['schedule', 'manual']);
-const mondayOrThrow = w => {
+export const mondayOrThrow = w => {
   if (!WEEK_RE.test(w || '') || weekStartOf(w) !== w) throw new ApiError(400, 'bad_payload', 'weekStart must be a Monday, YYYY-MM-DD');
   return w;
 };

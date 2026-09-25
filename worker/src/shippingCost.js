@@ -168,7 +168,7 @@ export async function ingestShippingCostReport(request, env) {
   const actor = actorFor('ingest_secret', body);
   let parsed;
   try {
-    parsed = parseShippingCostReport(parseCSV(body.text.replace(/^﻿/, '')),
+    parsed = parseShippingCostReport(parseCSV(body.text.replace(/^\uFEFF/, '')),
       { requestedFrom: body.requestedFrom, requestedTo: body.requestedTo, expectedStore: settings.shipping_report_store });
   } catch (e) {
     if (e.code === 'unapproved_columns') throw new ApiError(400, 'customer_data_rejected', 'The upload has columns outside the 15-column Shipping Cost Report contract', { columns: e.columns });

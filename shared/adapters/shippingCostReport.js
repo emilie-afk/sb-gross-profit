@@ -73,7 +73,7 @@ export function canonicalOrderKey(v) {
  * means ShipStation changed the report and the file is refused.
  */
 export function sanitizeShippingCostReport(rawRows) {
-  const headers = rawRows.length ? Object.keys(rawRows[0]).map(h => h.replace(/^﻿/, '')) : [];
+  const headers = rawRows.length ? Object.keys(rawRows[0]).map(h => h.replace(/^\uFEFF/, '')) : [];
   const unknown = headers.filter(h => !SHIPPING_COST_REPORT_RAW_COLUMNS.includes(h));
   const missing = SHIPPING_COST_REPORT_RAW_COLUMNS.filter(h => !headers.includes(h));
   if (unknown.length || missing.length) {
@@ -83,7 +83,7 @@ export function sanitizeShippingCostReport(rawRows) {
   }
   const rows = rawRows.map(r => {
     const clean = {};
-    for (const [k, v] of Object.entries(r)) clean[k.replace(/^﻿/, '')] = v;
+    for (const [k, v] of Object.entries(r)) clean[k.replace(/^\uFEFF/, '')] = v;
     const o = {};
     for (const c of SHIPPING_COST_REPORT_COLUMNS) o[c] = clean[c] ?? '';
     return o;

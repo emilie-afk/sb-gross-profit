@@ -59,7 +59,7 @@ function weekOf(body) {
   return body.weekStart;
 }
 
-async function withRun(env, source, body, fn, { mode: forcedMode, onSuccess } = {}) {
+export async function withRun(env, source, body, fn, { mode: forcedMode, onSuccess } = {}) {
   const weekStart = weekOf(body);
   let mode = null;
   if (source === 'shopify') {
@@ -246,7 +246,7 @@ export const REFRESH_ID_RE = /^crf_[0-9a-f]{20}$/;
  * id it carries — never "the latest refresh" — so a build without an id, or
  * with a malformed, unknown, expired or already-resolved id, resolves nothing.
  */
-async function resolveRefresh(db, refreshId, { rev, accepted, reasons }) {
+export async function resolveRefresh(db, refreshId, { rev, accepted, reasons }) {
   if (refreshId === undefined || refreshId === null || refreshId === '') return { status: 'none', note: 'no refreshId in this push; no refresh resolved' };
   if (typeof refreshId !== 'string' || !REFRESH_ID_RE.test(refreshId)) return { status: 'invalid', note: 'malformed refreshId; no refresh resolved' };
   const r = await db.prepare('SELECT status, requested_at FROM catalog_refresh WHERE refresh_id = ?1').bind(refreshId).first();

@@ -52,7 +52,7 @@ export function prepareExport(kind, text, { week, exportedAt }) {
   const win = reportWindow(week);
   let s, p;
   try {
-    s = sanitizeShippingCostReport(parseCSV(text.replace(/^﻿/, '')));
+    s = sanitizeShippingCostReport(parseCSV(text.replace(/^\uFEFF/, '')));
     p = parseShippingCostReport(s.rows, { requestedFrom: win.from, requestedTo: win.to });
   } catch (e) {
     return { refused: e.code === 'report_schema_changed' ? 'report_schema_changed' : 'invalid_export', reason: e.message.slice(0, 200) };

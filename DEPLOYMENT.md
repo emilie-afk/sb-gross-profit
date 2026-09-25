@@ -440,6 +440,34 @@ Worker does not trust forwarded-for headers, which a caller could forge).
 
 ### Cost catalog: refresh, freshness, versioning
 
+**Worker direct fetch (C6, replaces the Netlify build hook).** The Worker reads
+the cost sheets itself. Set one Worker secret (never in `wrangler.toml`):
+
+```
+wrangler secret put CATALOG_SOURCES_JSON
+{"MCG_SHEET_URL":"https://docs.google.com/…","MCG_POTS_SHEET_URL":"…", … ,"HP_COSTS_FOLDER_ID":"…","GDRIVE_API_KEY":"…"}
+```
+
+Keys are the build.py environment names: `MCG_SHEET_URL`, `MCG_POTS_SHEET_URL`,
+`SB_SKU_ALIAS_URL`, `SB_SKU_ALIAS_URL_2`, `HP_SKU_ALIAS_URL`, `AS_SHEET_URL`,
+`L2G_SHEET_URL`, `LIVELY_GOOD_SHEET_URL`, `CALATHEA_COLLECTIVE_SHEET_URL`,
+`SURFSIDE_ARRANGEMENT_SHEET_URL`, `LINDAMAKES_SHEET_URL`, `HP_SHEET_URL`,
+`MCG_EXTRA_SHEET_URL`, `HP_COSTS_FOLDER_ID` + `GDRIVE_API_KEY`, and the HP
+fallbacks `PRODUCT_COSTS_JSON1/2`, `SKU_WEIGHTS_JSON`. Copy the values from the
+Netlify environment; leave out any that are unset there.
+
+`POST /v1/admin/catalog/fetch { weekStart }` registers a refresh and answers it;
+`{ refreshId }` answers one existing pending refresh. The tables are built by
+`shared/catalogBuild.js`, a port of build.py checked against the real build.py
+by `tools/catalog-parity/parity.mjs`. URLs, the folder id and the key are never
+logged, stored or returned: provenance keeps a short SHA-256 of each URL and of
+each source's content. Any configured source that fails (HTTP error, sign-in
+page, empty, not UTF-8, too large, unparsable) rejects the whole refresh. An
+empty or shrunken catalog is saved as `rejected` and never replaces the
+accepted one.
+
+The build-push path below still works and is retired after acceptance.
+
 | Netlify variable | Value |
 | --- | --- |
 | `CATALOG_PUSH_URL` | the Worker base URL, `https://sb-gp-worker.<account>.workers.dev` (`build.py` appends `/v1/ingest/catalog`) |
