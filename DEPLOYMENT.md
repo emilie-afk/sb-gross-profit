@@ -613,6 +613,10 @@ ShipStation API:
   it never feeds expense (Rate, estimated cost, Carrier Fee, Shipping Paid and
   +/- are never expense).
 
+**Known limitation:** the updated-order scan is the rolling eight-week export.
+Refunds or cancellations applied to orders older than eight weeks are not
+detected automatically unless a broader manual or backfill export is run.
+
 Readiness (`GET /v1/admin/readiness?weekStart=`) now requires:
 `shopify` (sanitized orders export), `shopify_updates` (updated-order scan),
 `shipping_cost_report` (a version received after the week closed whose

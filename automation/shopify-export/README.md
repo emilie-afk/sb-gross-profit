@@ -6,6 +6,10 @@ The Worker records that one upload as two inputs for the week: the week's orders
 
 No Shopify API, Admin API token, custom app or Shopify connector is used. **Nothing secret lives in this folder or in the repository.**
 
+## Known limitation: eight-week updated-order window
+
+The updated-order scan is this same rolling eight-week export. A refund or cancellation applied to an order **older than eight weeks** is not detected automatically. Run a broader manual or backfill export to pick it up.
+
 ## What never leaves this PC, and what is never kept
 
 | Item | Handling |
