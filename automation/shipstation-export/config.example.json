@@ -1,10 +1,14 @@
 {
-  "_comment": "Copy to config.local.json (gitignored). Holds URLs, selectors and folders only. Credentials live in Windows Credential Manager under credentialTarget; this file must never contain a password, 2FA code, cookie or token, and the job refuses to run if it does.",
+  "_comment": "Copy to config.local.json (gitignored). Holds URLs, selectors and folders only. Credentials live in Windows Credential Manager: the ShipStation login under credentialTarget, the Worker ingest secret (as the password) under ingestCredentialTarget. This file must never contain a password, 2FA code, cookie, token or secret, and the job refuses to run if it does.",
   "appUrl": "https://ship.shipstation.com/",
   "loginUrl": "https://ship.shipstation.com/",
   "credentialTarget": "sb-shipstation-export",
   "timeZone": "America/Los_Angeles",
-  "outputDir": "G:\\My Drive\\SB\\ShipStation exports",
+  "delivery": "worker",
+  "workerUrl": "https://sb-gp-worker-staging.<account>.workers.dev",
+  "ingestCredentialTarget": "sb-gp-ingest",
+  "_outputDirComment": "Used only when delivery is \"drive\" (rollback). Leave null otherwise.",
+  "outputDir": null,
   "localDir": null,
   "loginForm": {
     "usernameField": "input[name=\"username\"]",
@@ -13,16 +17,41 @@
   },
   "auth": {
     "selectors": {
-      "authenticated": ["a[href*=\"/shipments\"]", "nav[aria-label=\"Main\"]"]
+      "authenticated": [
+        "a[href*=\"/shipments\"]",
+        "nav[aria-label=\"Main\"]"
+      ]
     }
   },
   "exportSteps": [
-    { "_comment": "RECORD THESE ON THE WINDOWS HOST with `npx playwright codegen https://ship.shipstation.com/`. They must open the saved custom shipment export template (Revision 5 field list, no customer columns), set the ship-date range, and download." },
-    { "action": "goto", "url": "https://ship.shipstation.com/shipments" },
-    { "action": "click", "selector": "REPLACE: export menu button" },
-    { "action": "click", "selector": "REPLACE: saved custom export template 'SB GP weekly'" },
-    { "action": "fill", "selector": "REPLACE: ship date from", "value": "{{weekStartUS}}" },
-    { "action": "fill", "selector": "REPLACE: ship date to", "value": "{{weekEndUS}}" },
-    { "action": "download", "selector": "REPLACE: export / download button" }
+    {
+      "_comment": "RECORD THESE ON THE WINDOWS HOST with `npx playwright codegen https://ship.shipstation.com/`. They must open the saved custom shipment export template (Revision 5 field list, no customer columns), set the ship-date range, and download."
+    },
+    {
+      "action": "goto",
+      "url": "https://ship.shipstation.com/shipments"
+    },
+    {
+      "action": "click",
+      "selector": "REPLACE: export menu button"
+    },
+    {
+      "action": "click",
+      "selector": "REPLACE: saved custom export template 'SB GP weekly'"
+    },
+    {
+      "action": "fill",
+      "selector": "REPLACE: ship date from",
+      "value": "{{weekStartUS}}"
+    },
+    {
+      "action": "fill",
+      "selector": "REPLACE: ship date to",
+      "value": "{{weekEndUS}}"
+    },
+    {
+      "action": "download",
+      "selector": "REPLACE: export / download button"
+    }
   ]
 }

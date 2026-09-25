@@ -10,9 +10,14 @@
  *    from Windows Credential Manager. If 2FA or a captcha is shown, stops with
  *    a distinct exit code so a person can run login.mjs once.
  * 3. Only when authenticated, runs the export steps recorded in config.
- * 4. Refuses any file whose headers include customer columns, so such a file
- *    never reaches the Google Drive folder Make watches.
- * 5. Writes a run manifest (no secrets, no row data) and exits with EXIT codes.
+ * 4. Refuses any file whose headers include customer columns, or that is not a
+ *    valid export (no rows, no shipment/order/cost columns).
+ * 5. Uploads the CSV straight to the Worker (/v1/ingest/shipstation) with the
+ *    ingest secret from Windows Credential Manager (delivery "worker", the
+ *    default). delivery "drive" keeps the old copy-to-folder behaviour for
+ *    rollback only.
+ * 6. Writes a run manifest (week, export time, source hash, ingest result; no
+ *    secrets, no row data) and exits with EXIT codes.
  *
  * Nothing here stores a password, 2FA code, session cookie or browser token.
  */
@@ -21,7 +26,8 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { detectAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
 import { readWindowsCredential } from './credentials.mjs';
-import { lastCompletedWeek, weekFromStart, render, customerHeaders, csvHeaderNames, sha256, localPaths, assertNoSecretsInConfig } from './lib.mjs';
+import { lastCompletedWeek, weekFromStart, render, customerHeaders, csvHeaderNames, sha256, localPaths, assertNoSecretsInConfig, invalidExportReason, purgeOlderThan } from './lib.mjs';
+import { uploadShipStationCsv, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
 
 function argv() {
   const a = process.argv.slice(2), o = {};
@@ -55,6 +61,10 @@ async function main() {
   assertNoSecretsInConfig(config);
   const paths = localPaths(config);
   for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
+  const delivery = config.delivery || 'worker';
+  if (!['worker', 'drive'].includes(delivery)) throw new Error('config.delivery must be "worker" or "drive"');
+  if (delivery === 'worker') workerEndpoint(config.workerUrl);            // fail fast on a bad URL
+  purgeOlderThan(paths.quarantine, 72 * 3600_000);                        // failed-delivery retention: 72 hours
   const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone);
   const runId = `ssx_${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const manifest = { runId, weekStart: week.weekStart, weekEnd: week.weekEnd, startedAt: new Date().toISOString(), status: 'running' };
@@ -96,12 +106,30 @@ async function main() {
       return finish('refused_customer_columns', EXIT.EXPORT_FAILED, { headers, customerHeaders: pii,
         note: 'Remove these columns from the ShipStation export template' });
     }
+    const text = buf.toString('utf8');
+    const rows = text.split(/\r?\n/).filter(l => l.trim()).length - 1;
+    const invalid = invalidExportReason(headers, rows);
+    if (invalid) {
+      fs.rmSync(file);
+      return finish('invalid_export', EXIT.EXPORT_FAILED, { headers, rowCount: rows, reason: invalid });
+    }
+    const exportedAt = new Date().toISOString();
     const outName = `shipstation_${week.weekStart}_${runId}.csv`;
-    fs.mkdirSync(config.outputDir, { recursive: true });
-    fs.copyFileSync(file, path.join(config.outputDir, outName));
+    const facts = { exportedAt, bytes: buf.length, sha256: sha256(buf), headers, rowCount: rows };
+    if (delivery === 'drive') {                                            // rollback path only
+      fs.mkdirSync(config.outputDir, { recursive: true });
+      fs.copyFileSync(file, path.join(config.outputDir, outName));
+      fs.rmSync(file);
+      return finish('ok', EXIT.OK, { ...facts, delivery, file: outName });
+    }
+    const { password: ingestSecret } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
+    const ingest = await uploadShipStationCsv({ workerUrl: config.workerUrl, ingestSecret, weekStart: week.weekStart, text, exportedAt });
+    if (!ingest.ok) {
+      fs.renameSync(file, path.join(paths.quarantine, outName));            // kept ≤72h for a manual retry, never synced
+      return finish('upload_failed', UPLOAD_EXIT, { ...facts, delivery, ingest, quarantined: outName });
+    }
     fs.rmSync(file);
-    const rows = buf.toString('utf8').split(/\r?\n/).filter(l => l.trim()).length - 1;
-    return finish('ok', EXIT.OK, { file: outName, bytes: buf.length, sha256: sha256(buf), headers, rowCount: rows });
+    return finish('ok', EXIT.OK, { ...facts, delivery, ingest });
   } catch (e) {
     return finish('export_failed', EXIT.EXPORT_FAILED, { error: e.message.slice(0, 300) });
   } finally {

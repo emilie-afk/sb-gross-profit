@@ -2,6 +2,7 @@
  * lib.mjs — pure helpers for the ShipStation export job (no Playwright import,
  * so they are tested in the main suite).
  */
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -74,7 +75,33 @@ export const sha256 = buf => crypto.createHash('sha256').update(buf).digest('hex
 /** Local folders outside the repository: browser profile, run manifests. */
 export function localPaths(config = {}) {
   const base = config.localDir || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'sb-shipstation-export');
-  return { base, profile: path.join(base, 'profile'), runs: path.join(base, 'runs'), downloads: path.join(base, 'downloads') };
+  return { base, profile: path.join(base, 'profile'), runs: path.join(base, 'runs'), downloads: path.join(base, 'downloads'),
+           quarantine: path.join(base, 'quarantine') };
+}
+
+/** Columns the saved "SB GP weekly" template must have for the export to be usable. */
+export const REQUIRED_EXPORT_HEADERS = Object.freeze(['Shipment ID', 'Order Number', 'Item SKU']);
+
+/** Why an export is unusable, or null. An empty week is reported, not uploaded. */
+export function invalidExportReason(headers, rowCount) {
+  const have = new Set(headers.map(h => String(h).trim()));
+  const missing = REQUIRED_EXPORT_HEADERS.filter(h => !have.has(h));
+  if (missing.length) return `missing columns: ${missing.join(', ')}`;
+  if (!have.has('Carrier Fee') && !have.has('Rate')) return 'missing columns: Carrier Fee and Rate';
+  if (!(rowCount > 0)) return 'no shipment rows';
+  return null;
+}
+
+/** Delete files in `dir` older than `maxAgeMs` (quarantine retention). */
+export function purgeOlderThan(dir, maxAgeMs, now = Date.now()) {
+  if (!fs.existsSync(dir)) return 0;
+  let n = 0;
+  for (const f of fs.readdirSync(dir)) {
+    const p = path.join(dir, f);
+    const st = fs.statSync(p);
+    if (st.isFile() && now - st.mtimeMs > maxAgeMs) { fs.rmSync(p); n++; }
+  }
+  return n;
 }
 
 /** Refuse config values that look like secrets: the config file must never hold them. */

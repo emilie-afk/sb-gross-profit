@@ -1,8 +1,8 @@
 # ShipStation weekly export (Windows host)
 
-Downloads last week's ShipStation shipments with the saved custom export template and drops the CSV in the Google Drive folder that Make scenario S2 watches (`docs/make-scenarios.md`). It runs on the office Windows PC because ShipStation's custom exports are only available in the web app.
+Downloads last week's ShipStation shipments with the saved custom export template, checks the file, and uploads it straight to the Worker (`POST /v1/ingest/shipstation`). It runs on the office Windows PC because ShipStation's custom exports are only available in the web app, and there is no ShipStation API access.
 
-**Nothing secret lives in this folder or in the repository.** The login is in Windows Credential Manager; the browser session is in a profile under `%LOCALAPPDATA%\sb-shipstation-export\profile`; run logs are under `%LOCALAPPDATA%\sb-shipstation-export\runs`. No password, 2FA code, cookie or token is ever written to the config, a log or the manifest.
+**Nothing secret lives in this folder or in the repository.** The ShipStation login and the Worker ingest secret are in Windows Credential Manager; the browser session is in a profile under `%LOCALAPPDATA%\sb-shipstation-export\profile`; run logs are under `%LOCALAPPDATA%\sb-shipstation-export\runs`. No password, 2FA code, cookie or token is ever written to the config, a log or the manifest.
 
 ## One-time setup
 
@@ -15,8 +15,9 @@ Downloads last week's ShipStation shipments with the saved custom export templat
    ```
    Install-Module CredentialManager -Scope CurrentUser
    New-StoredCredential -Target sb-shipstation-export -UserName <user> -Password <password> -Persist LocalMachine
+   New-StoredCredential -Target sb-gp-ingest -UserName worker -Password <Worker INGEST_SECRET> -Persist LocalMachine
    ```
-3. `copy config.example.json config.local.json` (gitignored). Set `outputDir` to the synced Drive folder.
+3. `copy config.example.json config.local.json` (gitignored). Set `workerUrl` to the Worker (staging first). Keep `delivery` at `"worker"`; `"drive"` plus `outputDir` is the old copy-to-folder behaviour, kept for rollback only.
 4. In ShipStation, save a custom shipment export template named **SB GP weekly** with the Revision 5 fields only: Shipment ID, Order Number, Tracking Number, Ship Date, Modify Date, Void Flag, Void Date, Carrier, Service, Carrier Fee, Rate, Insurance Cost, Shipping Paid, Provider, Carrier Transaction ID, Internal Transaction ID, External ID, No Postage, Store Name, Package Count, Weight, Item SKU, Item Quantity (these are the columns `shared/adapters/shipstation.js` reads; anything else is ignored and reported). Shipping Paid is kept for disclosure only and is never used as expense. Leave out **Created By**: it can hold a staff email and is not needed; if it is present, the Worker keeps only a blank/integration/person class. No recipient, address, phone, email or company column; the job refuses any file that has one.
 5. Record the export clicks: `npm run codegen`, sign in, open the template, set a date range and download. Copy the selectors into `exportSteps` in `config.local.json`, replacing every `REPLACE:` value. Use `{{weekStartUS}}` and `{{weekEndUS}}` (MM/DD/YYYY) or `{{weekStart}}` / `{{weekEnd}}` (YYYY-MM-DD) for the dates.
 6. Sign in once with a visible browser and complete 2FA yourself: `npm run login`.
@@ -24,7 +25,7 @@ Downloads last week's ShipStation shipments with the saved custom export templat
 
 ## Schedule
 
-The weekly cycle runs on **Monday 15:30 Ho Chi Minh time (08:30 UTC)**; see `docs/make-scenarios.md`. This job must run before that and after the store's week has closed. The week closes at Monday 00:00 in Los Angeles, which is 07:00 UTC in summer and 08:00 UTC in winter. The job therefore runs at **Monday 08:05 UTC** in every season.
+The Worker's weekly cycle runs on **Monday 15:30 Ho Chi Minh time (08:30 UTC)** and waits for this upload before computing. This job must run before that and after the store's week has closed. The week closes at Monday 00:00 in Los Angeles, which is 07:00 UTC in summer and 08:00 UTC in winter. The job therefore runs at **Monday 08:05 UTC** in every season.
 
 | This PC's Windows time zone | Task Scheduler trigger |
 | --- | --- |
@@ -35,19 +36,24 @@ The weekly cycle runs on **Monday 15:30 Ho Chi Minh time (08:30 UTC)**; see `doc
 schtasks /Create /TN "SB ShipStation export" /SC WEEKLY /D MON /ST 15:05 /TR "cmd /c cd /d C:\path\to\automation\shipstation-export && npm run export"
 ```
 
-The job exports the last completed Monday–Sunday week in America/Los_Angeles (`config.timeZone`). Run too early in winter (before 08:00 UTC), it would export the week before; that is a harmless duplicate, and S4 would keep reporting ShipStation as missing for the new week. Do not schedule it earlier than 08:05 UTC.
+The job exports the last completed Monday–Sunday week in America/Los_Angeles (`config.timeZone`). Run too early in winter (before 08:00 UTC), it would export the week before; that is a harmless duplicate (the Worker answers `source_no_change` or records only duplicates), and the Worker would keep reporting ShipStation as missing for the new week. Do not schedule it earlier than 08:05 UTC.
 
 ## Exit codes
 
 | Code | Meaning | What to do |
 | --- | --- | --- |
-| 0 | File delivered | nothing |
+| 0 | File uploaded (manifest `ingest.sourceStatus` is `source_received` or `source_no_change`) | nothing |
 | 10 | Config error | fix `config.local.json` |
 | 20 | 2FA required | run `npm run login` once |
 | 21 | Captcha shown | run `npm run login` once |
 | 22 | Unrecognised page | open ShipStation; update `auth.selectors` if the layout changed |
 | 23 | Login rejected | update the stored credential |
-| 30 | Export failed, or the file had customer columns | see the run manifest; fix the steps or the template |
+| 30 | Export failed, the file had customer columns, or the export was invalid (no rows, missing columns) | see the run manifest; fix the steps or the template |
+| 31 | Export fine, upload to the Worker failed after retries (or was refused) | see `ingest` in the manifest; the file is in `quarantine` for 72 hours, then deleted |
+
+## Delivery and retries
+
+The upload is safe to repeat. The Worker stores shipments by content hash and answers `source_no_change` for identical content, so a retry never duplicates a shipment. Network errors, 429 and 5xx are retried up to 4 times with backoff; any other refusal (wrong secret, customer columns, bad payload) stops at once. The manifest records the week, export time, file hash, row count and the Worker's answer (run id, source status, rows written). It never holds the CSV, the secret or a response body.
 
 The job never guesses: on anything other than a recognised signed-in page it stops before clicking. Page detection is in `src/authState.mjs`; selectors in `auth.selectors` override the defaults.
 

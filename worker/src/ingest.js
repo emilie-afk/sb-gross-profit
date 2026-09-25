@@ -1,8 +1,10 @@
 /**
  * ingest.js — versioned ingestion routes (X-Ingest-Secret)
  * =======================================================
- * POST /v1/ingest/shopify      { format: 'graphql', nodes } | { format: 'normalized', orders }, weekStart?
- * POST /v1/ingest/shipstation  { format: 'rows', rows, sourceFormat?: 'custom'|'legacy' }, weekStart?
+ * POST /v1/ingest/shopify      { format: 'graphql', nodes } | { format: 'normalized', orders }
+ *                               | { format: 'csv_text', text, weekStart, mode?: 'rolling', sanitizedSha256? }
+ * POST /v1/ingest/shipstation  { format: 'rows', rows, sourceFormat?: 'custom'|'legacy' }
+ *                               | { format: 'csv_text', text, weekStart, sanitizedSha256? }
  * POST /v1/ingest/hpd          { format: 'normalized', hpdOrders } | { format: 'rows', rows } | { format: 'csv_text', text }
  * POST /v1/ingest/catalog      { tables, mcgExtra? | mcgExtraCsv?, overrides?, meta? }
  *
@@ -11,7 +13,14 @@
  * GET  /v1/ingest/week-plan     the cycle's week, UTC window and Shopify search strings
  *
  * Every call is idempotent: an unchanged record is a duplicate, not a write,
- * so Make retries are harmless. Customer fields are rejected, not dropped.
+ * so collector retries are harmless. Customer fields are rejected, not dropped.
+ *
+ * csv_text uploads come from the Windows collector, already sanitized on that
+ * machine. The Worker hashes the payload as received: identical content again
+ * answers `sourceStatus: 'source_no_change'` (200), new content
+ * `'source_received'`. A Shopify `mode: 'rolling'` upload (the rolling eight-week
+ * orders export) is both the week's orders and the updated earlier orders, so on
+ * success it records the `week` run and an `updated_since` companion run.
  * Each run records `weeks_touched` ({ week: changed records }) so earlier
  * weeks affected by this cycle get draft revisions (admin reviseTouchedWeeks).
  */
@@ -22,7 +31,9 @@ import { normalizeShopifyOrders } from '../../shared/adapters/shopifyGraphql.js'
 import { normalizeShipStationRows } from '../../shared/adapters/shipstation.js';
 import { normalizeHpdRows } from '../../shared/adapters/hpd.js';
 import { parseCSV } from '../../shared/calculator.js';
-import { CustomerDataError, assertNoCustomerFields, filterNoteAttributes } from '../../shared/normalized.js';
+import { CustomerDataError, CUSTOMER_KEYS, assertNoCustomerFields, filterNoteAttributes } from '../../shared/normalized.js';
+import { csvRowsToNormalizedOrders } from '../../shared/adapters/legacy.js';
+import { assertSanitizedShopifyOrderRows, currenciesOf } from '../../shared/adapters/shopifyCsv.js';
 import { validateCatalog, catalogRevOf, parseMcgExtraCsv } from '../../shared/catalog.js';
 import { REFRESH_TIMEOUT_MINUTES } from './compute.js';
 
@@ -47,19 +58,20 @@ function weekOf(body) {
   return body.weekStart;
 }
 
-async function withRun(env, source, body, fn) {
+async function withRun(env, source, body, fn, { mode: forcedMode, onSuccess } = {}) {
   const weekStart = weekOf(body);
   let mode = null;
   if (source === 'shopify') {
-    mode = body.mode || 'week';
+    mode = forcedMode || body.mode || 'week';
     if (!MODES.has(mode)) throw new ApiError(400, 'bad_payload', "mode must be 'week' or 'updated_since'");
   }
   const runId = await startRun(env.DB, source, weekStart, mode);
   try {
     const r = await fn(runId);
     await finishRun(env.DB, runId, { status: 'ok', ...r });
+    const extra = onSuccess ? await onSuccess(runId, r, weekStart) : {};
     return json({ runId, source, weekStart, mode, rowsSeen: r.rowsSeen, rowsWritten: r.written, duplicates: r.duplicates,
-                  weeksTouched: r.weeksTouched || {}, ...(r.response || {}) });
+                  weeksTouched: r.weeksTouched || {}, ...(r.response || {}), ...extra });
   } catch (e) {
     const code = e instanceof CustomerDataError ? 'customer_data_rejected' : (e instanceof ApiError ? e.code : (e.code || 'ingest_failed'));
     await finishRun(env.DB, runId, { status: 'failed', error: code });
@@ -72,10 +84,18 @@ async function withRun(env, source, body, fn) {
 
 export async function ingestShopify(request, env) {
   const body = await readJson(request);
+  const rolling = body.format === 'csv_text' && body.mode === 'rolling';
+  if (body.format === 'csv_text') requireCsvUpload(body);
+  const upload = body.format === 'csv_text' ? await uploadHash(body) : null;
   return withRun(env, 'shopify', body, async runId => {
     const settings = await getSettings(env.DB);
-    let orders;
-    if (body.format === 'graphql') {
+    let orders, diagnostics = {};
+    if (body.format === 'csv_text') {
+      const rows = parseCSV(body.text);
+      assertSanitizedShopifyOrderRows(rows);                  // customer columns → rejected, not dropped
+      orders = csvRowsToNormalizedOrders(rows);
+      diagnostics = { csvRows: rows.length, currencies: currenciesOf(rows), sanitizedSha256: upload.sha256 };
+    } else if (body.format === 'graphql') {
       if (!Array.isArray(body.nodes)) throw new ApiError(400, 'bad_payload', 'nodes must be an array');
       orders = normalizeShopifyOrders(body.nodes, { timeZone: settings.store_timezone });
     } else if (body.format === 'normalized') {
@@ -89,23 +109,85 @@ export async function ingestShopify(request, env) {
       if (body.storeTimezone !== settings.store_timezone) {
         throw new ApiError(400, 'timezone_mismatch', `storeTimezone must be ${settings.store_timezone} (the current store time zone); got ${body.storeTimezone ?? 'none'}`);
       }
-    } else throw new ApiError(400, 'bad_payload', "format must be 'graphql' or 'normalized'");
+    } else throw new ApiError(400, 'bad_payload', "format must be 'graphql', 'normalized' or 'csv_text'");
     const r = await saveOrders(env.DB, orders, runId, { timeZone: settings.store_timezone });
-    return { rowsSeen: orders.length, written: r.written, duplicates: r.duplicates, weeksTouched: r.weeksTouched };
+    return { rowsSeen: orders.length, written: r.written, duplicates: r.duplicates, weeksTouched: r.weeksTouched, diagnostics };
+  }, {
+    mode: rolling ? 'week' : undefined,
+    onSuccess: async (runId, r, weekStart) => {
+      const out = upload ? await recordUpload(env.DB, 'shopify', upload, runId, r.rowsSeen) : {};
+      if (rolling) {
+        // The rolling export also carries every earlier order changed since: the
+        // same content satisfies the week's `updated_since` input.
+        const companion = await startRun(env.DB, 'shopify', weekStart, 'updated_since');
+        await finishRun(env.DB, companion, { status: 'ok', rowsSeen: r.rowsSeen, written: 0, duplicates: r.rowsSeen,
+          diagnostics: { companionOf: runId, sanitizedSha256: upload.sha256, note: 'rolling export: same upload as the week run' },
+          weeksTouched: {} });
+        out.updatedSinceRunId = companion;
+      }
+      return out;
+    },
   });
+}
+
+/** csv_text uploads: the collector's sanitized payload, tied to a reporting week. */
+function requireCsvUpload(body) {
+  if (typeof body.text !== 'string' || !body.text.trim()) throw new ApiError(400, 'bad_payload', 'text must be the sanitized CSV');
+  if (!body.weekStart || !WEEK_RE.test(body.weekStart)) throw new ApiError(400, 'bad_payload', 'weekStart (YYYY-MM-DD) is required for csv_text uploads');
+  if (body.mode !== undefined && !['rolling', 'week', 'updated_since'].includes(body.mode)) throw new ApiError(400, 'bad_payload', "mode must be 'rolling', 'week' or 'updated_since'");
+}
+
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Hash of the sanitized payload as received; a sender-stated hash must agree. */
+async function uploadHash(body) {
+  const sha256 = await sha256Hex(body.text);
+  if (body.sanitizedSha256 !== undefined && body.sanitizedSha256 !== sha256) {
+    throw new ApiError(400, 'hash_mismatch', 'sanitizedSha256 does not match the payload received');
+  }
+  return { sha256 };
+}
+
+/** Record a successful upload; identical content again is `source_no_change`. */
+async function recordUpload(db, source, { sha256 }, runId, rowCount) {
+  const now = nowIso();
+  const seen = await db.prepare('SELECT first_run_id FROM source_upload WHERE source = ?1 AND sha256 = ?2').bind(source, sha256).first();
+  if (seen) {
+    await db.prepare('UPDATE source_upload SET last_received_at = ?3, times_received = times_received + 1 WHERE source = ?1 AND sha256 = ?2')
+      .bind(source, sha256, now).run();
+    return { sourceStatus: 'source_no_change', sourceHash: sha256, firstRunId: seen.first_run_id };
+  }
+  await db.prepare(`INSERT INTO source_upload (source, sha256, first_run_id, first_received_at, last_received_at, times_received, row_count)
+      VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5) ON CONFLICT (source, sha256) DO UPDATE SET last_received_at = ?4, times_received = times_received + 1`)
+    .bind(source, sha256, runId, now, rowCount ?? null).run();
+  return { sourceStatus: 'source_received', sourceHash: sha256 };
 }
 
 export async function ingestShipStation(request, env) {
   const body = await readJson(request);
+  if (body.format === 'csv_text') requireCsvUpload(body);
+  const upload = body.format === 'csv_text' ? await uploadHash(body) : null;
   return withRun(env, 'shipstation', body, async runId => {
-    if (body.format !== 'rows' || !Array.isArray(body.rows)) throw new ApiError(400, 'bad_payload', "Send { format: 'rows', rows: [...] }");
+    let rows;
+    if (body.format === 'rows' && Array.isArray(body.rows)) rows = body.rows;
+    else if (body.format === 'csv_text') {
+      rows = parseCSV(body.text);
+      // The collector's export template has no customer columns; one arriving here
+      // means the template changed, so the upload is refused rather than filtered.
+      const bad = (rows.length ? Object.keys(rows[0]) : []).filter(h => CUSTOMER_KEYS.has(h.toLowerCase().replace(/[^a-z0-9]/g, '')));
+      if (bad.length) throw new CustomerDataError(bad.map(h => `$.columns.${h}`));
+    } else throw new ApiError(400, 'bad_payload', "Send { format: 'rows', rows: [...] } or { format: 'csv_text', text, weekStart }");
     let normalized;
-    try { normalized = normalizeShipStationRows(body.rows, { sourceFormat: body.sourceFormat === 'legacy' ? 'legacy' : 'custom' }); }
+    try { normalized = normalizeShipStationRows(rows, { sourceFormat: body.sourceFormat === 'legacy' ? 'legacy' : 'custom' }); }
     catch (e) { throw new ApiError(400, 'bad_payload', e.message); }
     const r = await saveShipments(env.DB, normalized.shipments, runId);
-    return { rowsSeen: body.rows.length, written: r.written, duplicates: r.duplicates, weeksTouched: r.weeksTouched,
-             diagnostics: normalized.diagnostics, response: { diagnostics: normalized.diagnostics } };
-  });
+    const diagnostics = upload ? { ...normalized.diagnostics, sanitizedSha256: upload.sha256 } : normalized.diagnostics;
+    return { rowsSeen: rows.length, written: r.written, duplicates: r.duplicates, weeksTouched: r.weeksTouched,
+             diagnostics, response: { diagnostics: normalized.diagnostics } };
+  }, { onSuccess: async (runId, r) => (upload ? recordUpload(env.DB, 'shipstation', upload, runId, r.rowsSeen) : {}) });
 }
 
 export async function ingestHpd(request, env) {
