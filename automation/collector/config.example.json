@@ -5,5 +5,10 @@
   "workerUrl": "https://sb-gp-worker-staging.<account>.workers.dev",
   "ingestCredentialTarget": "sb-gp-ingest",
   "timeZone": "America/Los_Angeles",
-  "localDir": null
+  "localDir": null,
+  "pipeline": "free_tier",
+  "verifyUrl": "https://<site>.netlify.app/.netlify/functions/gp-verify-background",
+  "verifyTriggerCredentialTarget": "sb-gp-verify-trigger",
+  "waitForCloseMinutes": 75,
+  "verifyWaitMinutes": 8
 }

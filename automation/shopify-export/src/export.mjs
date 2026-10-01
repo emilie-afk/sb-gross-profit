@@ -88,7 +88,7 @@ export function playwrightBrowser({ config, paths, headed, launchOptions = {}, b
 }
 
 /** One Shopify collection (used by the CLI and by the C7 collector orchestrator). */
-export async function runShopifyJob({ config, week, headed = false, onWaiting = null }) {
+export async function runShopifyJob({ config, week, headed = false, onWaiting = null, uploadImpl = uploadToWorker }) {
   assertCollectorConfig(config);
   const paths = localPaths(config);
   for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
@@ -107,7 +107,7 @@ export async function runShopifyJob({ config, week, headed = false, onWaiting = 
     },
     upload: async payload => {
       const { password: ingestSecret } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
-      return uploadToWorker({ workerUrl: config.workerUrl, ingestSecret, path: INGEST_PATH, payload });
+      return uploadImpl({ workerUrl: config.workerUrl, ingestSecret, path: INGEST_PATH, payload });
     },
   });
 }

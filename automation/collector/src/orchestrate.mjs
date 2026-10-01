@@ -12,6 +12,9 @@
  *   4. Gmail is polled and the sanitized Shopify export uploaded.
  *   5. Each source is reported to the Worker independently; one failing never
  *      blocks the other.
+ *   6. Free-tier path (d.compute, optional): the week and every week whose inputs
+ *      changed are computed here with the unchanged engine, uploaded, and sent to
+ *      the independent verifier (freeTier.mjs).
  *
  * Catch-up: Task Scheduler also starts this at logon/startup and runs a missed
  * weekly start as soon as possible. The Worker's week plan (`collected`) says
@@ -105,7 +108,16 @@ export async function runWeeklyCollection(d) {
                                 lastRunAt: new Date(d.now ? d.now() : Date.now()).toISOString() };
     saveState(d.stateFile, state, d.fs);
     const allOk = Object.values(sources).every(v => v === 'ok');
-    return { status: allOk ? 'ok' : 'partial', exitCode: allOk ? EXIT.OK : EXIT.PARTIAL, sources };
+    // 6. Free-tier path (optional): compute the week and every changed week on this PC, upload the
+    //    results and request independent verification. Codes and counts only.
+    let compute;
+    if (d.compute) {
+      try { compute = await d.compute({ sources }); }
+      catch (e) { compute = { status: 'failed', code: typeof e?.code === 'string' ? e.code.slice(0, 64) : 'compute_failed' }; }
+      log(`compute: ${compute.status}`);
+    }
+    const computeOk = !compute || compute.status === 'ok';
+    return { status: allOk && computeOk ? 'ok' : 'partial', exitCode: allOk && computeOk ? EXIT.OK : EXIT.PARTIAL, sources, ...(compute ? { compute } : {}) };
   } finally {
     releaseLock(d.lockFile, d.fs);
   }

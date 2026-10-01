@@ -16,6 +16,7 @@ import { runShipStationJob, finishShipStationUpload } from '../../shipstation-ex
 import { runShopifyJob } from '../../shopify-export/src/export.mjs';
 import { weekWindowUtc } from '../../../shared/schedule.js';
 import { runWeeklyCollection } from './orchestrate.mjs';
+import { freeTierPipeline } from './freeTier.mjs';
 
 const args = (() => { const a = process.argv.slice(2), o = {}; for (let i = 0; i < a.length; i++) if (a[i].startsWith('--')) o[a[i].slice(2)] = a[i + 1] && !a[i + 1].startsWith('--') ? a[++i] : true; return o; })();
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -29,13 +30,29 @@ const base = assertSafeLocalDir(config.localDir || path.join(process.env.LOCALAP
 const tz = config.timeZone || 'America/Los_Angeles';
 const weekStart = args.week || lastCompletedWeek(new Date(), tz).weekStart;
 const w = weekFromStart(weekStart);
-const closed = Date.now() >= Date.parse(weekWindowUtc(weekStart, tz).endUtcExclusive);
+const closeAt = Date.parse(weekWindowUtc(weekStart, tz).endUtcExclusive);
+// Free-tier path: Task Scheduler may start this before the week closes (Monday 14:05 ICT covers
+// both Pacific offsets); wait for the close when it is near, so the verified draft can be ready by 15:30 ICT.
+const waitMs = closeAt - Date.now();
+if (config.pipeline === 'free_tier' && !args.week && waitMs > 0 && waitMs <= (config.waitForCloseMinutes ?? 75) * 60_000) {
+  console.log(`waiting ${Math.ceil(waitMs / 60_000)} min for the reporting week to close`);
+  await new Promise(r => setTimeout(r, waitMs + 60_000));
+}
+const closed = Date.now() >= closeAt;
+
+// Pipeline: 'free_tier' (the office PC computes; the Worker validates and stores) or the csv_text routes.
+const ingestSecret = () => readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest').password;
+const ft = config.pipeline === 'free_tier' ? freeTierPipeline({
+  workerUrl: config.workerUrl, ingestSecret: ingestSecret(), closedWeek: weekStart,
+  verifyUrl: config.verifyUrl || null, verifyWaitMs: (config.verifyWaitMinutes ?? 8) * 60_000,
+  triggerSecret: config.verifyUrl ? readWindowsCredential(config.verifyTriggerCredentialTarget || 'sb-gp-verify-trigger').password : null,
+}) : null;
 
 const r = await runWeeklyCollection({
   week: { ...w, closed },
   lockFile: path.join(base, 'collector.lock'), stateFile: path.join(base, 'state.json'),
   log: m => console.log(m),
-  weekPlan: async () => {
+  weekPlan: ft ? () => ft.weekPlan() : async () => {
     const { password } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
     const url = workerEndpoint(config.workerUrl, '/v1/ingest/week-plan');
     const res = await fetch(`${url}?at=${encodeURIComponent(new Date().toISOString())}`, { headers: { 'X-Ingest-Secret': password } });
@@ -45,9 +62,10 @@ const r = await runWeeklyCollection({
   },
   shipstation: {
     collect: () => runShipStationJob({ config: ssConfig, week: w, headed: !!args.headed, deferUpload: true }),
-    upload: pending => finishShipStationUpload(pending),
+    upload: pending => finishShipStationUpload(pending, ft ? { uploadImpl: ft.uploadImpl } : {}),
   },
-  shopify: { run: ({ onWaiting }) => runShopifyJob({ config: shConfig, week: w, headed: !!args.headed, onWaiting }) },
+  shopify: { run: ({ onWaiting }) => runShopifyJob({ config: shConfig, week: w, headed: !!args.headed, onWaiting, ...(ft ? { uploadImpl: ft.uploadImpl } : {}) }) },
+  ...(ft ? { compute: () => ft.compute() } : {}),
 });
-console.log(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}`);
+console.log(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}${r.compute ? ` compute ${JSON.stringify(r.compute)}` : ''}`);
 process.exitCode = r.exitCode;
