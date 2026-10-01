@@ -254,34 +254,56 @@ for (const k of [...ORDER_KEYS, ...LINE_KEYS, ...BD_KEYS, ...ISSUE_KEYS, ...RECO
 }
 const HEAD_KEYS = ['engine_version', 'catalog_rev', 'policy', 'profitability_status', 'comparison_snapshot_id', 'draft_comparison'];
 
-function rowsExactly(rows, keys, what) {
-  if (!Array.isArray(rows)) throw new ApiError(400, 'part_invalid', `${what} must be an array`);
+// Columns whose TEXT value is itself JSON: it must parse, and its nested keys get the customer-field walk.
+const JSON_TEXT = new Set(['flags', 'detail', 'labels', 'revenue_bridge', 'policy', 'draft_comparison']);
+const SCENARIO_BOOLEAN = new Set(['missingCost', 'isRoute', 'isGiftCard', 'isInfluencerSample']);
+const SCENARIO_NUMBER = new Set(['qty', 'unitPrice', 'baseMerchRevenue', 'lineRevenue', 'lineCogs', 'shipCollected', 'shipPaid']);
+const invalid = what => new ApiError(400, 'part_invalid', what);
+const noCustomer = v => { try { assertNoCustomerFields(v); } catch { throw new ApiError(400, 'customer_data_rejected', 'A result part contains customer fields'); } };
+/**
+ * A value of a stored result column: null, a string or a finite number, never an object or array.
+ * A JSON-text column must hold JSON text (or null) whose nested data carries no customer field.
+ */
+function checkValue(k, x, what) {
+  if (x === null) return;
+  if (typeof x === 'number') { if (!Number.isFinite(x)) throw invalid(`${what}.${k} must be a finite number`); return; }
+  if (typeof x !== 'string') throw invalid(`${what}.${k} must be a string, a number or null`);
+  if (JSON_TEXT.has(k)) { let j; try { j = JSON.parse(x); } catch { throw invalid(`${what}.${k} must be JSON text`); } noCustomer(j); }
+}
+function rowsExactly(rows, keys, what, check = checkValue) {
+  if (!Array.isArray(rows)) throw invalid(`${what} must be an array`);
   for (const r of rows) {
-    if (!r || typeof r !== 'object' || Array.isArray(r)) throw new ApiError(400, 'part_invalid', `${what} rows must be objects`);
+    if (!r || typeof r !== 'object' || Array.isArray(r)) throw invalid(`${what} rows must be objects`);
     const k = Object.keys(r);
-    if (k.length !== keys.size || k.some(x => !keys.has(x))) throw new ApiError(400, 'part_invalid', `${what} rows must have exactly the approved columns`);
+    if (k.length !== keys.size || k.some(x => !keys.has(x))) throw invalid(`${what} rows must have exactly the approved columns`);
+    for (const c of k) check(c, r[c], what);
   }
 }
+/** Scenario lines: the calculator's fields with their exact primitive types. */
+function checkScenarioValue(k, x, what) {
+  if (SCENARIO_BOOLEAN.has(k)) { if (typeof x !== 'boolean') throw invalid(`${what}.${k} must be true or false`); return; }
+  if (SCENARIO_NUMBER.has(k)) { if (x !== null && !(typeof x === 'number' && Number.isFinite(x))) throw invalid(`${what}.${k} must be a number or null`); return; }
+  if (x !== null && typeof x !== 'string') throw invalid(`${what}.${k} must be a string or null`);
+}
 function validatePart(name, v) {
-  if (!v || typeof v !== 'object') throw new ApiError(400, 'part_invalid', 'Part must be a JSON object');
-  const only = keys => { if (Object.keys(v).length !== keys.length || keys.some(k => !(k in v))) throw new ApiError(400, 'part_invalid', `Part must have exactly ${keys.join(', ')}`); };
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw invalid('Part must be a JSON object');
+  const only = keys => { if (Object.keys(v).length !== keys.length || keys.some(k => !(k in v))) throw invalid(`Part must have exactly ${keys.join(', ')}`); };
   if (name === 'orderindex') {
     only(['orders']);
     if (!Array.isArray(v.orders) || v.orders.some(t => !Array.isArray(t) || t.length !== ORDER_INDEX_FIELDS.length || typeof t[0] !== 'string' || !Number.isInteger(t[1]) || t[1] < 0
-        || t.slice(2).some(x => x !== null && typeof x !== 'string' && typeof x !== 'number'))) throw new ApiError(400, 'part_invalid', 'orderindex.orders must be order tuples');
+        || t.slice(2).some(x => x !== null && typeof x !== 'string' && !(typeof x === 'number' && Number.isFinite(x))))) throw invalid('orderindex.orders must be order tuples of strings, numbers and nulls');
   } else if (name.startsWith('orders:')) {
     only(['orders']);
     rowsExactly(v.orders, ORDER_KEYS, 'orders');
-    if (v.orders.length > ORDERS_PER_PART) throw new ApiError(400, 'part_invalid', `At most ${ORDERS_PER_PART} orders per part`);
+    if (v.orders.length > ORDERS_PER_PART) throw invalid(`At most ${ORDERS_PER_PART} orders per part`);
   } else if (name === 'sections') {
+    only(['breakdowns', 'reconciliation', 'issues', 'shippingC3']);
     rowsExactly(v.breakdowns, BD_KEYS, 'breakdowns'); rowsExactly(v.reconciliation, RECON_KEYS, 'reconciliation'); rowsExactly(v.issues, ISSUE_KEYS, 'issues');
+    noCustomer(v.shippingC3 ?? null);                                // the one free-form object: walked whole
   } else if (name.startsWith('scenario:')) {
     only(['lines']);
-    rowsExactly(v.lines, SCENARIO_KEYS, 'scenario.lines');
+    rowsExactly(v.lines, SCENARIO_KEYS, 'scenario.lines', checkScenarioValue);
   } else { only(['lines']); rowsExactly(v.lines, LINE_KEYS, 'lines'); }
-  // Row parts carry only allowlisted columns (checked above; none is a customer field, asserted at load),
-  // so only the one free-form object needs the customer-field walk.
-  if (name === 'sections') { try { assertNoCustomerFields(v.shippingC3 ?? null); } catch { throw new ApiError(400, 'customer_data_rejected', 'A result part contains customer fields'); } }
 }
 
 export async function openResults(request, env, weekStart) {
@@ -307,6 +329,9 @@ export async function openResults(request, env, weekStart) {
   if (typeof index.narrative !== 'string' || P(index.narrative) === null) throw new ApiError(400, 'bad_payload', 'index.narrative must be the canonical narrative');
   const gi = index.gateInputs || {};
   if (!gi.totals || !Array.isArray(gi.reconciliation)) throw new ApiError(400, 'bad_payload', 'index.gateInputs is required');
+  // Head and totals are stored as columns: the same value rules as result rows (JSON text walked).
+  try { for (const [k, x] of Object.entries(head)) checkValue(k, x, 'index.head'); for (const [k, x] of Object.entries(totals)) checkValue(k, x, 'index.totals'); }
+  catch (e) { if (e instanceof ApiError) throw new ApiError(400, e.code === 'customer_data_rejected' ? e.code : 'bad_payload', e.message); throw e; }
   try { assertNoCustomerFields([head, totals, P(index.narrative), gi]); } catch { throw new ApiError(400, 'customer_data_rejected', 'The result index contains customer fields'); }
   const idx = J(index);
   const db = env.DB;
