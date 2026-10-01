@@ -801,7 +801,7 @@ The account stays on Workers Free (10 ms CPU per request; 100,000 D1 rows writte
 
 **Measured locally** (workerd + D1, calibrated rows written; 3,000-order rolling window): first-load Monday 12,593 writes, steady Monday 1,982, a full repeat 0 (the input-epoch triggers add one row per input row written).
 
-**Measured on staging** (Workers Free, synthetic full-size set: 3,000 orders, ~375 a week; 2026-09-30): every draft verified; dashboard reads equal today's Worker path for all 2,970 orders; a full repeat of every upload and week writes 0 rows. Whole-request CPU on the weekly path: median 2–3 ms, P99 8–10 ms; 2–6 requests per ~850 above 10 ms (maximum 12–17 ms: a manifest, an order-list page, the report upload), all completed. Workers Free does not guarantee such requests, so this is not yet proof of reliable operation under its limit.
+**Measured on staging** (Workers Free, synthetic full-size set: 3,000 orders, ~375 a week; 2026-09-30): every draft verified; dashboard reads equal today's Worker path for all 2,970 orders; a full repeat of every upload and week writes 0 rows. Whole-request CPU on the weekly path, three steady full-size runs: median 2–3 ms, P99 8–12 ms; 2, 6 and 14 requests per ~850–1,080 above 10 ms (maximum 12–17 ms: manifests, 500-order list pages, scenario reads, the report upload, a few part uploads), all completed. Workers Free does not guarantee such requests, so this is not yet proof of reliable operation under its limit.
 
 ### Go-live checklist (all required before any lock is changed)
 
