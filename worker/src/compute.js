@@ -15,6 +15,7 @@ import { effectiveOrderTotals, activeSegments, contiguous } from './shippingCost
 import { selectIn } from './db.js';
 import { evaluateGate, canPublish } from '../../shared/gate.js';
 import { addDays } from '../../shared/normalized.js';
+import { totalsFromRow, orderRow, lineRow, breakdownRows, issueRows, reconRows } from '../../shared/resultParts.js';
 import { weekWindowUtc, scheduledRunFor, nextRetryAt, pastCutoff, retryTimeline } from '../../shared/schedule.js';
 
 const J = v => JSON.stringify(v ?? null);
@@ -69,56 +70,17 @@ export async function previousWeekSnapshots(db, weekStart) {
   return { published: shape(pub), draft: shape(draft) };
 }
 
-export function totalsFromRow(t) {
-  return {
-    operatingRevenue: t.operating_revenue, shopifyNetRevenueInclPassThrough: t.shopify_net_revenue_incl_pass_through,
-    operatingGpAfterShipping: t.operating_gp_after_shipping, operatingGpMargin: t.operating_gp_margin,
-    routeCollected: t.route_collected, routeRemitted: t.route_remitted, routeNet: t.route_net,
-    knownProductCogs: t.known_product_cogs, knownCostProductRevenue: t.known_cost_product_revenue,
-    knownCostProductGp: t.known_cost_product_gp, knownCostProductMargin: t.known_cost_product_margin,
-    missingCostRevenue: t.missing_cost_revenue, missingCostUnits: t.missing_cost_units, missingCostLines: t.missing_cost_lines,
-    costCoverageByRevenue: t.cost_coverage_by_revenue, costCoverageByUnits: t.cost_coverage_by_units,
-    shippingCollected: t.shipping_collected, shippingExpense: t.shipping_expense,
-    shipStationExpense: t.shipstation_expense, hpdShippingExpense: t.hpd_shipping_expense,
-    ordersRequiringShipStationRate: t.orders_requiring_shipstation_rate, ordersWithValidShipStationRate: t.orders_with_valid_shipstation_rate,
-    shipStationExpenseCoverage: t.shipstation_expense_coverage, hpdOrdersActual: t.hpd_orders_actual,
-    hpdOrdersPassThrough: t.hpd_orders_pass_through, insuranceDisclosed: t.insurance_disclosed,
-    profitabilityStatus: t.profitability_status, labels: JSON.parse(t.labels || '{}'),
-    hpdShippingBasis: JSON.parse(t.labels || '{}').hpdShippingBasis || null,
-  };
-}
+/** Moved to shared/resultParts.js (one mapping for both storage modes); re-exported for existing callers. */
+export { totalsFromRow };
 
 function snapshotStatements(db, snapshotId, snap, meta) {
   const t = snap.totals;
-  const breakdowns = Object.entries(snap.breakdowns).flatMap(([dimension, rows]) => rows.map(b => ({
-    snapshot_id: snapshotId, dimension, key: b.key, units: b.units, known_cost_revenue: b.knownCostRevenue, known_cogs: b.knownCogs,
-    known_cost_gp: b.knownCostGp, known_cost_margin: b.knownCostMargin, missing_cost_revenue: b.missingCostRevenue,
-    missing_cost_units: b.missingCostUnits, missing_cost_lines: b.missingCostLines, coverage_status: b.coverageStatus,
-    detail: dimension === 'sku' ? J({ sku: b.sku, vendor: b.vendor, product: b.product }) : null })));
-  const orders = snap.orders.map(o => ({
-    snapshot_id: snapshotId, order_name: o.orderName, business_date: o.date, channel: o.channel, order_cat: o.orderCat,
-    operating_revenue: o.operatingRevenue, shopify_net_revenue: o.shopifyNetRevenue, route_collected: o.routeCollected,
-    known_product_cogs: o.knownProductCogs, ship_collected: o.shipCollected, ship_paid: o.shipPaid, ship_paid_ss: o.shipPaidSS,
-    ship_paid_hp: o.shipPaidHP, operating_gp: o.operatingGp, missing_cost_lines: o.missingCostLines,
-    requires_ss_rate: o.requiresShipStationRate, has_valid_ss_rate: o.hasValidShipStationRate,
-    shipping_expense_source: o.shippingExpenseSource, shipping_expense_status: o.shippingExpenseStatus,
-    missing_reason: o.missingReason, profitability_status: o.profitabilityStatus, line_count: o.lineCount,
-    hpd_shipping_basis: o.hpdShippingBasis || null }));
-  const lines = snap.lines.map(l => ({
-    snapshot_id: snapshotId, order_name: l.orderName, line_index: l.lineIndex, sku: l.sku, product: l.product,
-    vendor_key: l.vendorKey, channel: l.channel, store: l.store, qty: l.qty, unit_price: l.unitPrice, unit_cost: l.unitCost,
-    contract_revenue: l.contractRevenue, line_cogs: l.lineCogs, known_cost_gp: l.knownCostGp, cost_source: l.costSource,
-    cost_match_type: l.costMatchType, missing_cost: l.missingCost ? 1 : 0, discount_allocated: l.discountAllocated,
-    discount_source: l.discountSource, refund_allocated: l.refundAllocated, refund_source: l.refundSource,
-    route_collected: l.routeCollected, route_remitted: l.routeRemitted, flags: J(l.flags) }));
-  const issueKinds = [['missing_shipping', snap.issues.missingShipping], ['missing_cost', snap.issues.missingCost],
-    ['unallocated_residual', snap.issues.unallocatedResiduals], ['unmatched_shipment', snap.issues.unmatchedShipments],
-    ['excluded_by_engine', snap.issues.ordersExcludedByEngine]];
-  let seq = 0;
-  const issues = issueKinds.flatMap(([kind, list]) => (list || []).map(d => ({
-    snapshot_id: snapshotId, seq: seq++, kind, order_name: d.orderName || null, detail: J(d) })));
-  const recon = snap.reconciliation.map(c => ({ snapshot_id: snapshotId, check_name: c.check, expected: c.expected, actual: c.actual,
-    delta: c.delta, passed: c.passed ? 1 : 0, blocking: c.blocking ? 1 : 0 }));
+  // Row objects come from shared/resultParts.js, the same mapping the Free-tier result parts use.
+  const breakdowns = breakdownRows(snap).map(b => ({ snapshot_id: snapshotId, ...b }));
+  const orders = snap.orders.map(o => ({ snapshot_id: snapshotId, ...orderRow(o) }));
+  const lines = snap.lines.map(l => ({ snapshot_id: snapshotId, ...lineRow(l) }));
+  const issues = issueRows(snap).map(r => ({ snapshot_id: snapshotId, ...r }));
+  const recon = reconRows(snap).map(r => ({ snapshot_id: snapshotId, ...r }));
 
   return [
     db.prepare(`INSERT INTO snapshot (snapshot_id, week_start, revision, status, run_id, computed_at, engine_version, catalog_rev,

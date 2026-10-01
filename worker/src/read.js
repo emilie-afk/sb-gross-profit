@@ -8,6 +8,7 @@
  */
 import { ApiError, json, intParam, WEEK_RE } from './http.js';
 import { totalsFromRow } from './compute.js';
+import { scenarioLines } from '../../shared/resultParts.js';
 
 const P = (s, d) => { try { return s === null || s === undefined ? d : JSON.parse(s); } catch { return d; } };
 
@@ -160,23 +161,10 @@ export async function listIssues(request, env, reader, weekStart) {
 export async function scenarioInput(request, env, reader, weekStart) {
   const url = new URL(request.url);
   const s = await pickSnapshot(env.DB, weekStart, url, reader);
-  const orders = new Map(((await env.DB.prepare('SELECT order_name, ship_collected, ship_paid, business_date FROM snapshot_order WHERE snapshot_id = ?1')
-    .bind(s.snapshot_id).all()).results || []).map(o => [o.order_name, o]));
+  const orders = (await env.DB.prepare('SELECT order_name, ship_collected, ship_paid, business_date FROM snapshot_order WHERE snapshot_id = ?1')
+    .bind(s.snapshot_id).all()).results || [];
   const lines = (await env.DB.prepare('SELECT * FROM snapshot_line WHERE snapshot_id = ?1 ORDER BY order_name, line_index').bind(s.snapshot_id).all()).results || [];
-  const seen = new Set();
-  const out = [];
-  for (const l of lines) {
-    const flags = P(l.flags, {});
-    if (!flags.isProductLine && !flags.isRoute) continue;
-    const o = orders.get(l.order_name) || {};
-    const first = !seen.has(l.order_name); seen.add(l.order_name);
-    const revenue = flags.isRoute ? l.route_collected : l.contract_revenue;
-    out.push({ orderNum: l.order_name, date: o.business_date, sku: l.sku, product: l.product, vendor: l.vendor_key,
-      vendorKey: l.vendor_key, qty: l.qty, unitPrice: l.unit_price, baseMerchRevenue: Math.round((l.unit_price || 0) * (l.qty || 0) * 100) / 100,
-      lineRevenue: revenue, lineCogs: l.line_cogs, missingCost: !!l.missing_cost, costSource: l.cost_source,
-      isRoute: !!flags.isRoute, isGiftCard: !!flags.isGiftCard, isInfluencerSample: !!flags.isInfluencerSample,
-      shipCollected: first ? o.ship_collected : null, shipPaid: first ? o.ship_paid : null });
-  }
+  const out = scenarioLines(orders, lines);                        // one mapping, shared/resultParts.js
   return json({ ...header(s, reader), lines: out });
 }
 
