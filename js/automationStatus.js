@@ -40,6 +40,20 @@ function pendingText(s) {
   return (s.sources?.pendingReview || []).length ? `${(s.sources.pendingReview).map(k => esc(SOURCE_LABEL[k] || k)).join(', ')} — cannot publish` : 'None';
 }
 
+// Free-tier path: a verified draft is the target; anything short of it is named exactly.
+const TARGET_LABEL = { met: 'Met', met_late: 'Verified after the target time', missed: 'Not met', pending: 'Pending' };
+function freeTierRows(f) {
+  if (!f || typeof f !== 'object') return [];
+  const v = f.verification;
+  return [
+    ['Verified-draft target', `${esc(when(f.dueAt))} — ${esc(TARGET_LABEL[f.target] || f.target)}`],
+    ['Weekly status', esc(f.label || '—')],
+    ['Waiting for', (f.pending || []).map(p => esc(p.label)).join('<br>') || 'Nothing'],
+    ['Draft', f.draft ? `Revision ${esc(f.draft.revision)} · computed ${esc(when(f.draft.computedAt))} · ${esc(f.draft.status)}` : '—'],
+    ['Verification', v ? `${esc(String(v.status).replace(/_/g, ' '))} · ${esc(when(v.at))}${v.counts?.ordersChecked != null ? ` · ${esc(v.counts.ordersChecked)} orders checked, ${esc(v.counts.orderMismatches)} differing` : ''}` : 'Not run yet'],
+  ];
+}
+
 export function renderAutomationStatus(s) {
   if (!s || typeof s !== 'object') return '<p class="meta">No status.</p>';
   const rows = [
@@ -57,6 +71,7 @@ export function renderAutomationStatus(s) {
     ['Catalog', `${esc(s.catalog?.rev || '—')} · ${esc(s.catalog?.completeness?.label || '')}${s.catalog?.reuseAccepted ? ' · reuse approved' : ''}`],
     ['Shipping source', s.shippingVerification === 'verified' ? 'Verified' : 'Unverified (provisional)'],
     ['Publication', s.publication?.enabled ? 'Enabled' : 'Disabled'],
+    ...freeTierRows(s.freeTier),
   ];
   return `<table class="gp-auto-status" style="width:100%;border-collapse:collapse;font-size:.85rem">${rows.map(([k, v]) =>
     `<tr><th style="text-align:left;padding:4px 12px 4px 0;color:var(--muted);font-weight:500;white-space:nowrap;vertical-align:top">${esc(k)}</th><td style="padding:4px 0">${v}</td></tr>`).join('')}</table>`;

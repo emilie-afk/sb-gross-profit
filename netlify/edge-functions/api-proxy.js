@@ -26,6 +26,7 @@ const ROUTES = [
   ['GET',  /^\/v1\/auth\/session$/],
   ['GET',  /^\/v1\/(weeks|history|compare)$/],
   ['GET',  /^\/v1\/automation\/status$/],
+  ['GET',  /^\/v1\/weeks\/\d{4}-\d{2}-\d{2}\/status$/],
   ['GET',  /^\/v1\/snapshot\/\d{4}-\d{2}-\d{2}(\/(orders(\/[^/]+)?|issues|scenario-input))?$/],
 ];
 const FORWARD = ['content-type', 'accept', 'origin'];

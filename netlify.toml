@@ -5,9 +5,17 @@
 [[edge_functions]]
   path = "/*"
   function = "auth"
+  # The verifier is called by the collector with its own trigger secret, not a browser.
+  excludedPath = ["/.netlify/functions/gp-verify", "/.netlify/functions/gp-verify-background"]
 
 # Same-origin proxy to the SB GP Worker (/api/v1/* → Worker /v1/*). Runs after
 # the password gate above. Needs SB_WORKER_ORIGIN; without it, answers 503.
 [[edge_functions]]
   path = "/api/v1/*"
   function = "api-proxy"
+
+# Free-tier path: independent verification of collector-computed weeks (gp-verify).
+# Built by Netlify from this repository at the deployed commit. No schedule is set.
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
