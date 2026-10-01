@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS scr_version (
   decision_reason TEXT
 ) WITHOUT ROWID;
 
+-- One version per retained source: a duplicate delivery of the same upload finds the first.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_scr_version_source ON scr_version(source_id);
+
 CREATE TABLE IF NOT EXISTS scr_day (
   version_id     TEXT NOT NULL,
   ship_date      TEXT NOT NULL,

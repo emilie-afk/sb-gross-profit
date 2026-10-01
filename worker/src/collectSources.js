@@ -62,8 +62,16 @@ export async function openSource(request, env) {
   const sourceId = newId('src');
   const declared = { rows, cents: b.cents ?? null, window: b.window, exportedAt: b.exportedAt || null, weekStart: b.weekStart || null,
                      segments: segs.map(s => [s.sha256, s.rows]) };
-  await db.prepare('INSERT INTO src_object (source_id, kind, sha256, status, segment_count, declared, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
-    .bind(sourceId, b.kind, sha256, 'pending', segs.length, JSON.stringify(declared), nowIso()).run();
+  try {
+    await db.prepare('INSERT INTO src_object (source_id, kind, sha256, status, segment_count, declared, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
+      .bind(sourceId, b.kind, sha256, 'pending', segs.length, JSON.stringify(declared), nowIso()).run();
+  } catch (e) {
+    // A duplicate delivery of the same manifest raced this one: answer with the first.
+    if (!/UNIQUE constraint failed/i.test(String(e?.message || e))) throw e;
+    const first = await db.prepare("SELECT source_id, status FROM src_object WHERE kind = ?1 AND sha256 = ?2 AND status <> 'rejected'").bind(b.kind, sha256).first();
+    if (!first) throw e;
+    return json({ sourceId: first.source_id, status: first.status === 'retained' ? 'already_have' : 'open', missing: first.status === 'retained' ? [] : segs.map((_, i) => i) });
+  }
   return json({ sourceId, status: 'open', missing: segs.map((_, i) => i) });
 }
 

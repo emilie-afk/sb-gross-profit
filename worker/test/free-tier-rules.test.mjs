@@ -298,3 +298,25 @@ test('week status names exactly what is pending; the target is never claimed wit
   assert.notEqual(pub2.json.detail?.reason, 'verification_pending', 'verification no longer blocks; the other controls still do');
   assert.ok(await bridge(env2)(`${ORIGIN}/v1/health`));
 });
+
+test('duplicate deliveries: the same source manifest and the same report version sent twice at once keep one of each', async () => {
+  const env = await freeTierEnv(), c = client(env);
+  const p = scrPayload(rows(WEEK1), FROM, TO);
+  const { segmentCsv } = FT;
+  const { segments, rows: r } = segmentCsv(p.text);
+  const listHash = crypto.createHash('sha256').update(segments.map(s => s.sha256).join('\n')).digest('hex');
+  const body = { kind: 'shipping_cost_report', sha256: listHash, rows: r.length, cents: 3290, window: { from: FROM, to: TO }, segments: segments.map(s => ({ sha256: s.sha256, rows: s.rows })) };
+  const [a, b] = await Promise.all([c.call('POST', '/v1/collect/sources', { json: body }), c.call('POST', '/v1/collect/sources', { json: body })]);
+  assert.equal(a.sourceId, b.sourceId);
+  assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM src_object').first()).n, 1);
+  for (const seq of a.missing) await c.call('PUT', `/v1/collect/sources/${a.sourceId}/segments/${seq}`, { bytes: segments[seq].bytes });
+  await c.call('POST', `/v1/collect/sources/${a.sourceId}/seal`, { json: {} });
+  const { versionDays } = await import('../../shared/scrDays.js');
+  const { parseShippingCostReport } = await import('../../shared/adapters/shippingCostReport.js');
+  const { parseCSV } = await import('../../shared/calculator.js');
+  const days = (await versionDays(parseShippingCostReport(parseCSV(p.text), { requestedFrom: FROM, requestedTo: TO }).rows, FROM, TO)).map(d => [d.date, d.groups]);
+  const vb = { sourceId: a.sourceId, requestedFrom: FROM, requestedTo: TO, exportedAt: p.exportedAt, days };
+  const [v1, v2] = await Promise.all([c.call('POST', '/v1/collect/scr/versions', { json: vb }), c.call('POST', '/v1/collect/scr/versions', { json: vb })]);
+  assert.equal(v1.versionId, v2.versionId);
+  assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM scr_version').first()).n, 1);
+});

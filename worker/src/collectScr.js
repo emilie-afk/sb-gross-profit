@@ -133,7 +133,14 @@ export async function uploadScrVersion(request, env) {
       .bind(versionId, d.date, d.hash, d.costCents, d.rowCount, JSON.stringify(d.groups), review ? 'pending' : d.outcome)),
   ];
   if (activate.length) stmts.push(...activationStatements(db, { activationId, versionId, at, actorCls: 'ingest_secret', days: activate, own, weeks }));
-  await atomic(db, stmts);
+  try { await atomic(db, stmts); }
+  catch (e) {
+    // A duplicate delivery of the same upload raced this one: the first version stands.
+    const first = /UNIQUE constraint failed: scr_version\.source_id/i.test(String(e?.message || e))
+      && await db.prepare('SELECT version_id, status, outcome FROM scr_version WHERE source_id = ?1').bind(src.source_id).first();
+    if (first) return json({ versionId: first.version_id, status: first.status, ...P(first.outcome, {}), duplicate: true });
+    throw e;
+  }
   return json({ versionId, status, ...out });
 }
 
