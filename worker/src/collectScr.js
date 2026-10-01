@@ -21,6 +21,10 @@
  *                               with no accepted cost) → activated, affected weeks get an
  *                               unpublished draft revision · changed / removed accepted
  *                               cost → held for review
+ *   auto-acceptance switch      `shipping_cost_auto_accept_enabled` (default false). While
+ *                               false, a version that would activate or hold any date goes
+ *                               to review whole (`auto_acceptance_disabled`); only an
+ *                               identical re-export (nothing to activate) is a no-op.
  * `shipping_cost_report_source_verified` is untouched: activation feeds drafts only.
  */
 import { ApiError, json, readJson } from './http.js';
@@ -119,6 +123,8 @@ export async function uploadScrVersion(request, env) {
   }
   const count = k => days.filter(d => d.outcome === k).length;
   const counts = { new: count('new'), identical: count('identical'), fill_in: count('fill_in'), held: count('held') };
+  // Owner rule: nothing activates by itself unless auto-acceptance is explicitly enabled.
+  if (s.shipping_cost_auto_accept_enabled !== true && days.some(d => d.outcome !== 'identical')) reasons.push('auto_acceptance_disabled');
   const review = reasons.length > 0;
   const activate = review ? [] : days.filter(d => d.outcome === 'new' || d.outcome === 'fill_in');
   const store = days.filter(d => d.outcome !== 'identical');

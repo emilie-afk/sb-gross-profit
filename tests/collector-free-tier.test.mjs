@@ -53,7 +53,7 @@ test('collector on the Free-tier path: collect → upload → compute every week
   assert.equal(r1.compute.status, 'partial');
   assert.ok(r1.compute.weeks.every(w => w.status === 'pending' && w.code === 'shipping_report_not_ready'), JSON.stringify(r1.compute.weeks));
   const v = (await api(env, 'GET', '/v1/admin/scr/versions')).json.versions[0];
-  assert.deepEqual(v.reviewReasons, ['first_version']);
+  assert.deepEqual(v.reviewReasons, ['first_version', 'auto_acceptance_disabled']);
   await ok(api(env, 'POST', `/v1/admin/scr/versions/${v.versionId}/accept`, { reason: 'test: first version reviewed' }), 'accept');
   // Second run: sources already held (nothing re-collected); every week computed and verified.
   const r2 = await run(d, mk(), dir);

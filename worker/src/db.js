@@ -84,7 +84,7 @@ export const SETTABLE_KEYS = new Set([
   'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
   'lively_root_cost_source', 'catalog_overlay_base_rev',
   'vendor_first_paid_shipping_dates', 'mcg_free_shipping_threshold', 'shipping_coverage_aging_days', 'provisional_publication_enabled',
-  'shipping_cost_review_cap_cents',
+  'shipping_cost_review_cap_cents', 'shipping_cost_auto_accept_enabled',
 ]);
 
 /** Changing these needs a stated reason; every change is audited either way. */
@@ -93,7 +93,7 @@ export const REASON_REQUIRED = new Set(['publication_enabled', 'carrier_fee_prio
   'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
   'lively_root_cost_source', 'catalog_overlay_base_rev',
   'vendor_first_paid_shipping_dates', 'mcg_free_shipping_threshold', 'shipping_coverage_aging_days', 'provisional_publication_enabled',
-  'shipping_cost_review_cap_cents']);
+  'shipping_cost_review_cap_cents', 'shipping_cost_auto_accept_enabled']);
 
 /** Changing one of these clears shipping_cost_report_source_verified (reconciliation must be repeated). */
 export const CLEARS_SHIPPING_VERIFICATION = new Set(['shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store']);
@@ -104,7 +104,7 @@ export function validateSetting(key, value) {
   if (!SETTABLE_KEYS.has(key)) return `unknown setting ${key}`;
   if (key === 'ss_coverage_threshold' && !(typeof value === 'number' && value > 0 && value <= 1)) return 'ss_coverage_threshold must be a number in (0, 1]';
   if (key === 'catalog_shrink_tolerance' && !(typeof value === 'number' && value >= 0 && value < 1)) return 'catalog_shrink_tolerance must be a number in [0, 1)';
-  if (['publication_enabled', 'carrier_fee_priority_locked', 'store_timezone_confirmed'].includes(key) && typeof value !== 'boolean') return `${key} must be true or false`;
+  if (['publication_enabled', 'carrier_fee_priority_locked', 'store_timezone_confirmed', 'shipping_cost_auto_accept_enabled'].includes(key) && typeof value !== 'boolean') return `${key} must be true or false`;
   if ((key === 'store_timezone' || key === 'schedule_timezone') && !(typeof value === 'string' && validZone(value))) return `${key} must be an IANA time zone`;
   if (key === 'schedule_weekday' && !(Number.isInteger(value) && value >= 0 && value <= 6)) return 'schedule_weekday must be 0 (Sunday) to 6';
   if (key === 'schedule_time' && !(typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value))) return 'schedule_time must be HH:MM (24-hour)';

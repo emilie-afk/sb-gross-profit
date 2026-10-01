@@ -21,6 +21,8 @@ const FROM = '2026-08-03', TO = '2026-08-09';                 // one Mon–Sun w
 const rows = (list, extra = {}) => list.map(([date, order, cost, more = {}]) => reportRow({ date, order, cost, paid: '5.00', ...extra, ...more }));
 const WEEK1 = [['2026-08-03', '900101', '6.25'], ['2026-08-04', '900102', '7.10'], ['2026-08-05', '900103', '5.55'], ['2026-08-06', '900104', '8.00'], ['2026-08-07', '900105', '6.00']];
 
+const autoAccept = (env, on) => ok(api(env, 'POST', '/v1/admin/settings', { shipping_cost_auto_accept_enabled: on, reason: `test: auto-acceptance ${on ? 'on' : 'off'}` }), 'auto-accept setting');
+
 async function accepted(env, c, list = WEEK1, from = FROM, to = TO) {
   const v = await FT.uploadShippingCostReport(c, scrPayload(rows(list), from, to));
   if (v.status === 'pending_review') await ok(api(env, 'POST', `/v1/admin/scr/versions/${v.versionId}/accept`, { reason: 'test: first version reviewed' }), 'accept');
@@ -31,7 +33,7 @@ test('SCR: the first version waits for review; an identical re-export writes not
   const env = await freeTierEnv(), c = client(env);
   const v1 = await FT.uploadShippingCostReport(c, scrPayload(rows(WEEK1), FROM, TO));
   assert.equal(v1.status, 'pending_review');
-  assert.deepEqual(v1.reviewReasons, ['first_version']);
+  assert.deepEqual(v1.reviewReasons, ['first_version', 'auto_acceptance_disabled']);
   assert.equal((await api(env, 'GET', '/v1/admin/scr/versions')).json.versions[0].status, 'pending_review');
   await ok(api(env, 'POST', `/v1/admin/scr/versions/${v1.versionId}/accept`, { reason: 'test: first version reviewed' }), 'accept');
   const before = changes(env);
@@ -63,6 +65,7 @@ test('SCR: $0.00 actual cost, a cost above the review cap and non-zero insurance
   for (const [list, want] of cases) {
     const env2 = await freeTierEnv(), c2 = client(env2);
     await accepted(env2, c2);
+    await autoAccept(env2, true);
     const v = await FT.uploadShippingCostReport(c2, scrPayload(rows(list), W2F, W2T));
     assert.deepEqual(v.reviewReasons, want, JSON.stringify(list));
     assert.equal(v.status, want.length ? 'pending_review' : 'accepted');
@@ -74,6 +77,7 @@ test('SCR: $0.00 actual cost, a cost above the review cap and non-zero insurance
     }
   }
   // The cap is an audited setting.
+  await autoAccept(env, true);
   assert.equal((await api(env, 'POST', '/v1/admin/settings', { shipping_cost_review_cap_cents: 5000, reason: 'test: lower cap' })).status, 200);
   const v = await FT.uploadShippingCostReport(c, scrPayload(rows([next('2026-08-03', '900207', '60.00')]), W2F, W2T));
   assert.deepEqual(v.reviewReasons, ['over_review_cap']);
@@ -84,6 +88,7 @@ test('SCR: a late cost for an order with no accepted cost is filled in automatic
   const d = dataset({ n: 120, scr: { zeroEvery: 1e9 } });            // no $0.00 rows: those would (rightly) send the re-export to review
   const ft = await freeTierRun(d);
   const env = ft.env, c = ft.c;
+  await autoAccept(env, true);
   // An order the report has no row for yet (the fixture leaves every 29th order unshipped).
   const m = d.meta.find(x => x.k % 29 === 0 && x.day >= d.weeks[1]);
   const week = weekStartOf(m.day), target = m.number, date = m.day;
@@ -114,6 +119,7 @@ function appendRow(payload, raw, exportedAt) {
 test('SCR: a changed or removed accepted cost is held for review with before/after; accepting activates it; rollback restores', async () => {
   const env = await freeTierEnv(), c = client(env);
   await accepted(env, c);
+  await autoAccept(env, true);
   const changed = WEEK1.map(r => (r[1] === '900102' ? [r[0], r[1], '7.35'] : r)).filter(r => r[1] !== '900105');
   const v = await FT.uploadShippingCostReport(c, scrPayload(rows(changed), FROM, TO, '2026-08-11T15:00:00Z'));
   assert.equal(v.status, 'partially_accepted');
@@ -135,6 +141,7 @@ test('SCR: a changed or removed accepted cost is held for review with before/aft
 test('SCR: new cost for an order that already has accepted cost on another date is held; a gap and a same-day export go to review', async () => {
   const env = await freeTierEnv(), c = client(env);
   await accepted(env, c);
+  await autoAccept(env, true);
   const add = [...WEEK1, ['2026-08-06', '900101', '3.00']];                     // 900101 already costed on 08-03
   const v = await FT.uploadShippingCostReport(c, scrPayload(rows(add), FROM, TO, '2026-08-11T15:00:00Z'));
   assert.equal(v.status, 'partially_accepted');

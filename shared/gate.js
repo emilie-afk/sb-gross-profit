@@ -39,6 +39,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   provisional_publication_enabled: false,
   // Free-tier Shipping Cost Report: per-row review threshold in cents (owner decision 2026-09-29: $100).
   shipping_cost_review_cap_cents: 10000,
+  // Free-tier Shipping Cost Report: while false, a version that would activate any date goes to review (nothing activates by itself).
+  shipping_cost_auto_accept_enabled: false,
 });
 
 /**
