@@ -23,11 +23,19 @@ export const DEFAULT_REPORTING_TIMEZONE = 'America/Los_Angeles';
 const pad = n => String(n).padStart(2, '0');
 const noMs = iso => iso.replace(/\.\d{3}Z$/, 'Z');
 
+/**
+ * One formatter per time zone. Building an Intl.DateTimeFormat is far more
+ * expensive than using one, and a Workers Free request has 10 ms of CPU.
+ * Output is unchanged.
+ */
+const FORMATTERS = new Map();
+const formatterFor = timeZone => FORMATTERS.get(timeZone) || FORMATTERS.set(timeZone, new Intl.DateTimeFormat('en-CA', {
+  timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+})).get(timeZone);
+
 /** Wall-clock parts of an instant in a zone. */
 function partsIn(date, timeZone) {
-  const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
-    timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-  }).formatToParts(date).map(x => [x.type, x.value]));
+  const p = Object.fromEntries(formatterFor(timeZone).formatToParts(date).map(x => [x.type, x.value]));
   return { y: +p.year, m: +p.month, d: +p.day, h: +p.hour, mi: +p.minute, s: +p.second };
 }
 

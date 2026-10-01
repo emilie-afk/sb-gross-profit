@@ -60,13 +60,21 @@ export async function sourceStatus(db, weekStart, { orders, shipments, hpd }) {
  * narrative may use. `draft` (latest unpublished revision newer than the
  * published one) feeds an admin-only preview and is never history.
  */
+const PREV_BASE = `SELECT s.snapshot_id, s.week_start, s.status, s.revision, t.* FROM snapshot s
+    JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1`;
+export const PREV_PUBLISHED_SQL = `${PREV_BASE} AND s.status = 'published'`;
+/** The same draft rule as below in one statement (the published revision read inside SQL). */
+export const PREV_DRAFT_SQL = `${PREV_BASE} AND s.status IN ('draft','blocked')
+    AND s.revision > COALESCE((SELECT revision FROM snapshot WHERE week_start = ?1 AND status = 'published'), 0) ORDER BY s.revision DESC LIMIT 1`;
 export async function previousWeekSnapshots(db, weekStart) {
   const prevWeek = addDays(weekStart, -7);
-  const base = `SELECT s.snapshot_id, s.week_start, s.status, s.revision, t.* FROM snapshot s
-    JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1`;
-  const pub = await db.prepare(`${base} AND s.status = 'published'`).bind(prevWeek).first();
-  const draft = await db.prepare(`${base} AND s.status IN ('draft','blocked') AND s.revision > ?2 ORDER BY s.revision DESC LIMIT 1`)
+  const pub = await db.prepare(PREV_PUBLISHED_SQL).bind(prevWeek).first();
+  const draft = await db.prepare(`${PREV_BASE} AND s.status IN ('draft','blocked') AND s.revision > ?2 ORDER BY s.revision DESC LIMIT 1`)
     .bind(prevWeek, pub ? pub.revision : 0).first();
+  return previousFromRows(pub, draft);
+}
+/** Pure: the prior week's published and draft rows → comparison shapes. */
+export function previousFromRows(pub, draft) {
   const shape = r => r ? { weekStart: r.week_start, snapshotId: r.snapshot_id, status: r.status, totals: totalsFromRow(r) } : null;
   return { published: shape(pub), draft: shape(draft) };
 }
@@ -130,9 +138,15 @@ const catalogCapturedAt = async (db, rev) =>
  * The week's latest catalog refresh as of `now`: a refresh requested later is
  * not visible, and a decision recorded after `now` still counts as pending.
  */
+export const LATEST_REFRESH_SQL = 'SELECT * FROM catalog_refresh WHERE week_start = ?1 AND requested_at <= ?2 ORDER BY requested_at DESC, refresh_id DESC LIMIT 1';
 export async function latestRefresh(db, weekStart, now = Date.now(), { ownRefreshId = null } = {}) {
   const asOf = new Date(now).toISOString();
-  const r = await db.prepare('SELECT * FROM catalog_refresh WHERE week_start = ?1 AND requested_at <= ?2 ORDER BY requested_at DESC, refresh_id DESC LIMIT 1').bind(weekStart, asOf).first();
+  return refreshFromRow(await db.prepare(LATEST_REFRESH_SQL).bind(weekStart, asOf).first(), now, { ownRefreshId });
+}
+
+/** The week's latest refresh row → its effective status as of `now`. Pure (used by batched reads). */
+export function refreshFromRow(r, now = Date.now(), { ownRefreshId = null } = {}) {
+  const asOf = new Date(now).toISOString();
   if (!r) return null;
   const detail = JSON.parse(r.detail || '{}');
   // C8: the Worker's own refresh, executed as the first step of this attempt,
@@ -145,10 +159,16 @@ export async function latestRefresh(db, weekStart, now = Date.now(), { ownRefres
   return { ...r, effective_status: expired ? 'expired' : status, detail };
 }
 
+export const ANCHOR_PUBLISHED_SQL = "SELECT snapshot_id, catalog_rev FROM snapshot WHERE week_start = ?1 AND status = 'published'";
+export const ANCHOR_LATEST_SQL = 'SELECT snapshot_id, catalog_rev, catalog_info FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1';
 async function weekAnchor(db, weekStart) {
-  const pub = await db.prepare("SELECT snapshot_id, catalog_rev FROM snapshot WHERE week_start = ?1 AND status = 'published'").bind(weekStart).first();
+  const pub = await db.prepare(ANCHOR_PUBLISHED_SQL).bind(weekStart).first();
+  if (pub) return anchorFromRows(pub, null);
+  return anchorFromRows(null, await db.prepare(ANCHOR_LATEST_SQL).bind(weekStart).first());
+}
+/** Pure: the week's catalog anchor from its published and latest snapshot rows. */
+export function anchorFromRows(pub, last) {
   if (pub) return { rev: pub.catalog_rev, basis: 'published_snapshot', fromSnapshotId: pub.snapshot_id };
-  const last = await db.prepare('SELECT snapshot_id, catalog_rev, catalog_info FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(weekStart).first();
   if (!last) return null;
   // An unpublished anchor passes on its own freshness: reusing a catalog that
   // was stale for this week keeps it stale (it needs acceptance or a restatement).
@@ -161,19 +181,32 @@ export { weekAnchor };
 /** Rule 1 or 3. Rule 2 is the caller reusing run.catalog_info; rule 4 is restateCosts(). */
 export async function chooseCatalog(db, weekStart) {
   const anchor = await weekAnchor(db, weekStart);
+  if (anchor) return chooseCatalogFrom({ anchor });
+  const refresh = await latestRefresh(db, weekStart);
+  if (refresh?.effective_status === 'fulfilled' && refresh.catalog_rev) return chooseCatalogFrom({ anchor, refresh });
+  return chooseCatalogFrom({ anchor, refresh, latest: await latestAcceptedCatalogMeta(db) });
+}
+/** Pure: rules 1 and 3 from the anchor, the week's refresh and the latest accepted catalog. */
+export function chooseCatalogFrom({ anchor, refresh = null, latest = null }) {
   if (anchor) return { rev: anchor.rev, basis: anchor.basis, fromSnapshotId: anchor.fromSnapshotId, refreshId: null,
                       ...(anchor.inheritedFreshness !== undefined ? { inheritedFreshness: anchor.inheritedFreshness } : {}) };
-  const refresh = await latestRefresh(db, weekStart);
   if (refresh?.effective_status === 'fulfilled' && refresh.catalog_rev) {
     return { rev: refresh.catalog_rev, basis: 'week_refresh', refreshId: refresh.refresh_id };
   }
-  const latest = await latestAcceptedCatalogMeta(db);
   return { rev: latest?.catalog_rev || null, basis: 'latest_accepted', refreshId: refresh?.refresh_id || null,
            refreshStatus: refresh?.effective_status || 'none' };
 }
 
 /** Freshness of a recorded selection, for the gate. */
 export async function catalogFreshness(db, runId, info) {
+  const f = catalogFreshnessFrom(info);
+  if (f.status !== 'stale') return f;
+  const acceptance = await db.prepare('SELECT reason, actor_class AS actorClass, actor_label AS actorLabel, at FROM catalog_reuse_acceptance WHERE run_id = ?1 AND catalog_rev = ?2 ORDER BY id DESC LIMIT 1')
+    .bind(runId, info?.rev || '').first();
+  return acceptance ? { ...f, status: 'reused_accepted', acceptance } : f;
+}
+/** Pure: freshness from the recorded selection alone (a stale catalog may still have a reuse acceptance on its run). */
+export function catalogFreshnessFrom(info) {
   let status, reason = null;
   if (!info?.rev) { status = 'stale'; reason = 'no_accepted_catalog'; }
   else if (info.basis === 'published_snapshot') status = 'intentionally_reused';
@@ -185,13 +218,7 @@ export async function catalogFreshness(db, runId, info) {
   else if (info.basis === 'cost_restatement') status = 'restated';
   else if (info.basis === 'week_refresh') status = 'current';
   else { status = 'stale'; reason = info.refreshStatus && info.refreshStatus !== 'none' ? `refresh_${info.refreshStatus}` : 'no_refresh_for_this_week'; }
-  let acceptance = null;
-  if (status === 'stale') {
-    acceptance = await db.prepare('SELECT reason, actor_class AS actorClass, actor_label AS actorLabel, at FROM catalog_reuse_acceptance WHERE run_id = ?1 AND catalog_rev = ?2 ORDER BY id DESC LIMIT 1')
-      .bind(runId, info.rev || '').first();
-    if (acceptance) status = 'reused_accepted';
-  }
-  return { status, reason, acceptance: acceptance || null };
+  return { status, reason, acceptance: null };
 }
 
 async function recordCatalogOnRun(db, runId, info, ownership = null) {

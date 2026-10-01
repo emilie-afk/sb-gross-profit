@@ -195,6 +195,13 @@ export async function loadShipmentsForOrders(db, orderNumbers) {
   const ships = await selectIn(db, `SELECT * FROM shipment WHERE order_number IN (${IN}) ORDER BY shipment_no`, orderNumbers);
   const items = ships.length ? await selectIn(db, `SELECT * FROM shipment_item WHERE shipment_no IN (${IN}) ORDER BY shipment_no, item_index`,
     ships.map(s => s.shipment_no)) : [];
+  return shipmentsFromRows(ships, items);
+}
+/** One-statement forms of the two queries above (for batched reads; one JSON list of order numbers as ?1). */
+export const SHIPMENTS_SQL = `SELECT * FROM shipment WHERE order_number IN (${IN}) ORDER BY shipment_no`;
+export const SHIPMENT_ITEMS_SQL = `SELECT * FROM shipment_item WHERE shipment_no IN (SELECT shipment_no FROM shipment WHERE order_number IN (${IN})) ORDER BY shipment_no, item_index`;
+/** Pure: shipment and item rows → normalized shipments (loader shape and order). */
+export function shipmentsFromRows(ships, items) {
   const byShip = items.reduce((m, r) => { (m.get(r.shipment_no) || m.set(r.shipment_no, []).get(r.shipment_no)).push(r); return m; }, new Map());
   return ships.map(s => ({
     shipmentNo: s.shipment_no, orderNumber: s.order_number, trackingNumber: s.tracking_number, shipDate: s.ship_date,
@@ -236,11 +243,17 @@ export async function saveHpd(db, hpdOrders, runId) {
 export async function loadHpdForOrders(db, orderNumbers) {
   if (!orderNumbers.length) return [];
   // Explicit order: without it the row order is whatever the query plan yields (today, key order).
-  const rows = (await selectIn(db, `SELECT * FROM hpd_order WHERE shopify_order_number IN (${IN}) ORDER BY shopify_order_number`, orderNumbers))
-    .sort((a, b) => (a.shopify_order_number < b.shopify_order_number ? -1 : a.shopify_order_number > b.shopify_order_number ? 1 : 0));   // global across IN-chunks
+  const rows = await selectIn(db, HPD_SQL, orderNumbers);
   const items = rows.length ? await selectIn(db, `SELECT * FROM hpd_item WHERE shopify_order_number IN (${IN}) ORDER BY shopify_order_number, seq`,
     rows.map(r => r.shopify_order_number)) : [];
-  return rows.map(r => ({ shopifyOrderNumber: r.shopify_order_number, hpdOrderNumber: r.hpd_order_number, orderDate: r.order_date,
+  return hpdFromRows(rows, items);
+}
+export const HPD_SQL = `SELECT * FROM hpd_order WHERE shopify_order_number IN (${IN}) ORDER BY shopify_order_number`;
+export const HPD_ITEMS_SQL = `SELECT * FROM hpd_item WHERE shopify_order_number IN (${IN}) ORDER BY shopify_order_number, seq`;
+/** Pure: HPD rows and item rows → normalized HPD records, in shopify_order_number order (global across IN chunks). */
+export function hpdFromRows(rows, items) {
+  return [...rows].sort((a, b) => (a.shopify_order_number < b.shopify_order_number ? -1 : a.shopify_order_number > b.shopify_order_number ? 1 : 0))
+    .map(r => ({ shopifyOrderNumber: r.shopify_order_number, hpdOrderNumber: r.hpd_order_number, orderDate: r.order_date,
     carrierService: r.carrier_service, netTerms: r.net_terms, prepaid: r.prepaid, costDifference: r.cost_difference,
     items: items.filter(i => i.shopify_order_number === r.shopify_order_number).map(i => ({ sku: i.sku, qty: i.qty })) }));
 }

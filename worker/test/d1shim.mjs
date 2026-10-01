@@ -38,7 +38,11 @@ export class D1Shim {
     try {
       const out = stmts.map(s => {
         if (this._failAt && this._failAt.test(s.sql)) { this._failAt = null; throw new Error('injected failure (test)'); }
-        const r = s._runSync(); return { success: true, meta: { changes: Number(r.changes) } };
+        // As in D1, every batch entry is a full result: reads carry their rows.
+        if (/^\s*(SELECT|WITH|PRAGMA)\b/i.test(s.sql) || /\bRETURNING\b/i.test(s.sql)) {
+          return { success: true, results: s._st().all(...s.params).map(r => ({ ...r })), meta: { changes: 0 } };
+        }
+        const r = s._runSync(); return { success: true, results: [], meta: { changes: Number(r.changes) } };
       });
       this.db.exec('COMMIT');
       return out;

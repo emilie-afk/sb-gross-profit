@@ -66,11 +66,15 @@ export async function atomic(db, statements) {
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
-export async function getSettings(db) {
-  const r = await db.prepare('SELECT key, value FROM settings').all();
+export const SETTINGS_SQL = 'SELECT key, value FROM settings';
+/** settings rows → settings object (defaults first). Pure, so batched reads can use it. */
+export function settingsFromRows(rows) {
   const s = { ...DEFAULT_SETTINGS };
-  for (const row of r.results || []) { try { s[row.key] = JSON.parse(row.value); } catch { s[row.key] = row.value; } }
+  for (const row of rows || []) { try { s[row.key] = JSON.parse(row.value); } catch { s[row.key] = row.value; } }
   return s;
+}
+export async function getSettings(db) {
+  return settingsFromRows((await db.prepare(SETTINGS_SQL).all()).results);
 }
 
 export const SETTABLE_KEYS = new Set([

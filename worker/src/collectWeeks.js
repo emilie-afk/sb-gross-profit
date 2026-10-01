@@ -22,13 +22,13 @@
  * recomputed it and matched every order and aggregate (verifyRoutes.js).
  */
 import { ApiError, json, readJson, WEEK_RE } from './http.js';
-import { newId, nowIso, getSettings, selectIn, atomic } from './db.js';
+import { newId, nowIso, getSettings, selectIn, atomic, SETTINGS_SQL, settingsFromRows } from './db.js';
 import { signManifest, manifestSignatureValid } from './auth.js';
 import { readBytes, gunzipCapped, sha256Text, HEX64 } from './gz.js';
-import { loadShipmentsForOrders, loadHpdForOrders, catalogMeta } from './store.js';
-import { chooseCatalog, catalogFreshness, previousWeekSnapshots, sourceStatus } from './compute.js';
+import { loadShipmentsForOrders, loadHpdForOrders, shipmentsFromRows, hpdFromRows, SHIPMENTS_SQL, SHIPMENT_ITEMS_SQL, HPD_SQL, HPD_ITEMS_SQL } from './store.js';
+import { catalogFreshnessFrom, anchorFromRows, chooseCatalogFrom, refreshFromRow, previousFromRows, ANCHOR_PUBLISHED_SQL, ANCHOR_LATEST_SQL, LATEST_REFRESH_SQL, PREV_PUBLISHED_SQL, PREV_DRAFT_SQL } from './compute.js';
 import { createRunStatements } from './runs.js';
-import { scrBasis } from './collectScr.js';
+import { scrBasisFrom, BASIS_VERSIONS_SQL } from './collectScr.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
 import { evaluateGate } from '../../shared/gate.js';
 import { stableStringify, weekStartOf, assertNoCustomerFields, addDays, CustomerDataError } from '../../shared/normalized.js';
@@ -103,46 +103,79 @@ export async function uploadOrders(request, env) {
 
 // ─── Manifest ────────────────────────────────────────────────────────────────
 
-const capturedAt = async (db, rev) => rev ? (await db.prepare('SELECT captured_at FROM cost_catalog WHERE catalog_rev = ?1').bind(rev).first())?.captured_at || null : null;
-
-/** The week's pinned inputs, exactly what the Worker's own loaders would give the engine now. */
+/**
+ * The week's pinned inputs, exactly what the Worker's own loaders would give the engine now.
+ * Reads go in three batches (one D1 round trip each) and through the same pure functions the
+ * loaders use, so the request stays inside the Workers Free CPU limit.
+ */
 export async function assembleManifest(env, weekStart) {
   if (!WEEK_RE.test(weekStart) || weekStartOf(weekStart) !== weekStart) throw new ApiError(400, 'bad_query', 'week must be a Monday (YYYY-MM-DD)');
   const db = env.DB;
-  const settings = await getSettings(db);
+  const now = Date.now(), weekEnd = addDays(weekStart, 6), prevWeek = addDays(weekStart, -7);
+  const rs = r => r.results || [], one = r => rs(r)[0] || null;
+  // Batch 1: everything keyed by the week alone.
+  const b1 = await db.batch([
+    db.prepare(SETTINGS_SQL),
+    db.prepare('SELECT ship_date, version_id, day_hash FROM scr_day_owner WHERE ship_date BETWEEN ?1 AND ?2 ORDER BY ship_date').bind(weekStart, weekEnd),
+    db.prepare('SELECT order_name, order_number, body_hash, source_id FROM ord_ptr WHERE week_start = ?1 ORDER BY order_name').bind(weekStart),
+    db.prepare(ANCHOR_PUBLISHED_SQL).bind(weekStart),
+    db.prepare(ANCHOR_LATEST_SQL).bind(weekStart),
+    db.prepare(LATEST_REFRESH_SQL).bind(weekStart, new Date(now).toISOString()),
+    db.prepare("SELECT * FROM cost_catalog WHERE status = 'accepted' ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1"),
+    db.prepare(PREV_PUBLISHED_SQL).bind(prevWeek),
+    db.prepare(PREV_DRAFT_SQL).bind(prevWeek),
+    db.prepare('SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1').bind(weekStart),
+  ]);
+  const settings = settingsFromRows(rs(b1[0]));
+  const weekOwned = rs(b1[1]), orders = rs(b1[2]);
+  const anchor = anchorFromRows(one(b1[3]), one(b1[4]));
+  const info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[5]), now), latest: one(b1[6]) });
+  const prev = previousFromRows(one(b1[7]), one(b1[8]));
+  const last = one(b1[9]);
   const closedAt = weekWindowUtc(weekStart, settings.store_timezone).endUtcExclusive;
-  const basis = await scrBasis(db, weekStart, closedAt);
+  const nums = [...new Set(orders.map(o => o.order_number))], numsJson = JSON.stringify(nums);
+  const vids = [...new Set(weekOwned.map(o => o.version_id))];
+  // Batch 2: what depends on the week's orders, date owners and catalog.
+  const b2 = await db.batch([
+    db.prepare(BASIS_VERSIONS_SQL).bind(weekStart, weekEnd, JSON.stringify(vids)),
+    db.prepare(`SELECT d.groups FROM scr_day d JOIN json_each(?1) j ON d.version_id = json_extract(j.value, '$[0]') AND d.ship_date = json_extract(j.value, '$[1]')`)
+      .bind(JSON.stringify(weekOwned.map(o => [o.version_id, o.ship_date]))),
+    db.prepare(SHIPMENTS_SQL).bind(numsJson), db.prepare(SHIPMENT_ITEMS_SQL).bind(numsJson),
+    db.prepare(HPD_SQL).bind(numsJson), db.prepare(HPD_ITEMS_SQL).bind(numsJson),
+    db.prepare('SELECT table_name, part FROM cost_catalog_part WHERE catalog_rev = ?1 ORDER BY table_name, part').bind(info.rev || ''),
+    db.prepare('SELECT captured_at, meta FROM cost_catalog WHERE catalog_rev = ?1').bind(info.rev || ''),
+  ]);
+  const basis = scrBasisFrom({ weekStart, closedAt, own: new Map(weekOwned.map(o => [o.ship_date, { versionId: o.version_id, dayHash: o.day_hash }])), versionRows: rs(b2[0]) });
   if (basis.basisStatus !== 'ok') throw new ApiError(409, 'shipping_report_not_ready', `No snapshot: the week's Shipping Cost Report is ${basis.basisStatus} (${basis.label})`, { shippingReport: basis.basisStatus });
-  const info = await chooseCatalog(db, weekStart);
+  // Same precedence as before the reads were batched: report basis, then catalog, then orders.
   if (!info.rev) throw new ApiError(409, 'no_catalog', 'No accepted cost catalog; push one before computing');
-  info.capturedAt = await capturedAt(db, info.rev);
-  const orders = (await db.prepare('SELECT order_name, order_number, body_hash, source_id FROM ord_ptr WHERE week_start = ?1 ORDER BY order_name').bind(weekStart).all()).results || [];
   if (!orders.length) throw new ApiError(409, 'week_empty', `No orders stored for the week of ${weekStart}`);
-  const nums = [...new Set(orders.map(o => o.order_number))];
-  const [shipments, hpdOrders] = [await loadShipmentsForOrders(db, nums), await loadHpdForOrders(db, nums)];
+  const shipments = shipmentsFromRows(rs(b2[2]), rs(b2[3])), hpdOrders = hpdFromRows(rs(b2[4]), rs(b2[5]));
+  const cat = one(b2[7]);
+  info.capturedAt = cat?.captured_at || null;
   // Shipping Cost Report dates the week depends on: its own seven dates, and every owned date that
   // holds cost for one of its orders or for an order shipped in the week (that order's first ship
   // date decides the unmatched count). Other dates cannot change this week's figures, so they are
   // not pinned. The search over the stored groups runs in D1 (json_each), not in Worker CPU.
-  const weekEnd = addDays(weekStart, 6);
-  const weekOwned = (await db.prepare('SELECT ship_date, version_id, day_hash FROM scr_day_owner WHERE ship_date BETWEEN ?1 AND ?2 ORDER BY ship_date').bind(weekStart, weekEnd).all()).results || [];
-  const weekDays = weekOwned.length ? await selectIn(db, `SELECT d.groups FROM scr_day d JOIN json_each(?1) j ON d.version_id = json_extract(j.value, '$[0]') AND d.ship_date = json_extract(j.value, '$[1]')`,
-    weekOwned.map(o => [o.version_id, o.ship_date])) : [];
-  const weekKeys = [...new Set(weekDays.flatMap(r => (P(r.groups, []) || []).map(g => g[0])))];
+  const weekKeys = [...new Set(rs(b2[1]).flatMap(r => (P(r.groups, []) || []).map(g => g[0])))];
   const keys = [...new Set([...nums.map(n => String(n).replace(/^#/, '')), ...weekKeys])];
-  const related = keys.length ? await selectIn(db, `SELECT DISTINCT o.ship_date, o.version_id, o.day_hash FROM scr_day_owner o
-      JOIN scr_day d ON d.version_id = o.version_id AND d.ship_date = o.ship_date, json_each(d.groups) g
-      WHERE json_extract(g.value, '$[0]') IN (SELECT value FROM json_each(?1))`, keys) : [];
-  const owners = [...new Map([...weekOwned, ...related].map(o => [o.ship_date, o])).values()].sort((a, b) => (a.ship_date < b.ship_date ? -1 : 1));
-  const vids = [...new Set(owners.map(o => o.version_id))];
-  const versions = vids.length ? await selectIn(db, 'SELECT version_id, source_id, requested_from, requested_to FROM scr_version WHERE version_id IN (SELECT value FROM json_each(?1)) ORDER BY version_id', vids) : [];
-  const known = weekKeys.length ? (await selectIn(db, 'SELECT DISTINCT order_number FROM ord_ptr WHERE order_number IN (SELECT value FROM json_each(?1))', weekKeys)).map(r => r.order_number).sort() : [];
-  const prev = await previousWeekSnapshots(db, weekStart);
-  const last = await db.prepare('SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1').bind(weekStart).first();
-  const parts = ((await db.prepare('SELECT table_name, part FROM cost_catalog_part WHERE catalog_rev = ?1 ORDER BY table_name, part').bind(info.rev).all()).results || []).map(p => [p.table_name, p.part]);
+  // Batch 3: the related dates and the report orders that are known Shopify orders.
+  const b3 = await db.batch([
+    db.prepare(`SELECT DISTINCT o.ship_date, o.version_id, o.day_hash FROM scr_day_owner o
+        JOIN scr_day d ON d.version_id = o.version_id AND d.ship_date = o.ship_date, json_each(d.groups) g
+        WHERE json_extract(g.value, '$[0]') IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(keys)),
+    db.prepare('SELECT DISTINCT order_number FROM ord_ptr WHERE order_number IN (SELECT value FROM json_each(?1)) ORDER BY order_number').bind(JSON.stringify(weekKeys)),
+    db.prepare(`SELECT v.version_id, v.source_id, v.requested_from, v.requested_to FROM scr_version v WHERE v.version_id IN (
+        SELECT DISTINCT o.version_id FROM scr_day_owner o JOIN scr_day d ON d.version_id = o.version_id AND d.ship_date = o.ship_date, json_each(d.groups) g
+        WHERE json_extract(g.value, '$[0]') IN (SELECT value FROM json_each(?1))) OR v.version_id IN (SELECT value FROM json_each(?2)) ORDER BY v.version_id`)
+      .bind(JSON.stringify(keys), JSON.stringify(vids)),
+  ]);
+  const owners = [...new Map([...weekOwned, ...rs(b3[0])].map(o => [o.ship_date, o])).values()].sort((a, b) => (a.ship_date < b.ship_date ? -1 : 1));
+  const known = weekKeys.length ? rs(b3[1]).map(r => r.order_number) : [];
+  const versions = rs(b3[2]);
   return {
-    v: MANIFEST_VERSION, weekStart, engineVersion: ENGINE_VERSION, asOf: nowIso(), storeTimezone: settings.store_timezone, settings,
-    catalog: { rev: info.rev, info, completeness: (await catalogMeta(db, info.rev))?.meta?.completeness || null, parts },
+    v: MANIFEST_VERSION, weekStart, engineVersion: ENGINE_VERSION, asOf: new Date(now).toISOString(), storeTimezone: settings.store_timezone, settings,
+    catalog: { rev: info.rev, info, completeness: P(cat?.meta, {})?.completeness || null, parts: rs(b2[6]).map(p => [p.table_name, p.part]) },
     orders: orders.map(o => [o.order_name, o.body_hash, o.source_id]),
     scrDays: owners.map(o => [o.ship_date, o.version_id, o.day_hash]),
     scrVersions: versions.map(v => [v.version_id, v.source_id, v.requested_from, v.requested_to]),
@@ -299,7 +332,14 @@ export async function finalizeResults(request, env, id) {
   if (u.status !== 'open') throw new ApiError(409, 'upload_closed', `This upload is ${u.status}`);
   const index = P(u.idx, {}), pinned = P(u.manifest, {});
   const names = Object.keys(index.parts);
-  const have = new Set(((await db.prepare('SELECT part FROM snapshot_blob WHERE snapshot_id = ?1').bind(id).all()).results || []).map(r => r.part));
+  // One round for every read finalize needs besides the manifest re-assembly.
+  const [partRows, hpdRun, otherTz, maxRev] = await db.batch([
+    db.prepare('SELECT part FROM snapshot_blob WHERE snapshot_id = ?1').bind(id),
+    db.prepare("SELECT status FROM ingest_run WHERE source = 'hpd' AND week_start = ?1 ORDER BY started_at DESC LIMIT 1").bind(u.week_start),
+    db.prepare('SELECT COUNT(*) AS n FROM ord_ptr WHERE week_start = ?1 AND timezone <> ?2').bind(u.week_start, pinned.settings?.store_timezone ?? ''),
+    db.prepare('SELECT MAX(revision) AS m FROM snapshot WHERE week_start = ?1').bind(u.week_start),
+  ]);
+  const have = new Set((partRows.results || []).map(r => r.part));
   const missing = names.filter(n => !have.has(n));
   if (missing.length) throw new ApiError(409, 'parts_missing', `${missing.length} part(s) not uploaded yet`, { missing });
   // Inputs must be exactly what the manifest pinned: otherwise the result is for a stale week.
@@ -312,18 +352,20 @@ export async function finalizeResults(request, env, id) {
   }
   const settings = pinned.settings, info = pinned.catalog.info, basis = pinned.shippingReportBasis;
   const runId = newId('run'), at = nowIso();
-  const freshness = await catalogFreshness(db, runId, info);
+  // A fresh run id never has a catalog reuse acceptance, so freshness is the pure function of the selection.
+  const freshness = catalogFreshnessFrom(info);
   const catalogInfo = { ...info, freshness };
-  const hpdStatus = (await sourceStatus(db, u.week_start, { orders: pinned.orders, shipments: [], hpd: new Array(pinned.aux.hpdOrders).fill(0) })).hpd;
+  const h = hpdRun.results?.[0];
+  const hpdStatus = h ? (h.status === 'ok' ? 'ok' : h.status === 'failed' ? 'failed' : 'pending') : (pinned.aux.hpdOrders > 0 ? 'ok' : 'pending');
   const sources = { shopify: 'ok', shipstation: 'ok', hpd: hpdStatus };
-  const ordersInOtherTimezone = (await db.prepare('SELECT COUNT(*) AS n FROM ord_ptr WHERE week_start = ?1 AND timezone <> ?2').bind(u.week_start, settings.store_timezone).first())?.n || 0;
+  const ordersInOtherTimezone = otherTz.results?.[0]?.n || 0;
   const gi = index.gateInputs;
   const gate = evaluateGate({ totals: gi.totals, reconciliation: gi.reconciliation, sources, catalog: { accepted: true, rev: info.rev, freshness },
                               settings, ordersInOtherTimezone, shippingC3: gi.shippingC3, shippingReport: basis });
   const gateRecord = { ...gate, sources, shippingReport: basis, storeTimezone: settings.store_timezone, storeTimezoneConfirmed: settings.store_timezone_confirmed === true,
     catalog: { expectedRefreshId: info.refreshId || null, selectedRev: info.rev, capturedAt: info.capturedAt, basis: info.basis, freshness },
     computedBy: 'collector', verification: 'pending' };
-  const revision = ((await db.prepare('SELECT MAX(revision) AS m FROM snapshot WHERE week_start = ?1').bind(u.week_start).first())?.m || 0) + 1;
+  const revision = (maxRev.results?.[0]?.m || 0) + 1;
   const status = gate.passed ? 'draft' : 'blocked', finalState = gate.passed ? 'validated' : 'blocked';
   const head = index.head, totals = P(index.totals);
   const tcols = TOTALS_COLUMNS.map(c => c[0]);

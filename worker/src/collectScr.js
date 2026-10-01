@@ -176,15 +176,21 @@ export async function getScrDays(request, env) {
  * missing   nothing
  * Same record shape as compute.js basisRecord(), so gate and engine read it unchanged.
  */
+/** Versions a week's basis reads: the owners of its dates, and any version overlapping it that is still in review. */
+export const BASIS_VERSIONS_SQL = `SELECT v.*, o.sha256 FROM scr_version v JOIN src_object o ON o.source_id = v.source_id
+      WHERE (v.requested_from <= ?2 AND v.requested_to >= ?1 AND v.status IN ('pending_review','partially_accepted')) OR v.version_id IN (SELECT value FROM json_each(?3))`;
 export async function scrBasis(db, weekStart, closedAt) {
   const weekEnd = addDays(weekStart, 6);
   const own = await owners(db, weekStart, weekEnd);
   const vids = [...new Set([...own.values()].map(o => o.versionId))];
+  const vrows = await db.prepare(BASIS_VERSIONS_SQL).bind(weekStart, weekEnd, JSON.stringify(vids)).all();
+  return scrBasisFrom({ weekStart, closedAt, own, versionRows: vrows.results || [] });
+}
+/** Pure: the basis from the week's date owners (Map date → { versionId }) and the version rows. */
+export function scrBasisFrom({ weekStart, closedAt, own, versionRows }) {
+  const weekEnd = addDays(weekStart, 6);
   const versions = new Map();
-  const vrows = await db.prepare(`SELECT v.*, o.sha256 FROM scr_version v JOIN src_object o ON o.source_id = v.source_id
-      WHERE (v.requested_from <= ?2 AND v.requested_to >= ?1 AND v.status IN ('pending_review','partially_accepted')) OR v.version_id IN (SELECT value FROM json_each(?3))`)
-    .bind(weekStart, weekEnd, JSON.stringify(vids)).all();
-  for (const v of vrows.results || []) versions.set(v.version_id, v);
+  for (const v of versionRows) versions.set(v.version_id, v);
   const vjson = v => ({ versionId: v.version_id, sha256: v.sha256 || null, requestedFrom: v.requested_from, requestedTo: v.requested_to,
                         receivedAt: v.imported_at, state: v.status === 'partially_accepted' || v.status === 'accepted' ? 'accepted' : v.status, decidedAt: v.decided_at || null });
   const used = [];
