@@ -19,7 +19,7 @@ import { buildSnapshot, SHIPPING_SOURCES, ENGINE_VERSION } from './snapshot.js';
 import { effectiveFromDays, reportFromDays, sha256Hex, dayHash } from './scrDays.js';
 import { catalogRevOf } from './catalog.js';
 
-export const MANIFEST_VERSION = 1;
+export const MANIFEST_VERSION = 2;   // 2: aux hashes are over the served JSON (see auxHash)
 
 // ─── SQLite column affinity, as D1 applies it on insert ────────────────────────
 const nul = v => (v === undefined ? null : v);
@@ -89,7 +89,13 @@ export function catalogFromParts(rev, parts) {
 }
 
 export const manifestHash = m => sha256Hex(stableStringify(m));
-export const auxHash = v => sha256Hex(stableStringify(v ?? []));
+/**
+ * Hash of the shipments / HPD records exactly as the Worker serves them: native JSON, whose
+ * key order is fixed by shipmentsFromRows / hpdFromRows and kept by any JSON round trip.
+ * (The key-sorted form cost ~1.5 ms of Worker CPU per request at a full week.) A record
+ * rebuilt in another key order does not match, and the week is refused, never mis-hashed.
+ */
+export const auxHash = v => sha256Hex(JSON.stringify(v ?? []));
 
 const fail = (code, message) => Object.assign(new Error(message || code), { code });
 

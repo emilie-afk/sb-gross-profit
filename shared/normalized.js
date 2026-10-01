@@ -204,9 +204,19 @@ export function addDays(date, n) {
 
 /** Stable JSON: object keys sorted, so a content hash does not depend on key order. */
 export function stableStringify(v) {
-  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`;
+  // Same output as the map/join form (kept below as the reference in tests), built by
+  // concatenation: it runs on every manifest and part in the Worker, under a 10 ms CPU limit.
+  if (typeof v === 'string') return JSON.stringify(v);
+  if (Array.isArray(v)) {
+    let s = '[';
+    for (let i = 0; i < v.length; i++) { if (i) s += ','; if (i in v) s += stableStringify(v[i]); }
+    return s + ']';
+  }
   if (v && typeof v === 'object') {
-    return `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stableStringify(v[k])}`).join(',')}}`;
+    const keys = Object.keys(v).sort();
+    let s = '{';
+    for (let i = 0; i < keys.length; i++) { if (i) s += ','; s += JSON.stringify(keys[i]) + ':' + stableStringify(v[keys[i]]); }
+    return s + '}';
   }
   return JSON.stringify(v ?? null);
 }
