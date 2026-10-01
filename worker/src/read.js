@@ -9,7 +9,6 @@
 import { ApiError, json, jsonText, intParam, WEEK_RE } from './http.js';
 import { totalsFromRow } from './compute.js';
 import { gunzipCapped, blobBytes } from './gz.js';
-import { verificationOf } from './verifyRoutes.js';
 import { scenarioLines, indexRow } from '../../shared/resultParts.js';
 
 const P = (s, d) => { try { return s === null || s === undefined ? d : JSON.parse(s); } catch { return d; } };
@@ -23,13 +22,21 @@ async function pickSnapshot(db, weekStart, url, reader) {
   if (!WEEK_RE.test(weekStart)) throw new ApiError(400, 'bad_query', 'week must be YYYY-MM-DD');
   const allowed = statuses(url, reader);
   const rev = url.searchParams.get('revision');
+  // The verification report comes with the snapshot row (one query instead of two).
+  const V = `, v.status AS _v_status, v.report AS _v_report, v.diff AS _v_diff, v.attempts AS _v_attempts, v.at AS _v_at
+      FROM snapshot s LEFT JOIN verify_report v ON v.snapshot_id = s.snapshot_id`;
   const q = rev
-    ? db.prepare(`SELECT * FROM snapshot WHERE week_start = ?1 AND revision = ?2 AND status IN (SELECT value FROM json_each(?3))`).bind(weekStart, parseInt(rev, 10), JSON.stringify(allowed))
-    : db.prepare(`SELECT * FROM snapshot WHERE week_start = ?1 AND status IN (SELECT value FROM json_each(?2))
-        ORDER BY CASE status WHEN 'published' THEN 0 ELSE 1 END, revision DESC LIMIT 1`).bind(weekStart, JSON.stringify(allowed));
-  const s = await q.first();
-  if (!s) throw new ApiError(404, reader.admin ? 'week_unknown' : 'not_published', `No ${allowed.length > 1 ? '' : 'published '}snapshot for ${weekStart}`);
-  return withVerification(db, s, reader);
+    ? db.prepare(`SELECT s.*${V} WHERE s.week_start = ?1 AND s.revision = ?2 AND s.status IN (SELECT value FROM json_each(?3))`).bind(weekStart, parseInt(rev, 10), JSON.stringify(allowed))
+    : db.prepare(`SELECT s.*${V} WHERE s.week_start = ?1 AND s.status IN (SELECT value FROM json_each(?2))
+        ORDER BY CASE s.status WHEN 'published' THEN 0 ELSE 1 END, s.revision DESC LIMIT 1`).bind(weekStart, JSON.stringify(allowed));
+  const row = await q.first();
+  if (!row) throw new ApiError(404, reader.admin ? 'week_unknown' : 'not_published', `No ${allowed.length > 1 ? '' : 'published '}snapshot for ${weekStart}`);
+  const { _v_status, _v_report, _v_diff, _v_attempts, _v_at, ...s } = row;
+  if (s.storage !== 'chunked') return s;
+  // Same shape as before (verificationOf + withVerification): readers are logged in, and the
+  // logged-in dashboard shows the field-level differences.
+  return { ...s, _verification: _v_status ? { status: _v_status, at: _v_at, attempts: _v_attempts, counts: P(_v_report, {}),
+    ...(_v_diff ? { differences: P(_v_diff, null) } : {}) } : { status: 'pending' } };
 }
 
 /** Catalog selection as sessions see it: no acceptance reason or actor (admin audit only). */
@@ -74,11 +81,6 @@ const sqlCmp = (key, desc = false) => (a, b) => {
   return desc ? -c : c;
 };
 const chain = (...fs) => (a, b) => { for (const f of fs) { const c = f(a, b); if (c) return c; } return 0; };
-async function withVerification(db, s, reader) {
-  if (s.storage !== 'chunked') return s;
-  const v = (await verificationOf(db, [s.snapshot_id], { admin: true })).get(s.snapshot_id);
-  return { ...s, _verification: v ? { status: v.status, at: v.at, attempts: v.attempts, counts: v.report, ...(v.diff ? { differences: v.diff } : {}) } : { status: 'pending' } };
-}
 
 export async function listWeeks(request, env, reader) {
   const url = new URL(request.url);
@@ -199,7 +201,8 @@ export async function getOrder(request, env, reader, weekStart, orderName) {
   const s = await pickSnapshot(env.DB, weekStart, url, reader);
   let o, lines;
   if (s.storage === 'chunked') {
-    const hit = (await orderIndex(env.DB, s)).find(x => x.order_name === orderName);
+    const t = (await part(env.DB, s, 'orderindex')).orders.find(x => x[0] === orderName);
+    const hit = t ? indexRow(t) : null;
     if (hit) {
       const texts = await partTexts(env.DB, s, [`orders:${hit.part}`, `lines:${hit.part}`]);
       o = JSON.parse(texts.get(`orders:${hit.part}`)).orders.find(x => x.order_name === orderName);

@@ -31,7 +31,7 @@ import { createRunStatements } from './runs.js';
 import { scrBasisFrom, BASIS_VERSIONS_SQL } from './collectScr.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
 import { evaluateGate } from '../../shared/gate.js';
-import { stableStringify, weekStartOf, assertNoCustomerFields, addDays, CustomerDataError } from '../../shared/normalized.js';
+import { stableStringify, weekStartOf, assertNoCustomerFields, addDays, CustomerDataError, CUSTOMER_KEYS } from '../../shared/normalized.js';
 import { assertReducedNormalizedOrders } from '../../shared/adapters/shopifyPrivacy.js';
 import { storedOrderForm, MANIFEST_VERSION, auxHash } from '../../shared/bundle.js';
 import { ORDER_COLUMNS, LINE_COLUMNS, BREAKDOWN_COLUMNS, ISSUE_COLUMNS, RECON_COLUMNS, TOTALS_COLUMNS, ORDERS_PER_PART, ORDER_INDEX_FIELDS } from '../../shared/resultParts.js';
@@ -134,7 +134,9 @@ async function assemble(env, weekStart) {
     db.prepare(PREV_PUBLISHED_SQL).bind(prevWeek),
     db.prepare(PREV_DRAFT_SQL).bind(prevWeek),
     db.prepare('SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1').bind(weekStart),
+    db.prepare('SELECT snapshot_id, revision, status, storage, manifest_hash FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(weekStart),
   ]);
+  const latestSnapshot = one(b1[11]);
   const epoch = one(b1[0])?.n ?? null;
   const settings = settingsFromRows(rs(b1[1]));
   const weekOwned = rs(b1[2]), orders = rs(b1[3]);
@@ -183,7 +185,7 @@ async function assemble(env, weekStart) {
   const owners = [...new Map([...weekOwned, ...rs(b3[0])].map(o => [o.ship_date, o])).values()].sort((a, b) => (a.ship_date < b.ship_date ? -1 : 1));
   const known = weekKeys.length ? rs(b3[1]).map(r => r.order_number) : [];
   const versions = rs(b3[2]);
-  return { epoch, manifest: {
+  return { epoch, latestSnapshot, manifest: {
     v: MANIFEST_VERSION, weekStart, engineVersion: ENGINE_VERSION, asOf: new Date(now).toISOString(), storeTimezone: settings.store_timezone, settings,
     catalog: { rev: info.rev, info, completeness: P(cat?.meta, {})?.completeness || null, parts: rs(b2[6]).map(p => [p.table_name, p.part]) },
     orders: orders.map(o => [o.order_name, o.body_hash, o.source_id]),
@@ -209,10 +211,9 @@ const withoutAsOf = ({ asOf: _a, ...m }) => m;
 export const inputsHashOf = ({ asOf: _a, previousShippingExpense: _p, previousDraft: _d, catalog: { info: _i, ...catalog }, ...m }) => sha256Text(stableStringify({ ...m, catalog }));
 
 export async function getManifest(env, weekStart) {
-  const { manifest, epoch } = await assemble(env, weekStart);
+  const { manifest, epoch, latestSnapshot: latest } = await assemble(env, weekStart);
   const manifestHash = await sha256Text(stableStringify(manifest));
   // The week's newest revision was computed from exactly these inputs: nothing to do (a retry or re-run writes 0 rows).
-  const latest = await env.DB.prepare('SELECT snapshot_id, revision, status, storage, manifest_hash FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(weekStart).first();
   const existing = latest?.storage === 'chunked' && latest.manifest_hash === await inputsHashOf(manifest)
     ? { snapshotId: latest.snapshot_id, revision: latest.revision, status: latest.status } : null;
   return json({ manifest, manifestHash, epoch, signature: await signManifest(env, manifestHash, epoch), existing });
@@ -247,6 +248,10 @@ const ORDER_KEYS = keysOf(ORDER_COLUMNS), LINE_KEYS = keysOf(LINE_COLUMNS), BD_K
       ISSUE_KEYS = keysOf(ISSUE_COLUMNS), RECON_KEYS = keysOf(RECON_COLUMNS);
 const SCENARIO_KEYS = new Set(['orderNum', 'date', 'sku', 'product', 'vendor', 'vendorKey', 'qty', 'unitPrice', 'baseMerchRevenue', 'lineRevenue',
   'lineCogs', 'missingCost', 'costSource', 'isRoute', 'isGiftCard', 'isInfluencerSample', 'shipCollected', 'shipPaid']);
+// No allowlisted result column may be a customer field (the part check relies on it).
+for (const k of [...ORDER_KEYS, ...LINE_KEYS, ...BD_KEYS, ...ISSUE_KEYS, ...RECON_KEYS, ...SCENARIO_KEYS]) {
+  if (CUSTOMER_KEYS.has(k.toLowerCase().replace(/[^a-z0-9]/g, ''))) throw new Error(`result column ${k} is a customer field`);
+}
 const HEAD_KEYS = ['engine_version', 'catalog_rev', 'policy', 'profitability_status', 'comparison_snapshot_id', 'draft_comparison'];
 
 function rowsExactly(rows, keys, what) {
@@ -274,7 +279,9 @@ function validatePart(name, v) {
     only(['lines']);
     rowsExactly(v.lines, SCENARIO_KEYS, 'scenario.lines');
   } else { only(['lines']); rowsExactly(v.lines, LINE_KEYS, 'lines'); }
-  try { assertNoCustomerFields(v); } catch { throw new ApiError(400, 'customer_data_rejected', 'A result part contains customer fields'); }
+  // Row parts carry only allowlisted columns (checked above; none is a customer field, asserted at load),
+  // so only the one free-form object needs the customer-field walk.
+  if (name === 'sections') { try { assertNoCustomerFields(v.shippingC3 ?? null); } catch { throw new ApiError(400, 'customer_data_rejected', 'A result part contains customer fields'); } }
 }
 
 export async function openResults(request, env, weekStart) {
@@ -330,7 +337,10 @@ export async function putResultPart(request, env, id, name) {
   if (await sha256Text(text) !== want) throw new ApiError(400, 'hash_mismatch', 'Part does not match its indexed hash');
   const v = P(text);
   validatePart(name, v);
-  if (stableStringify(v) !== text) throw new ApiError(400, 'not_canonical', 'Part is not canonical JSON');
+  // The stored text must be exactly the serialization of what was validated (no duplicate keys,
+  // whitespace or alternative escapes): reads may serve it as text. Key order is the collector's
+  // canonical order; the verifier compares every part byte for byte with its own recomputation.
+  if (JSON.stringify(v) !== text) throw new ApiError(400, 'not_canonical', 'Part is not canonical JSON');
   await db.prepare('INSERT OR IGNORE INTO snapshot_blob (snapshot_id, part, sha256, body) VALUES (?1, ?2, ?3, ?4)').bind(id, name, want, bytes).run();
   return json({ snapshotId: id, part: name, status: 'stored' });
 }

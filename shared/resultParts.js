@@ -180,7 +180,8 @@ export const ORDER_INDEX_FIELDS = ['order_name', 'part', 'business_date', 'opera
   'shipping_expense_status', 'channel', 'order_cat', 'profitability_status'];
 export const indexTuple = (o, k) => [o.order_name, k, o.business_date, o.operating_gp, o.operating_revenue, o.missing_cost_lines,
   o.shipping_expense_status, o.channel, o.order_cat, o.profitability_status];
-export const indexRow = t => Object.fromEntries(ORDER_INDEX_FIELDS.map((f, i) => [f, t[i]]));
+export const indexRow = t => ({ order_name: t[0], part: t[1], business_date: t[2], operating_gp: t[3], operating_revenue: t[4],
+  missing_cost_lines: t[5], shipping_expense_status: t[6], channel: t[7], order_cat: t[8], profitability_status: t[9] });
 
 export function resultParts(snap, engineVersion) {
   const orders = snap.orders.map(orderRow);
