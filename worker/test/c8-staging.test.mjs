@@ -68,7 +68,8 @@ test('C8 isolation: a staging Worker pointed at a production-bound D1 reads and 
 async function digest(env) {
   const tables = ((await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' ORDER BY name").all()).results || []).map(r => r.name);
   const parts = [];
-  for (const t of tables) parts.push([t, JSON.stringify((await env.DB.prepare(`SELECT * FROM ${t} ORDER BY rowid`).all()).results || [])]);
+  // Rows sorted by their JSON form: WITHOUT ROWID tables (migration 0012) have no rowid to order by.
+  for (const t of tables) parts.push([t, JSON.stringify(((await env.DB.prepare(`SELECT * FROM ${t}`).all()).results || []).map(r => JSON.stringify(r)).sort())]);
   return JSON.stringify(parts);
 }
 const sessionFor = async env => `sb_session=${(await signSession(env)).token}`;

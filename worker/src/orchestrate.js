@@ -24,6 +24,7 @@
  * completeness, shipping verification. Never a path, email detail, token,
  * sheet configuration or customer datum.
  */
+import { weekStatus } from './weekStatus.js';
 import { ApiError, json, readJson, WEEK_RE } from './http.js';
 import { newId, nowIso, getSettings, markCyclesChanged } from './db.js';
 import { actorFor } from './actor.js';
@@ -228,7 +229,8 @@ export async function automationStatus(request, env, reader) {
   const s = await getSettings(env.DB);
   const weekStart = url.searchParams.get('weekStart') || lastClosedWeek(new Date(), s.store_timezone);
   if (!WEEK_RE.test(weekStart)) throw new ApiError(400, 'bad_query', 'weekStart must be YYYY-MM-DD');
-  return json(await cycleStatus(env, weekStart, { admin: !!reader?.admin }));
+  // Free-tier path: the exact pending status and the verified-draft target (codes, labels, timestamps only).
+  return json({ ...(await cycleStatus(env, weekStart, { admin: !!reader?.admin })), freeTier: await weekStatus(env.DB, weekStart) });
 }
 
 /**

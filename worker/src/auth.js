@@ -1,9 +1,10 @@
 /**
- * auth.js — three credential classes, never interchangeable
+ * auth.js — four credential classes, never interchangeable
  * ========================================================
- *   ingest   X-Ingest-Secret   Windows collector   /v1/ingest/*
+ *   ingest   X-Ingest-Secret   Windows collector   /v1/ingest/*, /v1/collect/*
  *   admin    X-Admin-Secret    operator            /v1/admin/*
  *   session  sb_session cookie dashboard browser   /v1/weeks, /v1/snapshot/*, /v1/history, /v1/compare
+ *   verify   X-Verify-Secret   verifier (gp-verify) /v1/verify/*, read-only /v1/collect/* parts
  *
  * The dashboard password is stored only as a PBKDF2-SHA256 hash
  * (DASHBOARD_PASSWORD_HASH). Sessions are HMAC-SHA256-signed, short-lived, and
@@ -77,15 +78,50 @@ function assertConfigured(env) {
   if (new Set(vals).size !== vals.length) throw new ApiError(500, 'misconfigured', 'Ingest, admin and session secrets must all differ');
 }
 
+const CLASSES = {
+  ingest: { header: 'X-Ingest-Secret', key: 'INGEST_SECRET', code: 'ingest_auth' },
+  admin: { header: 'X-Admin-Secret', key: 'ADMIN_SECRET', code: 'admin_auth' },
+  // Free-tier path: the independent verifier (Netlify Function gp-verify). It may read
+  // pinned inputs and stored results and write one verification report — nothing else.
+  verify: { header: 'X-Verify-Secret', key: 'VERIFY_SECRET', code: 'verify_auth' },
+};
+
+function assertVerifyConfigured(env) {
+  const v = env.VERIFY_SECRET;
+  if (!v) throw new ApiError(503, 'verify_not_configured', 'VERIFY_SECRET is not set on this Worker');
+  if (String(v).length < 32) throw new ApiError(500, 'misconfigured', 'VERIFY_SECRET must be at least 32 characters');
+  if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY].includes(v)) throw new ApiError(500, 'misconfigured', 'VERIFY_SECRET must differ from every other secret');
+}
+
 /** Throws unless the request carries the secret for exactly this credential class. */
 export function requireSecret(request, env, cls) {
   assertConfigured(env);
-  const header = cls === 'ingest' ? 'X-Ingest-Secret' : 'X-Admin-Secret';
-  const expected = cls === 'ingest' ? env.INGEST_SECRET : env.ADMIN_SECRET;
-  const got = request.headers.get(header) || '';
-  if (!got || !timingSafeEqual(got, expected)) {
-    throw new ApiError(401, cls === 'ingest' ? 'ingest_auth' : 'admin_auth', `Missing or invalid ${header}`);
-  }
+  const c = CLASSES[cls];
+  if (!c) throw new Error(`unknown credential class ${cls}`);
+  if (cls === 'verify') assertVerifyConfigured(env);
+  const got = request.headers.get(c.header) || '';
+  if (!got || !timingSafeEqual(got, env[c.key])) throw new ApiError(401, c.code, `Missing or invalid ${c.header}`);
+}
+
+/**
+ * One of several classes (read-only routes shared by the collector and the
+ * verifier). Exactly one credential header may be present; returns the class.
+ */
+export function requireOneOf(request, env, classes) {
+  const present = classes.filter(cls => request.headers.get(CLASSES[cls].header));
+  if (present.length !== 1) throw new ApiError(401, 'credential_required', `Send exactly one of ${classes.map(c => CLASSES[c].header).join(', ')}`);
+  requireSecret(request, env, present[0]);
+  return present[0];
+}
+
+/**
+ * Free-tier path: the Worker signs each week manifest it issues, so a manifest
+ * returned with results is known to be the Worker's own (no D1 write to remember it).
+ */
+export const signManifest = async (env, manifestHash) => b64url(await hmac(env.SESSION_SIGNING_KEY, `manifest:${manifestHash}`));
+export async function manifestSignatureValid(env, manifestHash, signature) {
+  let got; try { got = fromB64url(String(signature || '')); } catch { return false; }
+  return timingSafeEqual(got, await hmac(env.SESSION_SIGNING_KEY, `manifest:${manifestHash}`));
 }
 
 export async function signSession(env, { ttl = SESSION_TTL_SECONDS, now = Date.now() } = {}) {

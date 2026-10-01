@@ -40,6 +40,10 @@ export const SAFE_READS = Object.freeze([
   '/v1/admin/settings', '/v1/admin/week-plan', '/v1/admin/readiness', '/v1/admin/restatements', '/v1/admin/catalog-pushes',
   '/v1/admin/runs/[\\w-]+', '/v1/admin/catalog-refresh/[\\w-]+', `/v1/admin/cycles/${W}`,
   '/v1/admin/shipping-cost/versions', '/v1/admin/shipping-cost/versions/[\\w-]+', '/v1/admin/shipping-cost/segments', '/v1/admin/shipping-cost/effective',
+  // Free-tier path (read-only GETs; POST reads such as order-bodies count as writes)
+  `/v1/weeks/${W}/status`, `/v1/collect/weeks/${W}/status`, `/v1/collect/weeks/${W}/manifest`, `/v1/collect/weeks/${W}/aux`, '/v1/collect/catalog/cat_[0-9a-f]{16}/parts/[\\w-]+/\\d+',
+  '/v1/collect/sources/src_[0-9a-f]{20}', '/v1/collect/sources/src_[0-9a-f]{20}/segments/\\d+', '/v1/admin/scr/versions', '/v1/admin/scr/versions/scr_[0-9a-f]{20}',
+  '/v1/verify/pending', '/v1/verify/snapshots/snp_[0-9a-f]{20}', '/v1/verify/snapshots/snp_[0-9a-f]{20}/parts/(summary|sections|scenario|lines:\\d{1,4})',
 ].map(p => new RegExp(`^${p}$`)));
 
 /** True only for a GET the Worker serves without writing anything. */

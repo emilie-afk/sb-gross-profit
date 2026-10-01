@@ -16,6 +16,7 @@ import { selectIn } from './db.js';
 import { evaluateGate, canPublish } from '../../shared/gate.js';
 import { addDays } from '../../shared/normalized.js';
 import { totalsFromRow, orderRow, lineRow, breakdownRows, issueRows, reconRows } from '../../shared/resultParts.js';
+import { scrBasis } from './collectScr.js';
 import { weekWindowUtc, scheduledRunFor, nextRetryAt, pastCutoff, retryTimeline } from '../../shared/schedule.js';
 
 const J = v => JSON.stringify(v ?? null);
@@ -551,12 +552,24 @@ export async function publishSnapshot(env, snapshotId, actor) {
 
   const gate = JSON.parse(run.gate || '{"passed":false}');
   const settings = await getSettings(db);
+  // Free-tier path: a collector-computed draft stays provisional until the independent
+  // verifier has recomputed it and matched every order and aggregate.
+  if (snap.storage === 'chunked') {
+    const v = await db.prepare('SELECT status FROM verify_report WHERE snapshot_id = ?1').bind(snapshotId).first();
+    if (v?.status !== 'verified') throw new ApiError(409, 'not_publishable', `Publication refused: verification_${v?.status || 'pending'}`, { reason: `verification_${v?.status || 'pending'}` });
+  }
   const verdict = canPublish(gate, settings, env.PUBLICATION_ALLOWED);
   if (!verdict.allowed) throw new ApiError(409, 'not_publishable', `Publication refused: ${verdict.reason}`, { reason: verdict.reason });
   // C7/C8: the report basis the snapshot was computed on must still be the
   // week's basis NOW: every used version still accepted and still owning its
   // dates, and no newer version pending review. Anything else needs a revision.
-  if (gate.shippingReport?.versionId) {
+  if (snap.storage === 'chunked' && gate.shippingReport?.signature) {
+    const now = await scrBasis(db, snap.week_start, weekWindowUtc(snap.week_start, settings.store_timezone).endUtcExclusive);
+    if (now.basisStatus !== 'ok' || now.signature !== gate.shippingReport.signature) {
+      const reason = now.basisStatus === 'ok' && now.newerPending.length ? 'shipping_report_newer_pending' : 'shipping_report_basis_changed';
+      throw new ApiError(409, 'not_publishable', `Publication refused: ${reason}`, { reason });
+    }
+  } else if (gate.shippingReport?.versionId) {
     const ids = (gate.shippingReport.used?.length ? gate.shippingReport.used.map(u => u.versionId) : [gate.shippingReport.versionId]);
     const rows = await selectIn(db, 'SELECT version_id, status FROM shipping_cost_source_version WHERE version_id IN (SELECT value FROM json_each(?1))', ids);
     if (rows.length !== ids.length || rows.some(v => v.status !== 'accepted')) throw new ApiError(409, 'not_publishable', 'Publication refused: shipping_report_not_accepted', { reason: 'shipping_report_not_accepted' });

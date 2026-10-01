@@ -37,6 +37,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   shipping_coverage_aging_days: 14,
   // Fifth control. Locked false in C3 (validateSetting refuses true).
   provisional_publication_enabled: false,
+  // Free-tier Shipping Cost Report: per-row review threshold in cents (owner decision 2026-09-29: $100).
+  shipping_cost_review_cap_cents: 10000,
 });
 
 /**

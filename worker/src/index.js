@@ -7,6 +7,9 @@
  *   /v1/auth/*              password → session  dashboard
  *   /v1/weeks, /v1/snapshot/*, /v1/history, /v1/compare
  *                           session (published only) or X-Admin-Secret (?includeDrafts=1)
+ *   /v1/collect/*           X-Ingest-Secret     Free-tier path: sources, orders, SCR dates, results
+ *                           (read-only parts also X-Verify-Secret)
+ *   /v1/verify/*            X-Verify-Secret     independent verifier (Netlify Function gp-verify)
  *
  * The Worker never returns a secret, a D1 credential or customer data.
  */
@@ -21,6 +24,12 @@ import { adminCatalogFetch, adminCatalogBase } from './catalogFetch.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
 import { scheduledTick, automationStatus, acceptCycleCatalogReuse, adminCycleStatus } from './orchestrate.js';
 import { environmentGuard, bindEnvironment, isSafeRead } from './environment.js';
+import { requireOneOf } from './auth.js';
+import { openSource, putSegment, sealSource, getSourceMeta, getSegment } from './collectSources.js';
+import { uploadScrVersion, getScrDays, listScrVersions, getScrVersion, acceptScrVersion, rejectScrVersion, rollbackScrActivation } from './collectScr.js';
+import { ordersDiff, uploadOrders, getManifest, orderBodies, catalogPart, weekAux, openResults, putResultPart, finalizeResults } from './collectWeeks.js';
+import { pendingVerifications, verifyInputs, verifyPart, postVerifyReport } from './verifyRoutes.js';
+import { getWeekStatus } from './weekStatus.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -54,6 +63,42 @@ async function route(request, env) {
     if (p === '/v1/ingest/shipping-cost-report') return ingestShippingCostReport(request, env);
   }
 
+  // ── Free-tier collector path ──
+  if (p.startsWith('/v1/collect/')) {
+    const W = '(\\d{4}-\\d{2}-\\d{2})';
+    // Read-only parts, shared with the verifier.
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/manifest$`))) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); return getManifest(env, g[1]); }
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/aux$`))) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); return weekAux(env, g[1]); }
+    if (p === '/v1/collect/order-bodies' && m === 'POST') { requireOneOf(request, env, ['ingest', 'verify']); return orderBodies(request, env); }
+    if (p === '/v1/collect/scr/days' && m === 'POST') { requireOneOf(request, env, ['ingest', 'verify']); return getScrDays(request, env); }
+    if ((g = p.match(/^\/v1\/collect\/catalog\/(cat_[0-9a-f]{16})\/parts\/([\w-]+)\/(\d+)$/)) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); return catalogPart(env, g[1], g[2], g[3]); }
+    if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})$/)) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); return getSourceMeta(env, g[1]); }
+    if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/segments\/(\d+)$/)) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); return getSegment(env, g[1], g[2]); }
+    // Writes (and the week's collection status): the collector only.
+    requireSecret(request, env, 'ingest');
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/status$`))) && m === 'GET') return getWeekStatus(env, g[1]);
+    if (p === '/v1/collect/sources' && m === 'POST') return openSource(request, env);
+    if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/segments\/(\d+)$/)) && m === 'PUT') return putSegment(request, env, g[1], g[2]);
+    if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/seal$/)) && m === 'POST') return sealSource(request, env, g[1]);
+    if (p === '/v1/collect/scr/versions' && m === 'POST') return uploadScrVersion(request, env);
+    if (p === '/v1/collect/orders/diff' && m === 'POST') return ordersDiff(request, env);
+    if (p === '/v1/collect/orders' && m === 'POST') return uploadOrders(request, env);
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/results$`))) && m === 'POST') return openResults(request, env, g[1]);
+    if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/parts\/(summary|sections|scenario|lines:\d{1,4})$/)) && m === 'PUT') return putResultPart(request, env, g[1], g[2]);
+    if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/finalize$/)) && m === 'POST') return finalizeResults(request, env, g[1]);
+    throw new ApiError(404, 'not_found', 'No such route');
+  }
+
+  // ── Independent verifier ──
+  if (p.startsWith('/v1/verify/')) {
+    requireSecret(request, env, 'verify');
+    if (p === '/v1/verify/pending' && m === 'GET') return pendingVerifications(env);
+    if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})$/)) && m === 'GET') return verifyInputs(env, g[1]);
+    if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})\/parts\/(summary|sections|scenario|lines:\d{1,4})$/)) && m === 'GET') return verifyPart(env, g[1], g[2]);
+    if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})\/report$/)) && m === 'POST') return postVerifyReport(request, env, g[1]);
+    throw new ApiError(404, 'not_found', 'No such route');
+  }
+
   // ── Admin ──
   if (p.startsWith('/v1/admin/')) {
     requireSecret(request, env, 'admin');
@@ -85,6 +130,12 @@ async function route(request, env) {
     if ((g = p.match(/^\/v1\/admin\/shipping-cost\/activations\/([\w-]+)\/rollback$/)) && m === 'POST') return rollbackActivation(request, env, g[1]);
     if (p === '/v1/admin/shipping-cost/segments' && m === 'GET') return getSegments(env);
     if (p === '/v1/admin/shipping-cost/effective' && m === 'GET') return getEffectiveSummary(env);
+    // Free-tier Shipping Cost Report versions (date level)
+    if (p === '/v1/admin/scr/versions' && m === 'GET') return listScrVersions(env);
+    if ((g = p.match(/^\/v1\/admin\/scr\/versions\/(scr_[0-9a-f]{20})$/)) && m === 'GET') return getScrVersion(env, g[1]);
+    if ((g = p.match(/^\/v1\/admin\/scr\/versions\/(scr_[0-9a-f]{20})\/accept$/)) && m === 'POST') return acceptScrVersion(request, env, g[1]);
+    if ((g = p.match(/^\/v1\/admin\/scr\/versions\/(scr_[0-9a-f]{20})\/reject$/)) && m === 'POST') return rejectScrVersion(request, env, g[1]);
+    if ((g = p.match(/^\/v1\/admin\/scr\/activations\/(sca_[0-9a-f]{20})\/rollback$/)) && m === 'POST') return rollbackScrActivation(request, env, g[1]);
   }
 
   // ── Reads ──
@@ -93,6 +144,7 @@ async function route(request, env) {
     if (p === '/v1/history') return history(request, env, await requireReader(request, env));
     if (p === '/v1/automation/status') return automationStatus(request, env, await requireReader(request, env));
     if (p === '/v1/compare') return compare(request, env, await requireReader(request, env));
+    if ((g = p.match(/^\/v1\/weeks\/(\d{4}-\d{2}-\d{2})\/status$/))) { await requireReader(request, env); return getWeekStatus(env, g[1]); }
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})$/))) return getSnapshot(request, env, await requireReader(request, env), g[1]);
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/orders$/))) return listOrders(request, env, await requireReader(request, env), g[1]);
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/orders\/([^/]+)$/))) return getOrder(request, env, await requireReader(request, env), g[1], decodeURIComponent(g[2]));
