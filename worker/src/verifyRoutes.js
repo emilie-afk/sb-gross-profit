@@ -20,7 +20,7 @@ import { blobBytes } from './gz.js';
 const P = (s, d = null) => { try { return JSON.parse(s); } catch { return d; } };
 export const REPORT_STATUSES = ['verified', 'mismatch', 'unavailable'];
 export const PUBLIC_REPORT_KEYS = ['status', 'reason', 'ordersChecked', 'orderMismatches', 'sectionsChecked', 'sectionMismatches', 'sequenceMatches',
-  'provenanceChecked', 'provenanceMismatches', 'durationMs', 'engineVersion', 'verifierCommit'];
+  'provenanceChecked', 'provenanceMismatches', 'durationMs', 'engineVersion', 'verifierCommit', 'gateInputsMatch', 'gateMatches', 'gateHash'];
 const MAX_DIFF_CHARS = 256 * 1024;
 
 export async function pendingVerifications(env) {
@@ -43,8 +43,10 @@ export async function verifyInputs(env, id) {
   const { snapshot_id: _i, ...totals } = await db.prepare('SELECT * FROM snapshot_totals WHERE snapshot_id = ?1').bind(id).first() || {};
   const narrative = (await db.prepare('SELECT narrative FROM snapshot_narrative WHERE snapshot_id = ?1').bind(id).first())?.narrative ?? null;
   const index = P(u.idx, {});
+  const run = await db.prepare('SELECT gate FROM reporting_run WHERE run_id = ?1').bind(s.run_id).first();
   return json({ snapshotId: id, weekStart: s.week_start, revision: s.revision, status: s.status, manifestHash: u.manifest_hash,
-    manifest: P(u.manifest, {}), index: { engineVersion: index.engineVersion, parts: index.parts, orders: index.orders },
+    manifest: P(u.manifest, {}), index: { engineVersion: index.engineVersion, parts: index.parts, orders: index.orders, gateInputs: index.gateInputs ?? null },
+    gate: P(run?.gate, null),
     stored: { head: { engine_version: s.engine_version, catalog_rev: s.catalog_rev, policy: s.policy, profitability_status: s.profitability_status,
                       comparison_snapshot_id: s.comparison_snapshot_id, draft_comparison: s.draft_comparison }, totals, narrative } });
 }

@@ -424,7 +424,9 @@ export async function finalizeResults(request, env, id) {
   const gi = index.gateInputs;
   const gate = evaluateGate({ totals: gi.totals, reconciliation: gi.reconciliation, sources, catalog: { accepted: true, rev: info.rev, freshness },
                               settings, ordersInOtherTimezone, shippingC3: gi.shippingC3, shippingReport: basis });
-  const gateRecord = { ...gate, sources, shippingReport: basis, storeTimezone: settings.store_timezone, storeTimezoneConfirmed: settings.store_timezone_confirmed === true,
+  // Every Worker-owned fact the gate was evaluated with is recorded, so the verifier can re-evaluate it
+  // with its own recomputed totals, reconciliation and C3 shipping (the collector-supplied gate inputs).
+  const gateRecord = { ...gate, sources, shippingReport: basis, ordersInOtherTimezone, storeTimezone: settings.store_timezone, storeTimezoneConfirmed: settings.store_timezone_confirmed === true,
     catalog: { expectedRefreshId: info.refreshId || null, selectedRev: info.rev, capturedAt: info.capturedAt, basis: info.basis, freshness },
     computedBy: 'collector', verification: 'pending' };
   const revision = (maxRev.results?.[0]?.m || 0) + 1;

@@ -13,8 +13,9 @@ import { WORKER } from './actor.js';
 import { buildSnapshot, ENGINE_VERSION, SHIPPING_SOURCES } from '../../shared/snapshot.js';
 import { effectiveOrderTotals, activeSegments, contiguous } from './shippingCost.js';
 import { selectIn } from './db.js';
-import { evaluateGate, canPublish } from '../../shared/gate.js';
-import { addDays } from '../../shared/normalized.js';
+import { evaluateGate, canPublish, gateCore } from '../../shared/gate.js';
+import { addDays, stableStringify } from '../../shared/normalized.js';
+import { sha256Text } from './gz.js';
 import { totalsFromRow, orderRow, lineRow, breakdownRows, issueRows, reconRows } from '../../shared/resultParts.js';
 import { scrBasis } from './collectScr.js';
 import { weekWindowUtc, scheduledRunFor, nextRetryAt, pastCutoff, retryTimeline } from '../../shared/schedule.js';
@@ -582,8 +583,13 @@ export async function publishSnapshot(env, snapshotId, actor) {
   // Free-tier path: a collector-computed draft stays provisional until the independent
   // verifier has recomputed it and matched every order and aggregate.
   if (snap.storage === 'chunked') {
-    const v = await db.prepare('SELECT status FROM verify_report WHERE snapshot_id = ?1').bind(snapshotId).first();
+    const v = await db.prepare('SELECT status, report FROM verify_report WHERE snapshot_id = ?1').bind(snapshotId).first();
     if (v?.status !== 'verified') throw new ApiError(409, 'not_publishable', `Publication refused: verification_${v?.status || 'pending'}`, { reason: `verification_${v?.status || 'pending'}` });
+    // Publication uses the gate the verifier checked: its report names the hash of this exact gate decision.
+    const rep = JSON.parse(v.report || '{}');
+    if (rep.gateInputsMatch !== true || rep.gateMatches !== true || rep.gateHash !== await sha256Text(stableStringify(gateCore(gate)))) {
+      throw new ApiError(409, 'not_publishable', 'Publication refused: verification_gate_unchecked', { reason: 'verification_gate_unchecked' });
+    }
   }
   const verdict = canPublish(gate, settings, env.PUBLICATION_ALLOWED);
   if (!verdict.allowed) throw new ApiError(409, 'not_publishable', `Publication refused: ${verdict.reason}`, { reason: verdict.reason });

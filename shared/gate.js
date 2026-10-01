@@ -132,6 +132,10 @@ export function evaluateGate({ totals, reconciliation, sources, catalog, setting
            ...(shippingC3 ? { shippingSource: 'shipping_cost_report', shippingPublicationStatus: shippingC3.publicationShippingStatus ?? null } : {}) };
 }
 
+/** The decision part of a gate record (what evaluateGate returns), without the recorded context. */
+export const GATE_CORE_KEYS = ['passed', 'failures', 'warnings', 'shippingSource', 'shippingPublicationStatus'];
+export const gateCore = g => Object.fromEntries(GATE_CORE_KEYS.filter(k => g?.[k] !== undefined).map(k => [k, g[k]]));
+
 /**
  * Publication needs the gate AND the go-live switch. The switch is two locks:
  * the `publication_enabled` setting and the PUBLICATION_ALLOWED environment

@@ -9,6 +9,9 @@
  *   - every order (order row + its line rows) one by one,
  *   - every stored part byte-for-byte (order index, order and line parts, sections, scenario parts),
  *   - the stored snapshot head, totals row and narrative, and the order sequence;
+ *   - the publication-gate inputs the collector supplied (totals, reconciliation, C3 shipping)
+ *     against its own, and the stored gate decision against the gate re-evaluated with its own
+ *     inputs and the Worker-recorded facts; the report carries the hash of the gate it verified;
  * and re-derives inputs from the RETAINED sanitized sources (provenance):
  *   - each order body from the Shopify source it was taken from,
  *   - each Shipping Cost Report date the week depends on from its source.
@@ -28,10 +31,11 @@ import { sha256Hex, versionDays } from './scrDays.js';
 import { parseCSV } from './calculator.js';
 import { csvRowsToNormalizedOrders } from './adapters/legacy.js';
 import { parseShippingCostReport } from './adapters/shippingCostReport.js';
+import { evaluateGate, gateCore } from './gate.js';
 
 export const MAX_DIFFS = 50;
 export const PUBLIC_KEYS = ['status', 'reason', 'ordersChecked', 'orderMismatches', 'sectionsChecked', 'sectionMismatches', 'sequenceMatches',
-  'provenanceChecked', 'provenanceMismatches', 'durationMs', 'engineVersion'];
+  'provenanceChecked', 'provenanceMismatches', 'durationMs', 'engineVersion', 'gateInputsMatch', 'gateMatches', 'gateHash'];
 
 /** The only shape a caller or a log line may receive: allowlisted keys; numbers, booleans and short codes. */
 export function publicView(r) {
@@ -135,6 +139,20 @@ export async function verifySnapshot(inputs, api, { now = () => Date.now(), sour
   }
   const sequenceMatches = stableStringify((orderIndex.orders || []).map(t => t?.[0])) === stableStringify(snap.orders.map(o => o.orderName));
 
+  // Publication gate. Finalize evaluated it with the collector's gate inputs: they must equal this
+  // recomputation, and the stored decision must equal the gate re-evaluated with them and the facts
+  // the Worker recorded (sources, catalog freshness, orders in another time zone).
+  const g = inputs.gate;
+  if (!g || !('ordersInOtherTimezone' in g) || !g.catalog) return done('unavailable', { reason: 'gate_record_incomplete' });
+  const gateInputsMatch = stableStringify(inputs.index?.gateInputs ?? null) === stableStringify(re.gateInputs);
+  if (!gateInputsMatch) { const d = []; fieldDiffs(inputs.index?.gateInputs ?? null, re.gateInputs, 'gateInputs', d); diff.sections.push(...d.slice(0, MAX_DIFFS)); }
+  const regate = evaluateGate({ totals: re.gateInputs.totals, reconciliation: re.gateInputs.reconciliation, sources: g.sources,
+    catalog: { accepted: true, rev: g.catalog.selectedRev, freshness: g.catalog.freshness }, settings: manifest.settings,
+    ordersInOtherTimezone: g.ordersInOtherTimezone, shippingC3: re.gateInputs.shippingC3, shippingReport: manifest.shippingReportBasis });
+  const gateMatches = stableStringify(gateCore(g)) === stableStringify(gateCore(regate));
+  if (!gateMatches) { const d = []; fieldDiffs(gateCore(g), gateCore(regate), 'gate', d); diff.sections.push(...d.slice(0, MAX_DIFFS)); }
+  const gateHash = await sha256Hex(stableStringify(gateCore(g)));
+
   // 4. Provenance: re-derive the inputs from the retained sanitized sources.
   let provenanceChecked = 0, provenanceMismatches = 0;
   try {
@@ -161,9 +179,10 @@ export async function verifySnapshot(inputs, api, { now = () => Date.now(), sour
   } catch { return done('unavailable', { reason: 'sources_unreachable' }); }
   if (provenanceMismatches) diff.provenance = { mismatches: provenanceMismatches };
 
-  const counts = { ordersChecked: new Set([...storedOrders.keys(), ...reOrders.keys()]).size, orderMismatches, sectionsChecked: sections.length + 3,
-                   sectionMismatches, sequenceMatches, provenanceChecked, provenanceMismatches };
-  const ok = !orderMismatches && !sectionMismatches && sequenceMatches && !provenanceMismatches;
+  const counts = { ordersChecked: new Set([...storedOrders.keys(), ...reOrders.keys()]).size, orderMismatches, sectionsChecked: sections.length + 5,
+                   sectionMismatches: sectionMismatches + (gateInputsMatch ? 0 : 1) + (gateMatches ? 0 : 1), sequenceMatches, provenanceChecked, provenanceMismatches,
+                   gateInputsMatch, gateMatches, ...(gateInputsMatch && gateMatches ? { gateHash } : {}) };
+  const ok = !orderMismatches && !sectionMismatches && sequenceMatches && !provenanceMismatches && gateInputsMatch && gateMatches;
   return ok ? done('verified', counts) : done('mismatch', counts, diff);
 }
 
