@@ -669,7 +669,10 @@ def push_catalog():
     try:
         req = urllib.request.Request(url.rstrip('/') + '/v1/ingest/catalog',
                                      data=json.dumps(body).encode('utf-8'), method='POST',
-                                     headers={'Content-Type': 'application/json', 'X-Ingest-Secret': secret})
+                                     headers={'Content-Type': 'application/json', 'X-Ingest-Secret': secret,
+                                              # Cloudflare answers the default 'Python-urllib/x.y' agent with
+                                              # 403 'error code: 1010' before the Worker runs, so name the client.
+                                              'User-Agent': 'sb-gp-build/1.0 (+netlify build.py catalog push)'})
         with urllib.request.urlopen(req, timeout=30) as r:
             res = json.loads(r.read().decode('utf-8'))
         status = 'accepted' if res.get('accepted') else 'REJECTED'
