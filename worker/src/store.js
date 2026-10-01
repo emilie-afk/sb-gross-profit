@@ -235,7 +235,9 @@ export async function saveHpd(db, hpdOrders, runId) {
 
 export async function loadHpdForOrders(db, orderNumbers) {
   if (!orderNumbers.length) return [];
-  const rows = await selectIn(db, `SELECT * FROM hpd_order WHERE shopify_order_number IN (${IN})`, orderNumbers);
+  // Explicit order: without it the row order is whatever the query plan yields (today, key order).
+  const rows = (await selectIn(db, `SELECT * FROM hpd_order WHERE shopify_order_number IN (${IN}) ORDER BY shopify_order_number`, orderNumbers))
+    .sort((a, b) => (a.shopify_order_number < b.shopify_order_number ? -1 : a.shopify_order_number > b.shopify_order_number ? 1 : 0));   // global across IN-chunks
   const items = rows.length ? await selectIn(db, `SELECT * FROM hpd_item WHERE shopify_order_number IN (${IN}) ORDER BY shopify_order_number, seq`,
     rows.map(r => r.shopify_order_number)) : [];
   return rows.map(r => ({ shopifyOrderNumber: r.shopify_order_number, hpdOrderNumber: r.hpd_order_number, orderDate: r.order_date,
