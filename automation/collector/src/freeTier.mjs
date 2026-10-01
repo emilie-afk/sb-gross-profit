@@ -164,12 +164,18 @@ export async function computeAndUploadWeek(c, weekStart, cache) {
                   orders: r.orderStrings.map(([n, s]) => [n, sha(s)]), head: r.head, totals: r.totals, narrative: r.narrative, gateInputs: r.gateInputs };
   const open = await c.call('POST', `/v1/collect/weeks/${weekStart}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, signature: m.signature, index } });
   for (const name of open.missing) await c.call('PUT', `/v1/collect/results/${open.snapshotId}/parts/${name}`, { bytes: gz(r.parts[name]) });
-  try {
-    const f = await c.call('POST', `/v1/collect/results/${open.snapshotId}/finalize`, { json: {} });
-    return { weekStart, status: 'computed', snapshotId: f.snapshotId, revision: f.revision, snapshotStatus: f.status, orders: snap.orders.length };
-  } catch (e) {
-    if (e instanceof WorkerCallError && e.code === 'inputs_changed') return { weekStart, status: 'pending', code: 'inputs_changed' };
-    throw e;
+  // `inputs_moved`: something was written while the Worker finalized; the upload stays open and a
+  // retry commits if this week's inputs are still the pinned ones (else `inputs_changed`).
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const f = await c.call('POST', `/v1/collect/results/${open.snapshotId}/finalize`, { json: {} });
+      return { weekStart, status: 'computed', snapshotId: f.snapshotId, revision: f.revision, snapshotStatus: f.status, orders: snap.orders.length };
+    } catch (e) {
+      if (e instanceof WorkerCallError && e.code === 'inputs_changed') return { weekStart, status: 'pending', code: 'inputs_changed' };
+      if (e instanceof WorkerCallError && e.code === 'inputs_moved' && attempt < 4) continue;
+      if (e instanceof WorkerCallError && e.code === 'inputs_moved') return { weekStart, status: 'pending', code: 'inputs_moved' };
+      throw e;
+    }
   }
 }
 

@@ -778,8 +778,10 @@ The account stays on Workers Free (10 ms CPU per request; 100,000 D1 rows writte
 | Shipping Cost Report | `POST /v1/collect/scr/versions` (ingest) | groups reconcile with the validated segment sums; acceptance rules below | 1 per new or held date + 1 per activated date + 2 |
 | Orders | `POST /v1/collect/orders/diff`, `POST /v1/collect/orders` (ingest, ≤ 10) | hash, privacy guards, canonical stored form | 3 per new or changed order |
 | Manifest | `GET /v1/collect/weeks/:w/manifest` (ingest or verify) | pins what the Worker's own loaders would feed the engine; HMAC-signed | 0 |
-| Results | `POST /v1/collect/weeks/:w/results`, `PUT /v1/collect/results/:id/parts/:p`, `POST …/finalize` (ingest) | hash, capped gunzip, exact column allowlist, customer-field guard; at finalize the inputs must be unchanged, then gate + run + snapshot rows | ≈ 30 per week |
+| Results | `POST /v1/collect/weeks/:w/results`, `PUT /v1/collect/results/:id/parts/:p`, `POST …/finalize` (ingest) | hash, capped gunzip, exact column allowlist, customer-field guard; at finalize the inputs must be unchanged, and the input epoch is re-checked inside the commit transaction (`inputs_moved` → the collector retries finalize; a real change → `inputs_changed`, upload abandoned); then gate + run + snapshot rows | ≈ 30 per week |
 | Verification | `/v1/verify/*` (verify) | serves pinned inputs and stored parts; stores one report | 1 |
+
+**Input epoch (migration 0015).** Triggers increment `input_epoch.n` on every write to a table a week's manifest reads (settings, `ord_ptr`, `scr_day_owner`, `scr_version`, catalog tables, snapshots, shipments, HPD and HPD ingest status). Finalize reads the epoch with its manifest check and commits only if it is unchanged, so an upload that lands in between cannot finalize stale results.
 
 **Tables (migration 0012).** `src_object`, `src_segment`, `ord_body`, `ord_ptr`, `scr_version`, `scr_day`, `scr_day_owner`, `scr_activation`, `result_upload`, `snapshot_blob`, `verify_report`; `snapshot.storage` (`rows` | `chunked`) and `snapshot.manifest_hash`. Text-keyed tables are `WITHOUT ROWID`, so one row is one D1 write. The existing tables and routes are unchanged; the csv_text path, manual uploads and backfill keep working.
 

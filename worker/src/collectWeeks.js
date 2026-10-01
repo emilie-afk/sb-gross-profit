@@ -108,13 +108,21 @@ export async function uploadOrders(request, env) {
  * Reads go in three batches (one D1 round trip each) and through the same pure functions the
  * loaders use, so the request stays inside the Workers Free CPU limit.
  */
-export async function assembleManifest(env, weekStart) {
+export async function assembleManifest(env, weekStart) { return (await assemble(env, weekStart)).manifest; }
+
+/**
+ * The manifest and the input epoch read at the start of its first batch. Every write to a table
+ * the manifest reads increments the epoch (migration 0013 triggers), so an unchanged epoch at
+ * commit time proves no input moved after these reads began.
+ */
+async function assemble(env, weekStart) {
   if (!WEEK_RE.test(weekStart) || weekStartOf(weekStart) !== weekStart) throw new ApiError(400, 'bad_query', 'week must be a Monday (YYYY-MM-DD)');
   const db = env.DB;
   const now = Date.now(), weekEnd = addDays(weekStart, 6), prevWeek = addDays(weekStart, -7);
   const rs = r => r.results || [], one = r => rs(r)[0] || null;
   // Batch 1: everything keyed by the week alone.
   const b1 = await db.batch([
+    db.prepare('SELECT n FROM input_epoch WHERE id = 1'),
     db.prepare(SETTINGS_SQL),
     db.prepare('SELECT ship_date, version_id, day_hash FROM scr_day_owner WHERE ship_date BETWEEN ?1 AND ?2 ORDER BY ship_date').bind(weekStart, weekEnd),
     db.prepare('SELECT order_name, order_number, body_hash, source_id FROM ord_ptr WHERE week_start = ?1 ORDER BY order_name').bind(weekStart),
@@ -126,12 +134,13 @@ export async function assembleManifest(env, weekStart) {
     db.prepare(PREV_DRAFT_SQL).bind(prevWeek),
     db.prepare('SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1').bind(weekStart),
   ]);
-  const settings = settingsFromRows(rs(b1[0]));
-  const weekOwned = rs(b1[1]), orders = rs(b1[2]);
-  const anchor = anchorFromRows(one(b1[3]), one(b1[4]));
-  const info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[5]), now), latest: one(b1[6]) });
-  const prev = previousFromRows(one(b1[7]), one(b1[8]));
-  const last = one(b1[9]);
+  const epoch = one(b1[0])?.n ?? null;
+  const settings = settingsFromRows(rs(b1[1]));
+  const weekOwned = rs(b1[2]), orders = rs(b1[3]);
+  const anchor = anchorFromRows(one(b1[4]), one(b1[5]));
+  const info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[6]), now), latest: one(b1[7]) });
+  const prev = previousFromRows(one(b1[8]), one(b1[9]));
+  const last = one(b1[10]);
   const closedAt = weekWindowUtc(weekStart, settings.store_timezone).endUtcExclusive;
   const nums = [...new Set(orders.map(o => o.order_number))], numsJson = JSON.stringify(nums);
   const vids = [...new Set(weekOwned.map(o => o.version_id))];
@@ -173,7 +182,7 @@ export async function assembleManifest(env, weekStart) {
   const owners = [...new Map([...weekOwned, ...rs(b3[0])].map(o => [o.ship_date, o])).values()].sort((a, b) => (a.ship_date < b.ship_date ? -1 : 1));
   const known = weekKeys.length ? rs(b3[1]).map(r => r.order_number) : [];
   const versions = rs(b3[2]);
-  return {
+  return { epoch, manifest: {
     v: MANIFEST_VERSION, weekStart, engineVersion: ENGINE_VERSION, asOf: new Date(now).toISOString(), storeTimezone: settings.store_timezone, settings,
     catalog: { rev: info.rev, info, completeness: P(cat?.meta, {})?.completeness || null, parts: rs(b2[6]).map(p => [p.table_name, p.part]) },
     orders: orders.map(o => [o.order_name, o.body_hash, o.source_id]),
@@ -183,7 +192,7 @@ export async function assembleManifest(env, weekStart) {
     aux: { shipmentsHash: await auxHash(shipments), hpdHash: await auxHash(hpdOrders), shipments: shipments.length, hpdOrders: hpdOrders.length },
     previous: prev.published, previousDraft: prev.draft, previousShippingExpense: last ? last.e : null,
     shippingReportBasis: basis, publicationAllowedEnv: env.PUBLICATION_ALLOWED === 'true',
-  };
+  } };
 }
 const withoutAsOf = ({ asOf: _a, ...m }) => m;
 
@@ -343,8 +352,8 @@ export async function finalizeResults(request, env, id) {
   const missing = names.filter(n => !have.has(n));
   if (missing.length) throw new ApiError(409, 'parts_missing', `${missing.length} part(s) not uploaded yet`, { missing });
   // Inputs must be exactly what the manifest pinned: otherwise the result is for a stale week.
-  let current;
-  try { current = await assembleManifest(env, u.week_start); }
+  let current, epoch;
+  try { ({ manifest: current, epoch } = await assemble(env, u.week_start)); }
   catch (e) { if (e instanceof ApiError) { await db.prepare("UPDATE result_upload SET status = 'abandoned' WHERE snapshot_id = ?1").bind(id).run(); } throw e; }
   if (stableStringify(withoutAsOf(current)) !== stableStringify(withoutAsOf(pinned))) {
     await db.prepare("UPDATE result_upload SET status = 'abandoned' WHERE snapshot_id = ?1 AND status = 'open'").bind(id).run();
@@ -370,6 +379,8 @@ export async function finalizeResults(request, env, id) {
   const head = index.head, totals = P(index.totals);
   const tcols = TOTALS_COLUMNS.map(c => c[0]);
   const stmts = [
+    // No input changed since the re-assembled manifest was read (checked inside this transaction).
+    db.prepare('INSERT INTO input_epoch_guard (ok) SELECT NULL WHERE NOT ((SELECT n FROM input_epoch WHERE id = 1) IS ?1)').bind(epoch),
     guard(db, "EXISTS (SELECT 1 FROM result_upload WHERE snapshot_id = ?1 AND status = 'open') AND NOT EXISTS (SELECT 1 FROM snapshot WHERE snapshot_id = ?1)", id),
     ...createRunStatements(db, runId, u.week_start, 'collector', COLLECTOR, 'collector-computed week', at),
     transitionStmt(db, runId, 'created', 'computing', at, COLLECTOR, null),
@@ -388,6 +399,9 @@ export async function finalizeResults(request, env, id) {
   ];
   try { await atomic(db, stmts); }
   catch (e) {
+    // The upload stays open: a retry re-checks the inputs and either commits (nothing this week reads
+    // changed) or answers inputs_changed and abandons the upload.
+    if (/NOT NULL constraint failed: input_epoch_guard/i.test(String(e?.message || e))) throw new ApiError(409, 'inputs_moved', 'An input was written while this week was being finalized; retry finalize');
     if (/NOT NULL constraint failed: write_guard/i.test(String(e?.message || e))) throw new ApiError(409, 'concurrent_finalize', 'This upload was finalized or closed concurrently');
     throw e;
   }
