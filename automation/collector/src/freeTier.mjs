@@ -105,8 +105,10 @@ export async function uploadShippingCostReport(c, payload) {
   const parsed = parseShippingCostReport(parseCSV(payload.text.replace(/^\uFEFF/, '')), { requestedFrom: from, requestedTo: to });
   const src = await uploadSource(c, { kind: 'shipping_cost_report', text: payload.text, window: { from, to }, exportedAt, cents: parsed.shippingCostCents });
   const days = await versionDays(parsed.rows, from, to);
+  // Dates identical to their current owner go as their hash alone: the Worker's work then grows with the changed dates.
+  const owned = new Map((await c.call('POST', '/v1/collect/scr/owners', { json: { from, to } })).owners);
   const v = await c.call('POST', '/v1/collect/scr/versions', { json: { sourceId: src.sourceId, requestedFrom: from, requestedTo: to, exportedAt,
-    days: days.map(d => [d.date, d.groups]) } });
+    days: days.map(d => (owned.get(d.date) === d.hash ? [d.date, null, d.hash] : [d.date, d.groups])) } });
   return { sourceId: src.sourceId, sourceStatus: src.status, versionId: v.versionId, status: v.status, reviewReasons: v.reviewReasons || [],
            counts: v.counts || {}, heldDates: v.heldDates || [], affectedWeeks: v.affectedWeeks || [] };
 }

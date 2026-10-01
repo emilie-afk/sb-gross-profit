@@ -1,7 +1,11 @@
 /**
  * collectScr.js — Shipping Cost Report versions at ship-date level (Free-tier path)
  * ================================================================================
- * POST /v1/collect/scr/versions            { sourceId, requestedFrom, requestedTo, exportedAt, days: [[date, groups]] }
+ * POST /v1/collect/scr/owners              { from, to } → { owners: [[date, dayHash]] }            (ingest)
+ * POST /v1/collect/scr/versions            { sourceId, requestedFrom, requestedTo, exportedAt, days: [[date, groups] | [date, null, dayHash]] }
+ *                                          A date identical to its current owner may be sent as its hash alone
+ *                                          (checked against the owner and the validated segment sums), so the
+ *                                          request's work grows with the CHANGED dates, not the window.
  * POST /v1/collect/scr/days                { keys: [[versionId, date]] } → groups   (ingest or verify)
  * GET  /v1/admin/scr/versions              list (codes and counts only)
  * GET  /v1/admin/scr/versions/:id          one version: per-date outcomes; held dates with per-order before/after (admin only)
@@ -76,7 +80,8 @@ function checkDays(b, summary) {
   const want = []; for (let d = b.requestedFrom; d <= b.requestedTo; d = addDays(d, 1)) want.push(d);
   if (want.length > MAX_DAYS) throw new ApiError(400, 'bad_payload', `At most ${MAX_DAYS} days per version`);
   if (b.days.length !== want.length || b.days.some((x, i) => !Array.isArray(x) || x[0] !== want[i])) throw new ApiError(400, 'bad_payload', 'days must list every date of the requested range once, in order');
-  for (const [date, groups] of b.days) {
+  for (const [date, groups, hash] of b.days) {
+    if (groups === null) { if (!/^[0-9a-f]{64}$/.test(hash || '')) throw new ApiError(400, 'bad_payload', 'A date without groups needs its day hash'); continue; }
     if (!Array.isArray(groups)) throw new ApiError(400, 'bad_payload', 'groups must be an array');
     let prev = '', cents = 0, rows = 0;
     for (const g of groups) {
@@ -103,10 +108,23 @@ export async function uploadScrVersion(request, env) {
   checkDays(b, summary);
 
   const s = await getSettings(db);
-  const days = [];
-  for (const [date, groups] of b.days) days.push({ date, groups, hash: await dayHash(date, groups),
-    costCents: groups.reduce((n, g) => n + g[1], 0), rowCount: groups.reduce((n, g) => n + g[2], 0) });
   const own = await owners(db, b.requestedFrom, b.requestedTo);
+  // Dates sent as a hash alone must be identical to their current owner, whose stored sums must
+  // equal the sums this source's validated segments recorded for the date.
+  const hashOnly = b.days.filter(x => x[1] === null);
+  if (hashOnly.length) {
+    if (hashOnly.some(([date, , hash]) => own.get(date)?.dayHash !== hash)) throw new ApiError(409, 'day_hash_unknown', 'A date sent as a hash is not identical to its current owner; send its groups');
+    const sums = new Map(((await selectIn(db, `SELECT d.ship_date, d.cost_cents, d.row_count FROM scr_day d
+        JOIN json_each(?1) j ON d.version_id = json_extract(j.value, '$[0]') AND d.ship_date = json_extract(j.value, '$[1]')`, hashOnly.map(([date]) => [own.get(date).versionId, date]))))
+      .map(r => [r.ship_date, [r.cost_cents, r.row_count]]));
+    for (const [date] of hashOnly) {
+      const seg = summary.perDate[date] || [0, 0], o = sums.get(date);
+      if (!o || o[0] !== seg[0] || o[1] !== seg[1]) throw new ApiError(400, 'groups_mismatch', 'The groups do not reconcile with the validated segments for a date');
+    }
+  }
+  const days = [];
+  for (const [date, groups, hash] of b.days) days.push(groups === null ? { date, groups: null, hash, hashOnly: true }
+    : { date, groups, hash: await dayHash(date, groups), costCents: groups.reduce((n, g) => n + g[1], 0), rowCount: groups.reduce((n, g) => n + g[2], 0) });
   const cov = await coverage(db);
   const reasons = versionReviewReasons({ flags: summary.flags || {}, firstVersion: !cov, coverage: cov, from: b.requestedFrom, to: b.requestedTo,
                                          exportedAt: declared.exportedAt || b.exportedAt, timeZone: s.shipping_report_timezone || 'America/Los_Angeles' });
@@ -121,6 +139,7 @@ export async function uploadScrVersion(request, env) {
   const outcome = {};
   for (const d of days) {
     const o = own.get(d.date);
+    if (d.hashOnly) { d.outcome = 'identical'; outcome[d.date] = d.outcome; continue; }
     d.outcome = classifyDay({ day: d, owner: o ? { ...o, groups: ownerGroups.get(`${o.versionId}|${d.date}`) || [] } : null, acceptedKeys: accepted });
     outcome[d.date] = d.outcome;
   }
@@ -167,6 +186,14 @@ function activationStatements(db, { activationId, versionId, at, actorCls, days,
 }
 
 // ─── Reads shared by the collector and the verifier ───────────────────────────
+
+/** The current owner hash of every owned date in [from, to] (≤ MAX_DAYS): lets the collector send unchanged dates as a hash. */
+export async function getScrOwners(request, env) {
+  const b = await readJson(request);
+  if (!DATE.test(b.from || '') || !DATE.test(b.to || '') || b.from > b.to || addDays(b.from, MAX_DAYS) <= b.to) throw new ApiError(400, 'bad_payload', `from / to: YYYY-MM-DD, at most ${MAX_DAYS} days`);
+  const own = await owners(env.DB, b.from, b.to);
+  return json({ owners: [...own].sort((x, y) => (x[0] < y[0] ? -1 : 1)).map(([d, o]) => [d, o.dayHash]) });
+}
 
 export async function getScrDays(request, env) {
   const b = await readJson(request);

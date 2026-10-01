@@ -775,7 +775,7 @@ The account stays on Workers Free (10 ms CPU per request; 100,000 D1 rows writte
 | Step | Route (credential) | Worker work | Writes |
 | --- | --- | --- | --- |
 | Source file | `POST /v1/collect/sources`, `PUT …/segments/:n`, `POST …/seal` (ingest) | hash, capped gunzip, CSV parse, the same privacy guards; a failure rejects the whole file (codes only) | 1 per segment + 2 |
-| Shipping Cost Report | `POST /v1/collect/scr/versions` (ingest) | groups reconcile with the validated segment sums; acceptance rules below | 1 per new or held date + 1 per activated date + 2 |
+| Shipping Cost Report | `POST /v1/collect/scr/owners`, `POST /v1/collect/scr/versions` (ingest) | groups reconcile with the validated segment sums; a date identical to its current owner is sent as its hash alone (checked against the owner and the segment sums), so the work grows with the changed dates; acceptance rules below | 1 per new or held date + 1 per activated date + 2 |
 | Orders | `POST /v1/collect/orders/diff`, `POST /v1/collect/orders` (ingest, ≤ 10) | hash, privacy guards, canonical stored form | 3 per new or changed order |
 | Manifest | `GET /v1/collect/weeks/:w/manifest` (ingest or verify) | pins what the Worker's own loaders would feed the engine; HMAC-signed | 0 |
 | Results | `POST /v1/collect/weeks/:w/results`, `PUT /v1/collect/results/:id/parts/:p`, `POST …/finalize` (ingest) | hash, capped gunzip, exact column allowlist, customer-field guard; at finalize the inputs must be unchanged, and the input epoch is re-checked inside the commit transaction (`inputs_moved` → the collector retries finalize; a real change → `inputs_changed`, upload abandoned); then gate + run + snapshot rows | ≈ 30 per week |
