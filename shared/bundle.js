@@ -19,7 +19,7 @@ import { buildSnapshot, SHIPPING_SOURCES, ENGINE_VERSION } from './snapshot.js';
 import { effectiveFromDays, reportFromDays, sha256Hex, dayHash } from './scrDays.js';
 import { catalogRevOf } from './catalog.js';
 
-export const MANIFEST_VERSION = 2;   // 2: aux hashes are over the served JSON (see auxHash)
+export const MANIFEST_VERSION = 3;   // 2: aux hashes over the served JSON; 3: bounded result parts (orders:k, orderindex, scenario:j)
 
 // ─── SQLite column affinity, as D1 applies it on insert ────────────────────────
 const nul = v => (v === undefined ? null : v);

@@ -4,6 +4,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stableStringify } from '../shared/normalized.js';
 import { dataset } from '../worker/test/freeTierHarness.mjs';
+import { dayCanonical, versionDays } from '../shared/scrDays.js';
+import { parseShippingCostReport } from '../shared/adapters/shippingCostReport.js';
+import { parseCSV } from '../shared/calculator.js';
 
 function reference(v) {
   if (Array.isArray(v)) return `[${v.map(reference).join(',')}]`;
@@ -28,4 +31,13 @@ test('stableStringify: identical to the map/join form on random values, sparse a
   for (const v of [sparse, new Date(0), { d: new Date(0) }, [], {}, 'x', 5, null, undefined, [[[]]], { a: { b: { c: [] } } }]) assert.equal(stableStringify(v), reference(v));
   const d = dataset({ n: 400 });
   for (const v of [d.catalog, d.shopify, d.scr, d.meta]) assert.equal(stableStringify(v), reference(v));
+});
+
+test('dayCanonical: native JSON equals the key-sorted form for every date of a full report', async () => {
+  const d = dataset({ n: 400 });
+  const rows = parseShippingCostReport(parseCSV(d.scr.text), { requestedFrom: d.scr.requestedFrom, requestedTo: d.scr.requestedTo }).rows;
+  const days = await versionDays(rows, d.scr.requestedFrom, d.scr.requestedTo);
+  assert.ok(days.some(x => x.groups.length > 1));
+  for (const x of days) assert.equal(dayCanonical(x.date, x.groups), stableStringify({ date: x.date, groups: x.groups }));
+  assert.equal(dayCanonical('2026-08-03', []), stableStringify({ date: '2026-08-03', groups: [] }));
 });

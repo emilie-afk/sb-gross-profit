@@ -51,7 +51,12 @@ export async function sha256Hex(text) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
-export const dayCanonical = (date, groups) => stableStringify({ date, groups });
+/**
+ * Canonical form of one date: `{"date":…,"groups":[[key,cents,rows],…]}`. Groups hold only strings
+ * and integers, and the keys are already in sorted order, so native JSON gives exactly the
+ * key-sorted form (stableStringify) at a fraction of the CPU; the hash is unchanged.
+ */
+export const dayCanonical = (date, groups) => JSON.stringify({ date, groups });
 export const dayHash = (date, groups) => sha256Hex(dayCanonical(date, groups));
 
 /** Every date of [from, to] with its groups (dates without rows get []), plus hash and sums. */
@@ -164,6 +169,9 @@ export const REVIEW_FLAGS = ['zero_shipping_cost', 'over_review_cap', 'nonzero_i
  * Version-level review reasons (codes only). Any reason → pending_review,
  * nothing activated until an administrator decides.
  */
+const DATE_FORMATTERS = new Map();
+const dateFormatter = timeZone => DATE_FORMATTERS.get(timeZone)
+  || DATE_FORMATTERS.set(timeZone, new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })).get(timeZone);
 export function versionReviewReasons({ flags, firstVersion, coverage, from, to, exportedAt, timeZone }) {
   const reasons = [];
   if (firstVersion) reasons.push('first_version');
@@ -171,7 +179,7 @@ export function versionReviewReasons({ flags, firstVersion, coverage, from, to, 
   if (coverage && (from > addDays(coverage.to, 1) || to < addDays(coverage.from, -1))) reasons.push('coverage_gap');
   if (!exportedAt) reasons.push('export_time_unknown');
   else {
-    const exportDate = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(exportedAt));
+    const exportDate = dateFormatter(timeZone).format(new Date(exportedAt));
     if (exportDate <= to) reasons.push('possible_incomplete_trailing_date');
   }
   return reasons;

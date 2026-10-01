@@ -162,7 +162,7 @@ export async function computeAndUploadWeek(c, weekStart, cache) {
   const r = resultParts(snap, ENGINE_VERSION);
   const index = { engineVersion: ENGINE_VERSION, parts: Object.fromEntries(Object.entries(r.parts).map(([k, s]) => [k, sha(s)])),
                   orders: r.orderStrings.map(([n, s]) => [n, sha(s)]), head: r.head, totals: r.totals, narrative: r.narrative, gateInputs: r.gateInputs };
-  const open = await c.call('POST', `/v1/collect/weeks/${weekStart}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, signature: m.signature, index } });
+  const open = await c.call('POST', `/v1/collect/weeks/${weekStart}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, epoch: m.epoch, signature: m.signature, index } });
   for (const name of open.missing) await c.call('PUT', `/v1/collect/results/${open.snapshotId}/parts/${name}`, { bytes: gz(r.parts[name]) });
   // `inputs_moved`: something was written while the Worker finalized; the upload stays open and a
   // retry commits if this week's inputs are still the pinned ones (else `inputs_changed`).

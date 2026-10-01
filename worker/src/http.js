@@ -19,6 +19,10 @@ const SECURITY_HEADERS = {
 export function json(body, status = 200, headers = {}) {
   return new Response(JSON.stringify(body), { status, headers: { ...SECURITY_HEADERS, ...headers } });
 }
+/** A JSON body already serialized (same headers as json()). */
+export function jsonText(text, status = 200, headers = {}) {
+  return new Response(text, { status, headers: { ...SECURITY_HEADERS, ...headers } });
+}
 
 export function errorResponse(err, runId = null) {
   if (err instanceof ApiError) {

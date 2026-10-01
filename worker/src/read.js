@@ -6,11 +6,11 @@
  * Nothing here returns raw source rows in bulk: order detail is paginated or
  * fetched one order at a time.
  */
-import { ApiError, json, intParam, WEEK_RE } from './http.js';
+import { ApiError, json, jsonText, intParam, WEEK_RE } from './http.js';
 import { totalsFromRow } from './compute.js';
 import { gunzipCapped, blobBytes } from './gz.js';
 import { verificationOf } from './verifyRoutes.js';
-import { scenarioLines } from '../../shared/resultParts.js';
+import { scenarioLines, indexRow } from '../../shared/resultParts.js';
 
 const P = (s, d) => { try { return s === null || s === undefined ? d : JSON.parse(s); } catch { return d; } };
 
@@ -53,6 +53,17 @@ async function part(db, s, name) {
   if (!r) throw new ApiError(500, 'snapshot_part_missing', 'A stored part of this snapshot is missing');
   return JSON.parse(await gunzipCapped(blobBytes(r.body), PART_CAP));
 }
+/** Several parts in one query → Map name → gunzipped text. */
+async function partTexts(db, s, names) {
+  if (!names.length) return new Map();
+  const rows = (await db.prepare('SELECT part, body FROM snapshot_blob WHERE snapshot_id = ?1 AND part IN (SELECT value FROM json_each(?2))').bind(s.snapshot_id, JSON.stringify(names)).all()).results || [];
+  if (rows.length !== names.length) throw new ApiError(500, 'snapshot_part_missing', 'A stored part of this snapshot is missing');
+  const out = new Map();
+  for (const r of rows) out.set(r.part, await gunzipCapped(blobBytes(r.body), PART_CAP));
+  return out;
+}
+/** The order index: one tuple per order (engine order) with list fields and the part k holding the order. */
+const orderIndex = async (db, s) => (await part(db, s, 'orderindex')).orders.map(indexRow);
 /** SQLite ORDER BY semantics for one key: NULLs first ascending, last descending; numbers numerically, text binary. */
 const sqlCmp = (key, desc = false) => (a, b) => {
   const x = a[key], y = b[key];
@@ -139,13 +150,19 @@ export async function listOrders(request, env, reader, weekStart) {
   const sort = url.searchParams.get('sort') || 'gp_asc';
   if (!ORDER_SORTS[sort]) throw new ApiError(400, 'bad_query', `sort must be one of ${Object.keys(ORDER_SORTS).join(', ')}`);
   if (s.storage === 'chunked') {
+    // Filter and sort on the compact index; read only the parts that hold the page's orders
+    // (parts group orders in gp_asc order, so the default sort touches one or two parts).
     const q = url.searchParams;
-    const rows = (await part(env.DB, s, 'summary')).orders.filter(o =>
+    const idx = (await orderIndex(env.DB, s)).filter(o =>
       (q.get('missingCost') !== 'true' || o.missing_cost_lines > 0) &&
       (q.get('missingShipping') !== 'true' || o.shipping_expense_status === 'missing_shipstation_rate') &&
       (!q.get('channel') || o.channel === q.get('channel')) && (!q.get('category') || o.order_cat === q.get('category')) &&
       (!q.get('status') || o.profitability_status === q.get('status'))).sort(ORDER_SORT_FNS[sort]);
-    return json({ ...header(s, reader), page: { offset, limit, total: rows.length }, sort, orders: rows.slice(offset, offset + limit).map(orderOut) });
+    const page = idx.slice(offset, offset + limit);
+    const texts = await partTexts(env.DB, s, [...new Set(page.map(o => `orders:${o.part}`))]);
+    const rows = new Map();
+    for (const t of texts.values()) for (const o of JSON.parse(t).orders) rows.set(o.order_name, o);
+    return json({ ...header(s, reader), page: { offset, limit, total: idx.length }, sort, orders: page.map(o => orderOut(rows.get(o.order_name))) });
   }
   const where = ['snapshot_id = ?1']; const vals = [s.snapshot_id];
   const add = (cond, v) => { vals.push(v); where.push(cond.replace('?', `?${vals.length}`)); };
@@ -182,9 +199,12 @@ export async function getOrder(request, env, reader, weekStart, orderName) {
   const s = await pickSnapshot(env.DB, weekStart, url, reader);
   let o, lines;
   if (s.storage === 'chunked') {
-    const sum = await part(env.DB, s, 'summary');
-    o = sum.orders.find(x => x.order_name === orderName);
-    if (o) lines = (await part(env.DB, s, `lines:${sum.part[orderName]}`)).lines.filter(l => l.order_name === orderName).sort(sqlCmp('line_index'));
+    const hit = (await orderIndex(env.DB, s)).find(x => x.order_name === orderName);
+    if (hit) {
+      const texts = await partTexts(env.DB, s, [`orders:${hit.part}`, `lines:${hit.part}`]);
+      o = JSON.parse(texts.get(`orders:${hit.part}`)).orders.find(x => x.order_name === orderName);
+      lines = JSON.parse(texts.get(`lines:${hit.part}`)).lines.filter(l => l.order_name === orderName).sort(sqlCmp('line_index'));
+    }
   } else {
     o = await env.DB.prepare('SELECT * FROM snapshot_order WHERE snapshot_id = ?1 AND order_name = ?2').bind(s.snapshot_id, orderName).first();
     lines = (await env.DB.prepare('SELECT * FROM snapshot_line WHERE snapshot_id = ?1 AND order_name = ?2 ORDER BY line_index')
@@ -219,7 +239,15 @@ export async function listIssues(request, env, reader, weekStart) {
 export async function scenarioInput(request, env, reader, weekStart) {
   const url = new URL(request.url);
   const s = await pickSnapshot(env.DB, weekStart, url, reader);
-  if (s.storage === 'chunked') return json({ ...header(s, reader), lines: (await part(env.DB, s, 'scenario')).lines });
+  if (s.storage === 'chunked') {
+    // The scenario parts' texts are canonical `{"lines":[…]}`: their arrays are joined as text, not parsed and re-serialized.
+    const names = ((await env.DB.prepare("SELECT part FROM snapshot_blob WHERE snapshot_id = ?1 AND part LIKE 'scenario:%'").bind(s.snapshot_id).all()).results || [])
+      .map(r => r.part).sort((a, b) => Number(a.slice(9)) - Number(b.slice(9)));
+    const texts = await partTexts(env.DB, s, names);
+    const inner = names.map(n => { const t = texts.get(n); if (!t.startsWith('{"lines":[') || !t.endsWith(']}')) throw new ApiError(500, 'snapshot_part_invalid', 'A stored scenario part is not canonical'); return t.slice(10, -2); }).filter(Boolean);
+    const head = JSON.stringify(header(s, reader));
+    return jsonText(`${head.slice(0, -1)}${head.length > 2 ? ',' : ''}"lines":[${inner.join(',')}]}`);
+  }
   const orders = (await env.DB.prepare('SELECT order_name, ship_collected, ship_paid, business_date FROM snapshot_order WHERE snapshot_id = ?1')
     .bind(s.snapshot_id).all()).results || [];
   const lines = (await env.DB.prepare('SELECT * FROM snapshot_line WHERE snapshot_id = ?1 ORDER BY order_name, line_index').bind(s.snapshot_id).all()).results || [];

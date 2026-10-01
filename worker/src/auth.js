@@ -118,10 +118,13 @@ export function requireOneOf(request, env, classes) {
  * Free-tier path: the Worker signs each week manifest it issues, so a manifest
  * returned with results is known to be the Worker's own (no D1 write to remember it).
  */
-export const signManifest = async (env, manifestHash) => b64url(await hmac(env.SESSION_SIGNING_KEY, `manifest:${manifestHash}`));
-export async function manifestSignatureValid(env, manifestHash, signature) {
+const manifestMessage = (manifestHash, epoch) => `manifest:${manifestHash}:epoch:${epoch}`;
+/** Signs the manifest hash together with the input epoch it was assembled at. */
+export const signManifest = async (env, manifestHash, epoch) => b64url(await hmac(env.SESSION_SIGNING_KEY, manifestMessage(manifestHash, epoch)));
+export async function manifestSignatureValid(env, manifestHash, signature, epoch) {
+  if (!Number.isInteger(epoch) || epoch < 0) return false;
   let got; try { got = fromB64url(String(signature || '')); } catch { return false; }
-  return timingSafeEqual(got, await hmac(env.SESSION_SIGNING_KEY, `manifest:${manifestHash}`));
+  return timingSafeEqual(got, await hmac(env.SESSION_SIGNING_KEY, manifestMessage(manifestHash, epoch)));
 }
 
 export async function signSession(env, { ttl = SESSION_TTL_SECONDS, now = Date.now() } = {}) {

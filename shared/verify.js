@@ -7,7 +7,7 @@
  * shared engine, derives the result parts exactly as the collector must have,
  * and compares:
  *   - every order (order row + its line rows) one by one,
- *   - every stored part byte-for-byte (summary, line parts, sections, scenario),
+ *   - every stored part byte-for-byte (order index, order and line parts, sections, scenario parts),
  *   - the stored snapshot head, totals row and narrative, and the order sequence;
  * and re-derives inputs from the RETAINED sanitized sources (provenance):
  *   - each order body from the Shopify source it was taken from,
@@ -58,10 +58,11 @@ function fieldDiffs(a, b, path, out) {
 const parse = s => { try { return JSON.parse(s); } catch { return null; } };
 
 /** The per-order strings the stored parts imply (same construction as resultParts). */
-function storedOrderStrings(summary, lineParts) {
+function storedOrderStrings(orderParts, lineParts) {
   const byOrder = new Map();
-  for (const p of lineParts) for (const l of p.lines) (byOrder.get(l.order_name) || byOrder.set(l.order_name, []).get(l.order_name)).push(l);
-  return new Map(summary.orders.map(o => [o.order_name, stableStringify({ order: o, lines: byOrder.get(o.order_name) || [] })]));
+  const lines = lineParts.flatMap(p => p.lines).sort((a, b) => (a.order_name < b.order_name ? -1 : a.order_name > b.order_name ? 1 : a.line_index - b.line_index));
+  for (const l of lines) (byOrder.get(l.order_name) || byOrder.set(l.order_name, []).get(l.order_name)).push(l);
+  return new Map(orderParts.flatMap(p => p.orders).map(o => [o.order_name, stableStringify({ order: o, lines: byOrder.get(o.order_name) || [] })]));
 }
 
 /**
@@ -108,7 +109,7 @@ export async function verifySnapshot(inputs, api, { now = () => Date.now(), sour
     const a = storedParts[name], b = re.parts[name];
     if (a !== undefined && b !== undefined && await sha256Hex(a) === await sha256Hex(b) && index.parts[name] === await sha256Hex(b)) continue;
     sectionMismatches++;
-    if (!name.startsWith('lines:') && name !== 'summary') { const d = []; fieldDiffs(parse(a ?? 'null'), parse(b ?? 'null'), name, d); diff.sections.push(...d.slice(0, MAX_DIFFS)); }
+    if (!name.startsWith('lines:') && !name.startsWith('orders:')) { const d = []; fieldDiffs(parse(a ?? 'null'), parse(b ?? 'null'), name, d); diff.sections.push(...d.slice(0, MAX_DIFFS)); }
   }
   for (const [name, a, b] of [['head', stored.head, re.head], ['totals', stored.totals, parse(re.totals)], ['narrative', parse(stored.narrative ?? 'null'), parse(re.narrative)]]) {
     if (stableStringify(a ?? null) === stableStringify(b ?? null)) continue;
@@ -116,9 +117,10 @@ export async function verifySnapshot(inputs, api, { now = () => Date.now(), sour
     const d = []; fieldDiffs(a ?? null, b ?? null, name, d); diff.sections.push(...d.slice(0, MAX_DIFFS));
   }
   // 3. Every order, one by one.
-  const summary = parse(storedParts.summary) || { orders: [] };
+  const orderParts = Object.keys(storedParts).filter(n => n.startsWith('orders:')).map(n => parse(storedParts[n]) || { orders: [] });
   const lineParts = Object.keys(storedParts).filter(n => n.startsWith('lines:')).map(n => parse(storedParts[n]) || { lines: [] });
-  const storedOrders = storedOrderStrings(summary, lineParts);
+  const storedOrders = storedOrderStrings(orderParts, lineParts);
+  const orderIndex = parse(storedParts.orderindex) || { orders: [] };
   const reOrders = new Map(re.orderStrings);
   const idxOrders = new Map(index.orders);
   let orderMismatches = 0;
@@ -131,7 +133,7 @@ export async function verifySnapshot(inputs, api, { now = () => Date.now(), sour
       for (const x of d.slice(0, MAX_DIFFS - diff.orders.length)) diff.orders.push({ order: n, ...x });
     }
   }
-  const sequenceMatches = stableStringify(summary.orders.map(o => o.order_name)) === stableStringify(snap.orders.map(o => o.orderName));
+  const sequenceMatches = stableStringify((orderIndex.orders || []).map(t => t?.[0])) === stableStringify(snap.orders.map(o => o.orderName));
 
   // 4. Provenance: re-derive the inputs from the retained sanitized sources.
   let provenanceChecked = 0, provenanceMismatches = 0;

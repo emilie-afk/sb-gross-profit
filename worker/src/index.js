@@ -84,7 +84,7 @@ async function route(request, env) {
     if (p === '/v1/collect/orders/diff' && m === 'POST') return ordersDiff(request, env);
     if (p === '/v1/collect/orders' && m === 'POST') return uploadOrders(request, env);
     if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/results$`))) && m === 'POST') return openResults(request, env, g[1]);
-    if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/parts\/(summary|sections|scenario|lines:\d{1,4})$/)) && m === 'PUT') return putResultPart(request, env, g[1], g[2]);
+    if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/parts\/(orderindex|sections|orders:\d{1,4}|lines:\d{1,4}|scenario:\d{1,4})$/)) && m === 'PUT') return putResultPart(request, env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/finalize$/)) && m === 'POST') return finalizeResults(request, env, g[1]);
     throw new ApiError(404, 'not_found', 'No such route');
   }
@@ -94,7 +94,7 @@ async function route(request, env) {
     requireSecret(request, env, 'verify');
     if (p === '/v1/verify/pending' && m === 'GET') return pendingVerifications(env);
     if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})$/)) && m === 'GET') return verifyInputs(env, g[1]);
-    if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})\/parts\/(summary|sections|scenario|lines:\d{1,4})$/)) && m === 'GET') return verifyPart(env, g[1], g[2]);
+    if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})\/parts\/(orderindex|sections|orders:\d{1,4}|lines:\d{1,4}|scenario:\d{1,4})$/)) && m === 'GET') return verifyPart(env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})\/report$/)) && m === 'POST') return postVerifyReport(request, env, g[1]);
     throw new ApiError(404, 'not_found', 'No such route');
   }

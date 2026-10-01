@@ -195,8 +195,8 @@ test('orders and results: non-canonical orders, unretained sources, forged manif
   assert.ok(m.existing, 'unchanged inputs: the manifest says the week is already computed');
   const forged = { ...m.manifest, previousShippingExpense: 1 };
   const fh = crypto.createHash('sha256').update(stableStringify(forged)).digest('hex');
-  await assert.rejects(c.call('POST', `/v1/collect/weeks/${week}/results`, { json: { manifest: forged, manifestHash: fh, signature: m.signature, index: {} } }), e => e.code === 'manifest_not_issued');
-  await assert.rejects(c.call('POST', `/v1/collect/weeks/${week}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, signature: m.signature, index: { engineVersion: '1999.01.01' } } }), e => e.code === 'engine_version_mismatch');
+  await assert.rejects(c.call('POST', `/v1/collect/weeks/${week}/results`, { json: { manifest: forged, manifestHash: fh, epoch: m.epoch, signature: m.signature, index: {} } }), e => e.code === 'manifest_not_issued');
+  await assert.rejects(c.call('POST', `/v1/collect/weeks/${week}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, epoch: m.epoch, signature: m.signature, index: { engineVersion: '1999.01.01' } } }), e => e.code === 'engine_version_mismatch');
   // Inputs change between open and finalize → the result is refused and the upload abandoned.
   const snap = await FT.computeFromManifest(c, m.manifest, ft.cache);
   const { resultParts } = await import('../../shared/resultParts.js');
@@ -205,13 +205,13 @@ test('orders and results: non-canonical orders, unretained sources, forged manif
   const sha = x => crypto.createHash('sha256').update(x).digest('hex');
   const index = { engineVersion: ENGINE_VERSION, parts: Object.fromEntries(Object.entries(r.parts).map(([k, v]) => [k, sha(v)])), orders: r.orderStrings.map(([n, v]) => [n, sha(v)]),
                   head: r.head, totals: r.totals, narrative: r.narrative, gateInputs: r.gateInputs };
-  const open = await c.call('POST', `/v1/collect/weeks/${week}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, signature: m.signature, index } });
+  const open = await c.call('POST', `/v1/collect/weeks/${week}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, epoch: m.epoch, signature: m.signature, index } });
   // A part with an extra column is refused.
-  const bad = JSON.parse(r.parts.summary); bad.orders[0].email = 'x';
+  const bad = JSON.parse(r.parts['orders:0']); bad.orders[0].email = 'x';
   const badText = stableStringify(bad);
-  const idx2 = { ...index, parts: { ...index.parts, summary: sha(badText) } };
-  const open2 = await c.call('POST', `/v1/collect/weeks/${week}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, signature: m.signature, index: idx2 } });
-  await assert.rejects(c.call('PUT', `/v1/collect/results/${open2.snapshotId}/parts/summary`, { bytes: zlib.gzipSync(badText) }), e => e.code === 'part_invalid');
+  const idx2 = { ...index, parts: { ...index.parts, 'orders:0': sha(badText) } };
+  const open2 = await c.call('POST', `/v1/collect/weeks/${week}/results`, { json: { manifest: m.manifest, manifestHash: m.manifestHash, epoch: m.epoch, signature: m.signature, index: idx2 } });
+  await assert.rejects(c.call('PUT', `/v1/collect/results/${open2.snapshotId}/parts/orders:0`, { bytes: zlib.gzipSync(badText) }), e => e.code === 'part_invalid');
   for (const n of open.missing) await c.call('PUT', `/v1/collect/results/${open.snapshotId}/parts/${n}`, { bytes: zlib.gzipSync(r.parts[n]) });
   await ok(api(env, 'POST', '/v1/admin/settings', { mcg_free_shipping_threshold: 90, reason: 'test: settings changed mid-run' }), 'settings');
   await assert.rejects(c.call('POST', `/v1/collect/results/${open.snapshotId}/finalize`, { json: {} }), e => e.code === 'inputs_changed');
@@ -241,9 +241,9 @@ test('verifier: an altered order GP or vendor total is a mismatch; the exact dif
   const read = async part => JSON.parse(zlib.gunzipSync(Buffer.from((await env.DB.prepare('SELECT body FROM snapshot_blob WHERE snapshot_id = ?1 AND part = ?2').bind(snap.snapshotId, part).first()).body)).toString());
   const write = async (part, v) => env.DB.prepare('UPDATE snapshot_blob SET body = ?3 WHERE snapshot_id = ?1 AND part = ?2').bind(snap.snapshotId, part, zlib.gzipSync(stableStringify(v))).run();
   // 1. One order's GP + $0.01
-  const summary = await read('summary'); const original = stableStringify(summary);
-  const victim = summary.orders[3]; const was = victim.operating_gp; victim.operating_gp = Math.round((was + 0.01) * 100) / 100;
-  await write('summary', summary);
+  const chunk = await read('orders:0'); const original = stableStringify(chunk);
+  const victim = chunk.orders[3]; const was = victim.operating_gp; victim.operating_gp = Math.round((was + 0.01) * 100) / 100;
+  await write('orders:0', chunk);
   const logs = [];
   const v1 = await runVerifier(env, snap.snapshotId, logs);
   assert.equal(v1.body.status, 'mismatch');
@@ -260,7 +260,7 @@ test('verifier: an altered order GP or vendor total is a mismatch; the exact dif
   assert.equal(view.status, 'mismatch');
   assert.ok(view.differences.orders.length >= 1, 'the logged-in dashboard sees the exact differences');
   // 2. Restore, then one vendor breakdown cell − $1.00
-  await env.DB.prepare('UPDATE snapshot_blob SET body = ?3 WHERE snapshot_id = ?1 AND part = ?2').bind(snap.snapshotId, 'summary', zlib.gzipSync(original)).run();
+  await env.DB.prepare('UPDATE snapshot_blob SET body = ?3 WHERE snapshot_id = ?1 AND part = ?2').bind(snap.snapshotId, 'orders:0', zlib.gzipSync(original)).run();
   const sec = await read('sections');
   const cell = sec.breakdowns.find(b => b.dimension === 'vendor'); const before = cell.known_cost_gp; cell.known_cost_gp = Math.round((before - 1) * 100) / 100;
   await write('sections', sec);

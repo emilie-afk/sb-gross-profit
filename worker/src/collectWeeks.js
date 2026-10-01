@@ -34,14 +34,15 @@ import { evaluateGate } from '../../shared/gate.js';
 import { stableStringify, weekStartOf, assertNoCustomerFields, addDays, CustomerDataError } from '../../shared/normalized.js';
 import { assertReducedNormalizedOrders } from '../../shared/adapters/shopifyPrivacy.js';
 import { storedOrderForm, MANIFEST_VERSION, auxHash } from '../../shared/bundle.js';
-import { ORDER_COLUMNS, LINE_COLUMNS, BREAKDOWN_COLUMNS, ISSUE_COLUMNS, RECON_COLUMNS, TOTALS_COLUMNS } from '../../shared/resultParts.js';
+import { ORDER_COLUMNS, LINE_COLUMNS, BREAKDOWN_COLUMNS, ISSUE_COLUMNS, RECON_COLUMNS, TOTALS_COLUMNS, ORDERS_PER_PART, ORDER_INDEX_FIELDS } from '../../shared/resultParts.js';
 import { weekWindowUtc } from '../../shared/schedule.js';
 
 const P = (s, d = null) => { try { return JSON.parse(s); } catch { return d; } };
 const J = v => JSON.stringify(v ?? null);
 const COLLECTOR = Object.freeze({ cls: 'ingest_secret', label: 'collector' });
 export const ORDERS_PER_CHUNK = 10;
-export const PART_LIMITS = Object.freeze({ compressed: 256 * 1024, decompressed: 1536 * 1024, ratio: 60 });
+// Parts hold at most 40 orders' rows (shared/resultParts.js), so these caps bound every part request's CPU.
+export const PART_LIMITS = Object.freeze({ compressed: 128 * 1024, decompressed: 512 * 1024, ratio: 60 });
 export const MANIFEST_MAX_AGE_MS = 6 * 3600_000;
 
 // ─── Orders ──────────────────────────────────────────────────────────────────
@@ -208,13 +209,13 @@ const withoutAsOf = ({ asOf: _a, ...m }) => m;
 export const inputsHashOf = ({ asOf: _a, previousShippingExpense: _p, previousDraft: _d, catalog: { info: _i, ...catalog }, ...m }) => sha256Text(stableStringify({ ...m, catalog }));
 
 export async function getManifest(env, weekStart) {
-  const manifest = await assembleManifest(env, weekStart);
+  const { manifest, epoch } = await assemble(env, weekStart);
   const manifestHash = await sha256Text(stableStringify(manifest));
   // The week's newest revision was computed from exactly these inputs: nothing to do (a retry or re-run writes 0 rows).
   const latest = await env.DB.prepare('SELECT snapshot_id, revision, status, storage, manifest_hash FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(weekStart).first();
   const existing = latest?.storage === 'chunked' && latest.manifest_hash === await inputsHashOf(manifest)
     ? { snapshotId: latest.snapshot_id, revision: latest.revision, status: latest.status } : null;
-  return json({ manifest, manifestHash, signature: await signManifest(env, manifestHash), existing });
+  return json({ manifest, manifestHash, epoch, signature: await signManifest(env, manifestHash, epoch), existing });
 }
 
 export async function orderBodies(request, env) {
@@ -240,7 +241,7 @@ export async function weekAux(env, weekStart) {
 
 // ─── Results ─────────────────────────────────────────────────────────────────
 
-const PART_NAME = /^(summary|sections|scenario|lines:\d{1,4})$/;
+export const PART_NAME = /^(orderindex|sections|orders:\d{1,4}|lines:\d{1,4}|scenario:\d{1,4})$/;
 const keysOf = cols => new Set(cols.map(c => c[0]));
 const ORDER_KEYS = keysOf(ORDER_COLUMNS), LINE_KEYS = keysOf(LINE_COLUMNS), BD_KEYS = keysOf(BREAKDOWN_COLUMNS),
       ISSUE_KEYS = keysOf(ISSUE_COLUMNS), RECON_KEYS = keysOf(RECON_COLUMNS);
@@ -258,29 +259,37 @@ function rowsExactly(rows, keys, what) {
 }
 function validatePart(name, v) {
   if (!v || typeof v !== 'object') throw new ApiError(400, 'part_invalid', 'Part must be a JSON object');
-  if (name === 'summary') {
-    rowsExactly(v.orders, ORDER_KEYS, 'summary.orders');
-    if (!v.part || typeof v.part !== 'object' || Object.values(v.part).some(n => !Number.isInteger(n) || n < 0)) throw new ApiError(400, 'part_invalid', 'summary.part must map orders to line parts');
+  const only = keys => { if (Object.keys(v).length !== keys.length || keys.some(k => !(k in v))) throw new ApiError(400, 'part_invalid', `Part must have exactly ${keys.join(', ')}`); };
+  if (name === 'orderindex') {
+    only(['orders']);
+    if (!Array.isArray(v.orders) || v.orders.some(t => !Array.isArray(t) || t.length !== ORDER_INDEX_FIELDS.length || typeof t[0] !== 'string' || !Number.isInteger(t[1]) || t[1] < 0
+        || t.slice(2).some(x => x !== null && typeof x !== 'string' && typeof x !== 'number'))) throw new ApiError(400, 'part_invalid', 'orderindex.orders must be order tuples');
+  } else if (name.startsWith('orders:')) {
+    only(['orders']);
+    rowsExactly(v.orders, ORDER_KEYS, 'orders');
+    if (v.orders.length > ORDERS_PER_PART) throw new ApiError(400, 'part_invalid', `At most ${ORDERS_PER_PART} orders per part`);
   } else if (name === 'sections') {
     rowsExactly(v.breakdowns, BD_KEYS, 'breakdowns'); rowsExactly(v.reconciliation, RECON_KEYS, 'reconciliation'); rowsExactly(v.issues, ISSUE_KEYS, 'issues');
-  } else if (name === 'scenario') {
+  } else if (name.startsWith('scenario:')) {
+    only(['lines']);
     rowsExactly(v.lines, SCENARIO_KEYS, 'scenario.lines');
-  } else rowsExactly(v.lines, LINE_KEYS, 'lines');
+  } else { only(['lines']); rowsExactly(v.lines, LINE_KEYS, 'lines'); }
   try { assertNoCustomerFields(v); } catch { throw new ApiError(400, 'customer_data_rejected', 'A result part contains customer fields'); }
 }
 
 export async function openResults(request, env, weekStart) {
   const b = await readJson(request);
-  const { manifest, manifestHash, signature, index } = b;
+  const { manifest, manifestHash, signature, index, epoch } = b;
   if (!manifest || manifest.weekStart !== weekStart) throw new ApiError(400, 'bad_payload', 'manifest for this week is required');
   if (await sha256Text(stableStringify(manifest)) !== manifestHash) throw new ApiError(400, 'hash_mismatch', 'manifestHash does not match the manifest');
-  if (!(await manifestSignatureValid(env, manifestHash, signature))) throw new ApiError(403, 'manifest_not_issued', 'This manifest was not issued by this Worker');
+  if (!(await manifestSignatureValid(env, manifestHash, signature, epoch))) throw new ApiError(403, 'manifest_not_issued', 'This manifest was not issued by this Worker');
   if (Date.now() - Date.parse(manifest.asOf) > MANIFEST_MAX_AGE_MS) throw new ApiError(409, 'manifest_expired', 'The manifest is older than 6 hours; fetch a new one');
   if (manifest.engineVersion !== ENGINE_VERSION || index?.engineVersion !== ENGINE_VERSION) throw new ApiError(409, 'engine_version_mismatch', `This Worker accepts results of engine ${ENGINE_VERSION} only`);
   const names = Object.keys(index?.parts || {});
-  if (!names.includes('summary') || !names.includes('sections') || !names.includes('scenario') || names.some(n => !PART_NAME.test(n) || !HEX64.test(index.parts[n]))) throw new ApiError(400, 'bad_payload', 'index.parts must name summary, sections, scenario and lines:k with sha256 values');
-  const lineParts = names.filter(n => n.startsWith('lines:')).map(n => Number(n.slice(6))).sort((a, c) => a - c);
-  if (lineParts.some((k, i) => k !== i)) throw new ApiError(400, 'bad_payload', 'line parts must be numbered 0…n−1');
+  if (!names.includes('orderindex') || !names.includes('sections') || names.some(n => !PART_NAME.test(n) || !HEX64.test(index.parts[n]))) throw new ApiError(400, 'bad_payload', 'index.parts must name orderindex, sections, orders:k, lines:k and scenario:j with sha256 values');
+  const numbered = prefix => names.filter(n => n.startsWith(prefix)).map(n => Number(n.slice(prefix.length))).sort((a, c) => a - c);
+  const [op, lp, sp] = [numbered('orders:'), numbered('lines:'), numbered('scenario:')];
+  if ([op, lp, sp].some(xs => xs.some((k, i) => k !== i)) || !op.length || !sp.length || !(lp.length === op.length || lp.length === op.length + 1)) throw new ApiError(400, 'bad_payload', 'orders:k, lines:k and scenario:j must be numbered 0…n−1 (lines: one per orders part, plus at most one)');
   if (!Array.isArray(index.orders) || index.orders.some(x => !Array.isArray(x) || typeof x[0] !== 'string' || !HEX64.test(x[1] || ''))) throw new ApiError(400, 'bad_payload', 'index.orders must be [[orderName, sha256]]');
   const head = index.head || {};
   if (Object.keys(head).sort().join() !== [...HEAD_KEYS].sort().join()) throw new ApiError(400, 'bad_payload', 'index.head has unexpected fields');
@@ -294,14 +303,14 @@ export async function openResults(request, env, weekStart) {
   try { assertNoCustomerFields([head, totals, P(index.narrative), gi]); } catch { throw new ApiError(400, 'customer_data_rejected', 'The result index contains customer fields'); }
   const idx = J(index);
   const db = env.DB;
-  const same = await db.prepare("SELECT snapshot_id FROM result_upload WHERE week_start = ?1 AND manifest_hash = ?2 AND status = 'open' AND idx = ?3").bind(weekStart, manifestHash, idx).first();
-  const snapshotId = same?.snapshot_id || newId('snp');
-  if (!same) {
-    await db.prepare('INSERT INTO result_upload (snapshot_id, week_start, manifest_hash, engine_version, idx, manifest, status, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)')
-      .bind(snapshotId, weekStart, manifestHash, ENGINE_VERSION, idx, J(manifest), 'open', nowIso()).run();
-  }
-  const have = new Set(((await db.prepare('SELECT part FROM snapshot_blob WHERE snapshot_id = ?1').bind(snapshotId).all()).results || []).map(r => r.part));
-  return json({ snapshotId, missing: names.filter(n => !have.has(n)) });
+  // An upload of these exact results is already open (a retry): reuse it and report what is still missing.
+  const same = (await db.prepare(`SELECT u.snapshot_id, (SELECT json_group_array(part) FROM snapshot_blob b WHERE b.snapshot_id = u.snapshot_id) AS have FROM result_upload u
+      WHERE u.week_start = ?1 AND u.manifest_hash = ?2 AND u.status = 'open' AND u.idx = ?3`).bind(weekStart, manifestHash, idx).first());
+  if (same) { const have = new Set(P(same.have, [])); return json({ snapshotId: same.snapshot_id, missing: names.filter(n => !have.has(n)) }); }
+  const snapshotId = newId('snp');
+  await db.prepare('INSERT INTO result_upload (snapshot_id, week_start, manifest_hash, engine_version, idx, manifest, status, created_at, manifest_epoch) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)')
+    .bind(snapshotId, weekStart, manifestHash, ENGINE_VERSION, idx, J(manifest), 'open', nowIso(), epoch).run();
+  return json({ snapshotId, missing: names });
 }
 
 async function openUpload(db, id) {
@@ -342,7 +351,8 @@ export async function finalizeResults(request, env, id) {
   const index = P(u.idx, {}), pinned = P(u.manifest, {});
   const names = Object.keys(index.parts);
   // One round for every read finalize needs besides the manifest re-assembly.
-  const [partRows, hpdRun, otherTz, maxRev] = await db.batch([
+  const [epochRow, partRows, hpdRun, otherTz, maxRev] = await db.batch([
+    db.prepare('SELECT n FROM input_epoch WHERE id = 1'),
     db.prepare('SELECT part FROM snapshot_blob WHERE snapshot_id = ?1').bind(id),
     db.prepare("SELECT status FROM ingest_run WHERE source = 'hpd' AND week_start = ?1 ORDER BY started_at DESC LIMIT 1").bind(u.week_start),
     db.prepare('SELECT COUNT(*) AS n FROM ord_ptr WHERE week_start = ?1 AND timezone <> ?2').bind(u.week_start, pinned.settings?.store_timezone ?? ''),
@@ -352,10 +362,18 @@ export async function finalizeResults(request, env, id) {
   const missing = names.filter(n => !have.has(n));
   if (missing.length) throw new ApiError(409, 'parts_missing', `${missing.length} part(s) not uploaded yet`, { missing });
   // Inputs must be exactly what the manifest pinned: otherwise the result is for a stale week.
-  let current, epoch;
-  try { ({ manifest: current, epoch } = await assemble(env, u.week_start)); }
-  catch (e) { if (e instanceof ApiError) { await db.prepare("UPDATE result_upload SET status = 'abandoned' WHERE snapshot_id = ?1").bind(id).run(); } throw e; }
-  if (stableStringify(withoutAsOf(current)) !== stableStringify(withoutAsOf(pinned))) {
+  // Fast path: no input was written since the manifest was assembled (same epoch), it is recent,
+  // and nothing in it depends on the clock (a catalog refresh still pending can expire) → the
+  // pinned manifest is still exact. Otherwise rebuild it and compare.
+  let epoch = epochRow.results?.[0]?.n ?? null;
+  const fresh = epoch !== null && u.manifest_epoch === epoch && Date.now() - Date.parse(pinned.asOf) <= MANIFEST_MAX_AGE_MS
+    && pinned.catalog?.info?.refreshStatus !== 'pending' && pinned.publicationAllowedEnv === (env.PUBLICATION_ALLOWED === 'true');
+  let current = pinned;
+  if (!fresh) {
+    try { ({ manifest: current, epoch } = await assemble(env, u.week_start)); }
+    catch (e) { if (e instanceof ApiError) { await db.prepare("UPDATE result_upload SET status = 'abandoned' WHERE snapshot_id = ?1").bind(id).run(); } throw e; }
+  }
+  if (!fresh && stableStringify(withoutAsOf(current)) !== stableStringify(withoutAsOf(pinned))) {
     await db.prepare("UPDATE result_upload SET status = 'abandoned' WHERE snapshot_id = ?1 AND status = 'open'").bind(id).run();
     throw new ApiError(409, 'inputs_changed', "The week's inputs changed after the manifest was issued; fetch a new manifest and recompute");
   }

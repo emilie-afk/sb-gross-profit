@@ -149,33 +149,66 @@ export function scenarioLines(orders, lines) {
   return out;
 }
 
-export const ORDERS_PER_LINE_PART = 40;
-const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-
 /**
- * All parts of a snapshot as canonical strings (stableStringify), plus the
- * per-order strings the verifier compares one by one.
- *   summary   { orders: [orderRow…] in engine order, part: { orderName: k } }
- *   lines:k   { lines: [lineRow…] } for 40 orders (by order name), line_index order
- *   sections  { breakdowns, reconciliation, issues, shippingC3 }
- *   scenario  { lines: scenarioLines(…) }
+ * Result parts are bounded so that no Worker request (upload, read or verify) handles
+ * more than ORDERS_PER_PART orders' worth of rows, whatever the week's size:
+ *   orders:k    ≤ 40 order rows; orders grouped in gp_asc order (operating_gp, then name),
+ *               the dashboard's default sort, so its pages touch one or two parts
+ *   lines:k     the line rows of exactly the orders in orders:k, by (order_name, line_index)
+ *   orderindex  one compact tuple per order in ENGINE order (the order sequence), with the
+ *               fields the order list filters and sorts on and the part k holding the order
+ *   scenario:j  scenario-calculator lines of ≤ 40 orders in order-name order; their
+ *               concatenation is exactly scenarioLines() of the whole week
+ *   sections    breakdowns, reconciliation, issues, C3 shipping (independent of order count
+ *               except issues, which are small per order)
  */
+export const ORDERS_PER_PART = 40;
+export const ORDERS_PER_LINE_PART = ORDERS_PER_PART;              // (older name)
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+/** SQLite ORDER BY operating_gp ASC, order_name ASC (NULLs first, numbers numerically). */
+export const gpAscCmp = (a, b) => {
+  const x = a.operating_gp, y = b.operating_gp;
+  if (x !== y) {
+    if (x === null || x === undefined) return -1;
+    if (y === null || y === undefined) return 1;
+    return x < y ? -1 : 1;
+  }
+  return cmp(a.order_name, b.order_name);
+};
+/** Tuple fields of the order index, in this order. */
+export const ORDER_INDEX_FIELDS = ['order_name', 'part', 'business_date', 'operating_gp', 'operating_revenue', 'missing_cost_lines',
+  'shipping_expense_status', 'channel', 'order_cat', 'profitability_status'];
+export const indexTuple = (o, k) => [o.order_name, k, o.business_date, o.operating_gp, o.operating_revenue, o.missing_cost_lines,
+  o.shipping_expense_status, o.channel, o.order_cat, o.profitability_status];
+export const indexRow = t => Object.fromEntries(ORDER_INDEX_FIELDS.map((f, i) => [f, t[i]]));
+
 export function resultParts(snap, engineVersion) {
   const orders = snap.orders.map(orderRow);
   const lines = snap.lines.map(lineRow).sort((a, b) => cmp(a.order_name, b.order_name) || a.line_index - b.line_index);
-  const names = [...new Set(orders.map(o => o.order_name))].sort(cmp);
-  const partOf = {}; names.forEach((n, i) => { partOf[n] = Math.floor(i / ORDERS_PER_LINE_PART); });
-  const byOrder = new Map(names.map(n => [n, []]));
+  const byOrder = new Map();
   for (const l of lines) (byOrder.get(l.order_name) || byOrder.set(l.order_name, []).get(l.order_name)).push(l);
-  const parts = { summary: stableStringify({ orders, part: partOf }) };
-  const nParts = Math.ceil(names.length / ORDERS_PER_LINE_PART);
-  for (let k = 0; k < nParts; k++) parts[`lines:${k}`] = stableStringify({ lines: names.slice(k * ORDERS_PER_LINE_PART, (k + 1) * ORDERS_PER_LINE_PART).flatMap(n => byOrder.get(n) || []) });
-  // Lines of an order the summary does not list (should not happen) still land in a part.
-  const stray = [...byOrder.keys()].filter(n => !(n in partOf));
-  if (stray.length) parts[`lines:${nParts}`] = stableStringify({ lines: stray.sort(cmp).flatMap(n => byOrder.get(n)) });
+  const parts = {};
+  const byGp = [...orders].sort(gpAscCmp), partOf = new Map();
+  for (let k = 0; k * ORDERS_PER_PART < byGp.length; k++) {
+    const group = byGp.slice(k * ORDERS_PER_PART, (k + 1) * ORDERS_PER_PART);
+    for (const o of group) partOf.set(o.order_name, k);
+    parts[`orders:${k}`] = stableStringify({ orders: group });
+    parts[`lines:${k}`] = stableStringify({ lines: group.map(o => o.order_name).sort(cmp).flatMap(n => byOrder.get(n) || []) });
+  }
+  // Lines of an order the week does not list (should not happen) still land in a part.
+  const stray = [...byOrder.keys()].filter(n => !partOf.has(n)).sort(cmp);
+  if (stray.length) parts[`lines:${Math.ceil(byGp.length / ORDERS_PER_PART)}`] = stableStringify({ lines: stray.flatMap(n => byOrder.get(n)) });
+  parts.orderindex = stableStringify({ orders: orders.map(o => indexTuple(o, partOf.get(o.order_name))) });
   parts.sections = stableStringify({ breakdowns: breakdownRows(snap), reconciliation: reconRows(snap), issues: issueRows(snap),
     shippingC3: snap.shipping?.c3 ?? null });
-  parts.scenario = stableStringify({ lines: scenarioLines(orders, lines) });
+  // Every order name that has a row or a line, in name order: lines are sorted the same way, so
+  // the parts' concatenation is scenarioLines() over the whole week.
+  const names = [...new Set([...orders.map(o => o.order_name), ...byOrder.keys()])].sort(cmp);
+  const nScen = Math.max(1, Math.ceil(names.length / ORDERS_PER_PART));
+  for (let j = 0; j < nScen; j++) {
+    const group = names.slice(j * ORDERS_PER_PART, (j + 1) * ORDERS_PER_PART);
+    parts[`scenario:${j}`] = stableStringify({ lines: scenarioLines(orders, group.flatMap(n => byOrder.get(n) || [])) });
+  }
   const orderStrings = orders.map(o => [o.order_name, stableStringify({ order: o, lines: byOrder.get(o.order_name) || [] })]);
   return {
     parts, orderStrings,
