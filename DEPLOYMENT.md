@@ -431,6 +431,7 @@ It checks, in order:
 | Ingest | `X-Ingest-Secret` | Windows collector, `build.py`, `tools/backfill.mjs push` | write source rows and catalog; read the week plan |
 | Admin | `X-Admin-Secret` | a person or an admin script | compute, revise, restate costs, settings (audited), backfill, publish (when unlocked) |
 | Reader session | `sb_session` (HttpOnly, Secure, SameSite=Strict, 12 h) | dashboard via `/api/v1` | read published snapshots, history, compare |
+| Verify | `X-Verify-Secret` (Worker secret `VERIFY_SECRET`) | Netlify Function `gp-verify` | read pinned inputs and stored results; write one verification report per snapshot |
 
 **Audit actors.** Every audit record stores two fields:
 
@@ -766,6 +767,33 @@ A manual or revision compute of a week without a usable basis is refused (`409 s
   by default, which fits the free plan's 50 D1 queries per invocation; pass
   `maxWeeks` up to 8 on the paid plan. Source CSVs contain customer data; they
   stay on the workstation and are gitignored.
+
+### Free-tier weekly path (redesign rev 3)
+
+The account stays on Workers Free (10 ms CPU per request; 100,000 D1 rows written per day for the whole account). On this path the **office PC computes** each week with the unchanged shared engine and the **Worker validates and stores**; an **independent verifier** on Netlify recomputes every draft before it may be called verified. No financial formula changed; all five controls stay false; no schedule is added.
+
+| Step | Route (credential) | Worker work | Writes |
+| --- | --- | --- | --- |
+| Source file | `POST /v1/collect/sources`, `PUT …/segments/:n`, `POST …/seal` (ingest) | hash, capped gunzip, CSV parse, the same privacy guards; a failure rejects the whole file (codes only) | 1 per segment + 2 |
+| Shipping Cost Report | `POST /v1/collect/scr/versions` (ingest) | groups reconcile with the validated segment sums; acceptance rules below | 1 per new or held date + 1 per activated date + 2 |
+| Orders | `POST /v1/collect/orders/diff`, `POST /v1/collect/orders` (ingest, ≤ 10) | hash, privacy guards, canonical stored form | 3 per new or changed order |
+| Manifest | `GET /v1/collect/weeks/:w/manifest` (ingest or verify) | pins what the Worker's own loaders would feed the engine; HMAC-signed | 0 |
+| Results | `POST /v1/collect/weeks/:w/results`, `PUT /v1/collect/results/:id/parts/:p`, `POST …/finalize` (ingest) | hash, capped gunzip, exact column allowlist, customer-field guard; at finalize the inputs must be unchanged, then gate + run + snapshot rows | ≈ 30 per week |
+| Verification | `/v1/verify/*` (verify) | serves pinned inputs and stored parts; stores one report | 1 |
+
+**Tables (migration 0012).** `src_object`, `src_segment`, `ord_body`, `ord_ptr`, `scr_version`, `scr_day`, `scr_day_owner`, `scr_activation`, `result_upload`, `snapshot_blob`, `verify_report`; `snapshot.storage` (`rows` | `chunked`) and `snapshot.manifest_hash`. Text-keyed tables are `WITHOUT ROWID`, so one row is one D1 write. The existing tables and routes are unchanged; the csv_text path, manual uploads and backfill keep working.
+
+**Shipping Cost Report acceptance (owner decisions 2026-09-29).**
+- Review, nothing activated: the first version; a gap in coverage; a possibly incomplete last date (exported on or before it); any row whose actual **Shipping Cost is $0.00**; any row **above `shipping_cost_review_cap_cents`** (default 10000 = $100; audited setting; the value is kept, never discarded); a non-zero **Insurance Cost, Duties, Taxes or Import Fee** (manual until their treatment is established); a ship-date time other than midnight; an unexpected store. Customer-paid shipping is not in the sanitized report, so $0 paid on prepaid subscriptions cannot trigger the $0 rule.
+- Per date otherwise: unowned → activated; identical → no-op; only new groups for orders with **no accepted cost anywhere** → filled in automatically, and the affected weeks get a new **unpublished** draft revision on the next compute; **any change or removal of an accepted cost → held for review** (`GET /v1/admin/scr/versions/:id` shows per-order before/after; `…/accept` activates, `…/reject`, `…/activations/:id/rollback` undoes the latest activation).
+
+**Verification.** `netlify/functions/gp-verify` (and `gp-verify-background`, up to 15 minutes, which the collector calls) fetches the pinned manifest and every part, checks each hash, recomputes with the unchanged engine and compares every order (order row + its lines), every stored part, the snapshot head, totals row, narrative and order sequence. It also re-derives each order body and each Shipping Cost Report date the week depends on from the retained sanitized sources. The HTTP answer and every log line carry status, codes and counts only; field-level differences go only to the Worker's `verify_report` and are shown on the logged-in dashboard. A collector-computed draft is labelled provisional until `verified`, and `POST /v1/admin/publish` refuses it until then (`verification_pending`). There is no fallback verifier: the public-repository GitHub Actions fallback stays unused until its data access and logging are reviewed.
+
+**Netlify.** Function variables (per context): `SB_WORKER_ORIGIN`, `SB_VERIFY_SECRET` (= the Worker's `VERIFY_SECRET`), `SB_VERIFY_TRIGGER_SECRET` (the collector's `sb-gp-verify-trigger`). The password gate excludes the two function paths; the functions authenticate their callers themselves.
+
+**Status.** `GET /v1/weeks/:w/status` (dashboard session or admin; the collector uses `/v1/collect/weeks/:w/status`) names what is pending — export, Shipping Cost Report review, compute or verification — and the target (`met`, `met_late`, `missed`, `pending`) against the scheduled slot (Monday 15:30 ICT). It never reports the target as met without a verified draft.
+
+**Measured locally** (workerd + D1, calibrated rows written; 3,000-order rolling window): first-load Monday 9,424 writes, steady Monday 1,505, a full repeat 0. Live Workers Free CPU and writes are measured on staging before anything is enabled.
 
 ### Go-live checklist (all required before any lock is changed)
 

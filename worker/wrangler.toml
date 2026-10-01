@@ -6,7 +6,9 @@
 #   ADMIN_SECRET             admin / compute routes         (>= 32 chars, different)
 #   SESSION_SIGNING_KEY      dashboard session HMAC key     (>= 32 chars, different)
 #   DASHBOARD_PASSWORD_HASH  output of tools/hash-password.mjs (never the password)
-# See DEPLOYMENT.md → "Weekly automation Worker".
+#   VERIFY_SECRET            Free-tier verifier (gp-verify) routes (>= 32 chars, different;
+#                            optional: without it /v1/verify/* answers 503)
+# See DEPLOYMENT.md → "Weekly automation Worker" and "Free-tier weekly path".
 
 name = "sb-gp-worker"
 main = "src/index.js"
