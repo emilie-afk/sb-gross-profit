@@ -799,7 +799,9 @@ The account stays on Workers Free (10 ms CPU per request; 100,000 D1 rows writte
 
 **Status.** `GET /v1/weeks/:w/status` (dashboard session or admin; the collector uses `/v1/collect/weeks/:w/status`) names what is pending — export, Shipping Cost Report review, compute or verification — and the target (`met`, `met_late`, `missed`, `pending`) against the scheduled slot (Monday 15:30 ICT). It never reports the target as met without a verified draft.
 
-**Measured locally** (workerd + D1, calibrated rows written; 3,000-order rolling window): first-load Monday 9,424 writes, steady Monday 1,505, a full repeat 0. Live Workers Free CPU and writes are measured on staging before anything is enabled.
+**Measured locally** (workerd + D1, calibrated rows written; 3,000-order rolling window): first-load Monday 12,593 writes, steady Monday 1,982, a full repeat 0 (the input-epoch triggers add one row per input row written).
+
+**Measured on staging** (Workers Free, synthetic full-size set: 3,000 orders, ~375 a week; 2026-09-30): every draft verified; dashboard reads equal today's Worker path for all 2,970 orders; a full repeat of every upload and week writes 0 rows. Whole-request CPU on the weekly path: median 2–3 ms, P99 8–10 ms; 2–6 requests per ~850 above 10 ms (maximum 12–17 ms: a manifest, an order-list page, the report upload), all completed. Workers Free does not guarantee such requests, so this is not yet proof of reliable operation under its limit.
 
 ### Go-live checklist (all required before any lock is changed)
 
