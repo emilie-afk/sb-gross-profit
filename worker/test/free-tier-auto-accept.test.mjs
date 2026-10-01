@@ -45,7 +45,7 @@ test('auto-acceptance: off by default — new dates, fill-ins and held dates all
   const same = await FT.uploadShippingCostReport(c, scrPayload(rows([...WEEK1].reverse()), FROM, TO, '2026-08-12T15:00:00Z'));
   assert.equal(same.status, 'no_change');
   assert.deepEqual(same.reviewReasons, []);
-  assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM scr_activation').first()).n, 1, 'only the admin acceptance of the first version activated anything');
+  assert.equal((await env.DB.prepare("SELECT COUNT(*) AS n FROM scr_decision WHERE kind = 'auto_activate'").first()).n, 0);
 });
 
 test('auto-acceptance: switching it needs a stated reason and is audited; on → the owner rules apply; off again → review', async () => {
@@ -61,6 +61,9 @@ test('auto-acceptance: switching it needs a stated reason and is audited; on →
   assert.deepEqual(v2.reviewReasons, []);
   assert.equal(await owner(env, '2026-08-10'), v2.versionId);
   assert.equal(await owner(env, '2026-08-04'), v1.versionId, 'identical dates keep their owner');
+  const [auto] = await decisions(env, v2.versionId);
+  assert.equal(auto.kind, 'auto_activate');
+  assert.deepEqual(JSON.parse(auto.dates), Array.from({ length: 7 }, (_, i) => addDays('2026-08-10', i)), 'the seven new dates');
   await autoAccept(env, false);
   const v3 = await FT.uploadShippingCostReport(c, scrPayload(rows([...WEEK1, ...NEXT, ['2026-08-17', '900301', '6.00']]), FROM, addDays(TO, 14), '2026-08-25T15:00:00Z'));
   assert.equal(v3.status, 'pending_review');

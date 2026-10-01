@@ -45,7 +45,10 @@ export async function weekStatus(db, weekStart, now = new Date()) {
   if (basis.basisStatus !== 'ok') pending.push(basis.basisStatus === 'pending_review' ? 'shipping_report_pending_review' : basis.basisStatus === 'partial' ? 'shipping_report_partial' : 'shipping_report_missing');
   else if (basis.newerPending.length) pending.push('shipping_report_newer_pending');
   const snap = await db.prepare("SELECT snapshot_id, revision, status, computed_at FROM snapshot WHERE week_start = ?1 AND storage = 'chunked' ORDER BY revision DESC LIMIT 1").bind(weekStart).first();
-  const inputsAt = [shop?.sealed_at, ...(basis.used || []).map(u => u.receivedAt)].filter(Boolean).sort().pop() || null;
+  // A review decision (accept, reject, rollback) changes the week's inputs too, e.g. rejecting held
+  // dates removes the "newer report pending" block, which only a new draft revision reflects.
+  const decided = (await db.prepare('SELECT MAX(at) AS at FROM scr_decision WHERE EXISTS (SELECT 1 FROM json_each(scr_decision.weeks) j WHERE j.value = ?1)').bind(weekStart).first())?.at || null;
+  const inputsAt = [shop?.sealed_at, decided, ...(basis.used || []).map(u => u.receivedAt)].filter(Boolean).sort().pop() || null;
   const v = snap ? (await verificationOf(db, [snap.snapshot_id])).get(snap.snapshot_id) : null;
   if (!pending.length) {
     if (!snap || (inputsAt && snap.computed_at < inputsAt)) pending.push('compute_pending');

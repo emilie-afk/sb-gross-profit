@@ -6,8 +6,10 @@
  * GET  /v1/admin/scr/versions              list (codes and counts only)
  * GET  /v1/admin/scr/versions/:id          one version: per-date outcomes; held dates with per-order before/after (admin only)
  * POST /v1/admin/scr/versions/:id/accept   { reason }  activate everything the version still holds for review
- * POST /v1/admin/scr/versions/:id/reject   { reason }
+ * POST /v1/admin/scr/versions/:id/reject   { reason }  pending version: reject it whole · partially accepted
+ *                                          version: reject its held dates, keep the dates already accepted
  * POST /v1/admin/scr/activations/:id/rollback { reason }   undo the LATEST activation exactly
+ * Every admin decision is recorded in scr_decision (who, when, reason, dates, affected weeks).
  *
  * The collector sends the per-(date, order) groups it built with the unchanged
  * parser from a RETAINED sanitized report (collectSources.js). The Worker checks
@@ -32,6 +34,7 @@ import { newId, nowIso, getSettings, selectIn, atomic } from './db.js';
 import { actorFor } from './actor.js';
 import { addDays, weekStartOf } from '../../shared/normalized.js';
 import { dayHash, classifyDay, versionReviewReasons } from '../../shared/scrDays.js';
+import { weekWindowUtc } from '../../shared/schedule.js';
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const KEY = /^\d{4,10}$/;
@@ -138,7 +141,9 @@ export async function uploadScrVersion(request, env) {
     ...store.map(d => db.prepare('INSERT INTO scr_day (version_id, ship_date, day_hash, cost_cents, row_count, groups, outcome) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
       .bind(versionId, d.date, d.hash, d.costCents, d.rowCount, JSON.stringify(d.groups), review ? 'pending' : d.outcome)),
   ];
-  if (activate.length) stmts.push(...activationStatements(db, { activationId, versionId, at, actorCls: 'ingest_secret', days: activate, own, weeks }));
+  if (activate.length) stmts.push(...activationStatements(db, { activationId, versionId, at, actorCls: 'ingest_secret', days: activate, own, weeks }),
+    decisionStmt(db, { versionId, kind: 'auto_activate', at, actor: { cls: 'ingest_secret', label: 'collector' }, reason: 'automatic: new dates and fill-ins (auto-acceptance enabled)',
+                       dates: activate.map(d => d.date), weeks }));
   try { await atomic(db, stmts); }
   catch (e) {
     // A duplicate delivery of the same upload raced this one: the first version stands.
@@ -230,7 +235,35 @@ function heldInWeek(v, from, to) {
 
 // ─── Admin decisions ─────────────────────────────────────────────────────────
 
+const decisionStmt = (db, { versionId, kind, at, actor, reason, dates, weeks }) =>
+  db.prepare('INSERT INTO scr_decision (decision_id, version_id, kind, at, actor_class, actor_label, reason, dates, weeks) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)')
+    .bind(newId('scd'), versionId, kind, at, actor.cls, actor.label || null, reason, JSON.stringify(dates), JSON.stringify(weeks));
+/** The decision applies only if the version is still in the state it was read in (a concurrent decision aborts the batch). */
+const stateGuard = (db, id, status) => db.prepare('INSERT INTO write_guard (ok) SELECT NULL WHERE NOT EXISTS (SELECT 1 FROM scr_version WHERE version_id = ?1 AND status = ?2)').bind(id, status);
+const isGuardAbort = e => /NOT NULL constraint failed: write_guard/i.test(String(e?.message || e));
+const weeksOfDates = dates => [...new Set(dates.map(weekStartOf))].sort();
+
 const reasonOf = body => { const r = String(body?.reason || '').trim(); if (r.length < 5) throw new ApiError(400, 'bad_payload', 'A decision needs a stated reason'); return r; };
+
+/** Weeks overlapping `before`'s range whose Shipping Cost Report basis differs when `before` is replaced by `after`. Admin route; three reads. */
+async function basisChangedWeeks(db, before, after) {
+  const first = weekStartOf(before.requested_from), last = weekStartOf(before.requested_to);
+  const weeks = []; for (let w = first; w <= last; w = addDays(w, 7)) weeks.push(w);
+  const tz = (await getSettings(db)).store_timezone;
+  const ownAll = await owners(db, first, addDays(last, 6));
+  const rows = (await db.prepare(BASIS_VERSIONS_SQL).bind(first, addDays(last, 6), JSON.stringify([...new Set([...ownAll.values()].map(o => o.versionId))])).all()).results || [];
+  const out = [];
+  for (const w of weeks) {
+    const we = addDays(w, 6), own = new Map([...ownAll].filter(([d]) => d >= w && d <= we));
+    const vids = new Set([...own.values()].map(o => o.versionId));
+    const inWeek = r => vids.has(r.version_id) || (r.requested_from <= we && r.requested_to >= w && ['pending_review', 'partially_accepted'].includes(r.status));
+    const closedAt = weekWindowUtc(w, tz).endUtcExclusive;
+    const a = scrBasisFrom({ weekStart: w, closedAt, own, versionRows: rows.filter(inWeek) });
+    const b = scrBasisFrom({ weekStart: w, closedAt, own, versionRows: rows.map(r => (r.version_id === before.version_id ? { ...r, ...after, sha256: r.sha256 } : r)).filter(inWeek) });
+    if (JSON.stringify(a) !== JSON.stringify(b)) out.push(w);
+  }
+  return out;
+}
 
 export async function listScrVersions(env) {
   const r = (await env.DB.prepare('SELECT version_id, source_id, requested_from, requested_to, exported_at, imported_at, status, outcome, decided_at FROM scr_version ORDER BY imported_at DESC LIMIT 100').all()).results || [];
@@ -276,23 +309,56 @@ export async function acceptScrVersion(request, env, id) {
   const actor = actorFor('admin_secret', body), at = nowIso(), activationId = newId('sca');
   const weeks = days.length ? await affectedWeeks(db, days) : [];
   const o = { ...P(v.outcome, {}), affectedWeeks: [...new Set([...(P(v.outcome, {}).affectedWeeks || []), ...weeks])].sort(), heldDates: [] };
-  await atomic(db, [
-    db.prepare("UPDATE scr_version SET status = 'accepted', decided_at = ?2, decided_by = ?3, decision_reason = ?4, outcome = ?5 WHERE version_id = ?1 AND status IN ('pending_review','partially_accepted')")
-      .bind(id, at, actor.cls, reason, JSON.stringify(o)),
-    db.prepare("UPDATE scr_day SET outcome = 'activated_on_review' WHERE version_id = ?1 AND outcome IN ('pending','held')").bind(id),
-    ...(days.length ? activationStatements(db, { activationId, versionId: id, at, actorCls: actor.cls, days, own, weeks }) : []),
-  ]);
-  return json({ versionId: id, status: 'accepted', activatedDates: days.map(d => d.date), affectedWeeks: weeks });
+  const decisionWeeks = [...new Set([...weeks, ...weeksOfDates(stored.map(d => d.ship_date))])].sort();
+  try {
+    await atomic(db, [
+      stateGuard(db, id, v.status),
+      db.prepare("UPDATE scr_version SET status = 'accepted', decided_at = ?2, decided_by = ?3, decision_reason = ?4, outcome = ?5 WHERE version_id = ?1 AND status IN ('pending_review','partially_accepted')")
+        .bind(id, at, actor.cls, reason, JSON.stringify(o)),
+      db.prepare("UPDATE scr_day SET outcome = 'activated_on_review' WHERE version_id = ?1 AND outcome IN ('pending','held')").bind(id),
+      ...(days.length ? activationStatements(db, { activationId, versionId: id, at, actorCls: actor.cls, days, own, weeks }) : []),
+      decisionStmt(db, { versionId: id, kind: 'accept', at, actor, reason, dates: days.map(d => d.date), weeks: decisionWeeks }),
+    ]);
+  } catch (e) { if (isGuardAbort(e)) throw new ApiError(409, 'not_reviewable', 'The version was decided concurrently'); throw e; }
+  return json({ versionId: id, status: 'accepted', activatedDates: days.map(d => d.date), affectedWeeks: decisionWeeks });
 }
 
+/**
+ * pending_review      → the whole version is rejected; nothing of it was ever activated.
+ * partially_accepted  → only its HELD dates are rejected: the dates it already activated
+ *                       stay in force, the accepted costs the held dates would have changed
+ *                       stay as they are, and the version counts as accepted from now on, so
+ *                       its held dates no longer block publication ("newer report pending").
+ *                       The weeks of those dates need a new draft revision without the block;
+ *                       their week status shows `compute_pending` until it exists.
+ */
 export async function rejectScrVersion(request, env, id) {
   const body = await readJson(request);
   const reason = reasonOf(body);
   const actor = actorFor('admin_secret', body);
-  const r = await env.DB.prepare("UPDATE scr_version SET status = 'rejected', decided_at = ?2, decided_by = ?3, decision_reason = ?4 WHERE version_id = ?1 AND status = 'pending_review'")
-    .bind(id, nowIso(), actor.cls, reason).run();
-  if (r.meta.changes !== 1) throw new ApiError(409, 'not_reviewable', 'Only a version pending review can be rejected (held dates of a partially accepted version stay held)');
-  return json({ versionId: id, status: 'rejected' });
+  const db = env.DB;
+  const v = await db.prepare('SELECT * FROM scr_version WHERE version_id = ?1').bind(id).first();
+  if (!v) throw new ApiError(404, 'version_unknown', 'No such version');
+  if (!['pending_review', 'partially_accepted'].includes(v.status)) throw new ApiError(409, 'not_reviewable', `Version is ${v.status}`);
+  const at = nowIso(), o = P(v.outcome, {});
+  const dayOutcome = v.status === 'pending_review' ? 'pending' : 'held';
+  const dates = ((await db.prepare('SELECT ship_date FROM scr_day WHERE version_id = ?1 AND outcome = ?2 ORDER BY ship_date').bind(id, dayOutcome).all()).results || []).map(r => r.ship_date);
+  const whole = v.status === 'pending_review';
+  const next = whole ? 'rejected' : 'accepted';
+  const outcome = { ...o, heldDates: [], rejectedDates: [...new Set([...(o.rejectedDates || []), ...dates])].sort() };
+  // Rejection changes no owner, only week bases (their pending lists): the affected weeks are
+  // exactly those whose basis differs once the version has its new state.
+  const weeks = await basisChangedWeeks(db, v, { ...v, status: next, outcome: JSON.stringify(outcome) });
+  try {
+    await atomic(db, [
+      stateGuard(db, id, v.status),
+      db.prepare('UPDATE scr_version SET status = ?2, decided_at = ?3, decided_by = ?4, decision_reason = ?5, outcome = ?6 WHERE version_id = ?1 AND status = ?7')
+        .bind(id, next, at, actor.cls, reason, JSON.stringify(outcome), v.status),
+      db.prepare("UPDATE scr_day SET outcome = 'rejected_on_review' WHERE version_id = ?1 AND outcome = ?2").bind(id, dayOutcome),
+      decisionStmt(db, { versionId: id, kind: whole ? 'reject_version' : 'reject_held', at, actor, reason, dates, weeks }),
+    ]);
+  } catch (e) { if (isGuardAbort(e)) throw new ApiError(409, 'not_reviewable', 'The version was decided concurrently'); throw e; }
+  return json({ versionId: id, status: next, rejectedDates: dates, affectedWeeks: weeks });
 }
 
 export async function rollbackScrActivation(request, env, activationId) {
@@ -302,11 +368,14 @@ export async function rollbackScrActivation(request, env, activationId) {
   const latest = await db.prepare('SELECT * FROM scr_activation ORDER BY at DESC, activation_id DESC LIMIT 1').first();
   if (!latest || latest.activation_id !== activationId) throw new ApiError(409, 'not_latest_activation', 'Only the latest activation can be rolled back');
   const prev = P(latest.dates, []);
+  const reason = String(body.reason).trim(), actor = actorFor('admin_secret', body), at = nowIso();
   await atomic(db, [
     ...prev.map(([date, vid, hash]) => vid
       ? db.prepare('UPDATE scr_day_owner SET version_id = ?2, day_hash = ?3, activation_id = ?4 WHERE ship_date = ?1').bind(date, vid, hash, `rollback:${activationId}`)
       : db.prepare('DELETE FROM scr_day_owner WHERE ship_date = ?1').bind(date)),
     db.prepare('DELETE FROM scr_activation WHERE activation_id = ?1').bind(activationId),
+    decisionStmt(db, { versionId: latest.version_id, kind: 'rollback', at, actor, reason, dates: prev.map(p => p[0]),
+                       weeks: [...new Set([...P(latest.weeks, []), ...weeksOfDates(prev.map(p => p[0]))])].sort() }),
   ]);
   return json({ activationId, rolledBack: true, dates: prev.map(p => p[0]), affectedWeeks: P(latest.weeks, []) });
 }
