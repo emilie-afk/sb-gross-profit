@@ -21,7 +21,7 @@
  * such draft stays labelled provisional until the independent verifier has
  * recomputed it and matched every order and aggregate (verifyRoutes.js).
  */
-import { ApiError, json, readJson, WEEK_RE } from './http.js';
+import { ApiError, json, jsonText, readJson, WEEK_RE } from './http.js';
 import { newId, nowIso, getSettings, selectIn, atomic, SETTINGS_SQL, settingsFromRows } from './db.js';
 import { signManifest, manifestSignatureValid } from './auth.js';
 import { readBytes, gunzipCapped, sha256Text, HEX64 } from './gz.js';
@@ -116,7 +116,8 @@ export async function assembleManifest(env, weekStart) { return (await assemble(
  * the manifest reads increments the epoch (migration 0013 triggers), so an unchanged epoch at
  * commit time proves no input moved after these reads began.
  */
-async function assemble(env, weekStart) {
+const RAW_ORDERS = Object.freeze({ rawOrders: true });   // placeholder: getManifest splices D1's order-list text in
+async function assemble(env, weekStart, { rawOrders = false } = {}) {
   if (!WEEK_RE.test(weekStart) || weekStartOf(weekStart) !== weekStart) throw new ApiError(400, 'bad_query', 'week must be a Monday (YYYY-MM-DD)');
   const db = env.DB;
   const now = Date.now(), weekEnd = addDays(weekStart, 6), prevWeek = addDays(weekStart, -7);
@@ -126,7 +127,9 @@ async function assemble(env, weekStart) {
     db.prepare('SELECT n, aux_n FROM input_epoch WHERE id = 1'),
     db.prepare(SETTINGS_SQL),
     db.prepare('SELECT ship_date, version_id, day_hash FROM scr_day_owner WHERE ship_date BETWEEN ?1 AND ?2 ORDER BY ship_date').bind(weekStart, weekEnd),
-    db.prepare('SELECT order_name, order_number, body_hash, source_id FROM ord_ptr WHERE week_start = ?1 ORDER BY order_name').bind(weekStart),
+    // The week's order list rendered by D1 as the manifest's JSON (no per-row objects in the Worker).
+    db.prepare(`SELECT COUNT(*) AS n, json_group_array(json_array(order_name, body_hash, source_id) ORDER BY order_name) AS j,
+        (SELECT json_group_array(DISTINCT order_number) FROM ord_ptr WHERE week_start = ?1) AS nums FROM ord_ptr WHERE week_start = ?1`).bind(weekStart),
     db.prepare(ANCHOR_PUBLISHED_SQL).bind(weekStart),
     db.prepare(ANCHOR_LATEST_SQL).bind(weekStart),
     db.prepare(LATEST_REFRESH_SQL).bind(weekStart, new Date(now).toISOString()),
@@ -145,13 +148,17 @@ async function assemble(env, weekStart) {
     ? { shipmentsHash: pin.shipments_hash, hpdHash: pin.hpd_hash, shipments: pin.shipments, hpdOrders: pin.hpd_orders } : null;
   const epoch = one(b1[0])?.n ?? null;
   const settings = settingsFromRows(rs(b1[1]));
-  const weekOwned = rs(b1[2]), orders = rs(b1[3]);
+  const weekOwned = rs(b1[2]), ow = one(b1[3]) || { n: 0, j: '[]', nums: '[]' };
+  // Plain ASCII without escapes (order names, hex hashes, ids): D1's JSON text is byte-identical to
+  // JSON.stringify and to the key-sorted form; anything else is parsed and rendered by the Worker.
+  const ordersText = /^[\x20-\x5b\x5d-\x7e]*$/.test(ow.j) ? ow.j : null;
+  const ordersList = () => JSON.parse(ow.j);
   const anchor = anchorFromRows(one(b1[4]), one(b1[5]));
   const info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[6]), now), latest: one(b1[7]) });
   const prev = previousFromRows(one(b1[8]), one(b1[9]));
   const last = one(b1[10]);
   const closedAt = weekWindowUtc(weekStart, settings.store_timezone).endUtcExclusive;
-  const nums = [...new Set(orders.map(o => o.order_number))], numsJson = JSON.stringify(nums);
+  const nums = JSON.parse(ow.nums || '[]'), numsJson = JSON.stringify(nums);
   const vids = [...new Set(weekOwned.map(o => o.version_id))];
   // Batch 2: what depends on the week's orders, date owners and catalog.
   const b2 = await db.batch([
@@ -167,7 +174,7 @@ async function assemble(env, weekStart) {
   if (basis.basisStatus !== 'ok') throw new ApiError(409, 'shipping_report_not_ready', `No snapshot: the week's Shipping Cost Report is ${basis.basisStatus} (${basis.label})`, { shippingReport: basis.basisStatus });
   // Same precedence as before the reads were batched: report basis, then catalog, then orders.
   if (!info.rev) throw new ApiError(409, 'no_catalog', 'No accepted cost catalog; push one before computing');
-  if (!orders.length) throw new ApiError(409, 'week_empty', `No orders stored for the week of ${weekStart}`);
+  if (!ow.n) throw new ApiError(409, 'week_empty', `No orders stored for the week of ${weekStart}`);
   const aux = pinned || await auxOf(shipmentsFromRows(rs(b2[4]), rs(b2[5])), hpdFromRows(rs(b2[6]), rs(b2[7])));
   const cat = one(b2[3]);
   info.capturedAt = cat?.captured_at || null;
@@ -191,10 +198,10 @@ async function assemble(env, weekStart) {
   const owners = [...new Map([...weekOwned, ...rs(b3[0])].map(o => [o.ship_date, o])).values()].sort((a, b) => (a.ship_date < b.ship_date ? -1 : 1));
   const known = weekKeys.length ? rs(b3[1]).map(r => r.order_number) : [];
   const versions = rs(b3[2]);
-  return { epoch, latestSnapshot, manifest: {
+  return { epoch, latestSnapshot, ordersText, manifest: {
     v: MANIFEST_VERSION, weekStart, engineVersion: ENGINE_VERSION, asOf: new Date(now).toISOString(), storeTimezone: settings.store_timezone, settings,
     catalog: { rev: info.rev, info, completeness: P(cat?.meta, {})?.completeness || null, parts: rs(b2[2]).map(p => [p.table_name, p.part]) },
-    orders: orders.map(o => [o.order_name, o.body_hash, o.source_id]),
+    orders: rawOrders && ordersText ? RAW_ORDERS : ordersList(),
     scrDays: owners.map(o => [o.ship_date, o.version_id, o.day_hash]),
     scrVersions: versions.map(v => [v.version_id, v.source_id, v.requested_from, v.requested_to]),
     knownReportKeys: known,
@@ -245,9 +252,9 @@ const INPUT_EXCLUDED = new Set(['asOf', 'previousShippingExpense', 'previousDraf
  * Both hashes from one key-sorted rendering of each top-level field (the order list dominates the
  * manifest; it is rendered once instead of twice). Equal to sha256(stableStringify(m)) and inputsHashOf(m).
  */
-async function manifestHashes(m) {
+async function manifestHashes(m, ordersText = null) {
   const keys = Object.keys(m).sort();
-  const piece = new Map(keys.map(k => [k, stableStringify(m[k])]));
+  const piece = new Map(keys.map(k => [k, k === 'orders' && m[k] === RAW_ORDERS ? ordersText : stableStringify(m[k])]));
   const { info: _i, ...catalog } = m.catalog;
   const join = (ks, f) => `{${ks.map(k => `${JSON.stringify(k)}:${f(k)}`).join(',')}}`;
   return [await sha256Text(join(keys, k => piece.get(k))),
@@ -255,12 +262,13 @@ async function manifestHashes(m) {
 }
 
 export async function getManifest(env, weekStart) {
-  const { manifest, epoch, latestSnapshot: latest } = await assemble(env, weekStart);
-  const [manifestHash, inputsHash] = await manifestHashes(manifest);
+  const { manifest, epoch, latestSnapshot: latest, ordersText } = await assemble(env, weekStart, { rawOrders: true });
+  const [manifestHash, inputsHash] = await manifestHashes(manifest, ordersText);
   // The week's newest revision was computed from exactly these inputs: nothing to do (a retry or re-run writes 0 rows).
   const existing = latest?.storage === 'chunked' && latest.manifest_hash === inputsHash
     ? { snapshotId: latest.snapshot_id, revision: latest.revision, status: latest.status } : null;
-  return json({ manifest, manifestHash, epoch, signature: await signManifest(env, manifestHash, epoch), existing });
+  const body = JSON.stringify({ manifest, manifestHash, epoch, signature: await signManifest(env, manifestHash, epoch), existing });
+  return manifest.orders === RAW_ORDERS ? jsonText(body.replace('{"rawOrders":true}', () => ordersText)) : jsonText(body);
 }
 
 export async function orderBodies(request, env) {

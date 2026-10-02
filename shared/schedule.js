@@ -33,8 +33,35 @@ const formatterFor = timeZone => FORMATTERS.get(timeZone) || FORMATTERS.set(time
   timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
 })).get(timeZone);
 
+/**
+ * The UTC offset (ms) of the two zones this system runs in, by their published rules, or null.
+ * The first Intl.DateTimeFormat in a fresh Workers isolate loads ICU time-zone data (≈ 25 ms of CPU
+ * in Node), which alone exceeds the Workers Free limit; these two zones need no Intl:
+ *   America/Los_Angeles  US rules since 2007: PDT from the second Sunday of March 02:00 PST
+ *                        (10:00 UTC) to the first Sunday of November 02:00 PDT (09:00 UTC)
+ *   Asia/Ho_Chi_Minh     UTC+07:00 since 1975-06-13
+ * Outside those ranges (and for any other zone) Intl decides. Tests compare both hourly over decades.
+ */
+const H = 3600_000;
+const nthSunday = (y, month0, n) => { const first = new Date(Date.UTC(y, month0, 1)).getUTCDay(); return 1 + ((7 - first) % 7) + 7 * (n - 1); };
+export function knownOffsetMs(ms, timeZone) {
+  if (timeZone === 'Asia/Ho_Chi_Minh') return ms >= Date.UTC(1975, 5, 12, 17) ? 7 * H : null;
+  if (timeZone === 'America/Los_Angeles') {
+    const y = new Date(ms).getUTCFullYear();
+    if (y < 2008 || y > 2037) return null;
+    const start = Date.UTC(y, 2, nthSunday(y, 2, 2), 10), end = Date.UTC(y, 10, nthSunday(y, 10, 1), 9);
+    return ms >= start && ms < end ? -7 * H : -8 * H;
+  }
+  return null;
+}
+
 /** Wall-clock parts of an instant in a zone. */
 function partsIn(date, timeZone) {
+  const off = knownOffsetMs(date.getTime(), timeZone);
+  if (off !== null && !isNaN(date.getTime())) {
+    const w = new Date(Math.floor(date.getTime() / 1000) * 1000 + off);
+    return { y: w.getUTCFullYear(), m: w.getUTCMonth() + 1, d: w.getUTCDate(), h: w.getUTCHours(), mi: w.getUTCMinutes(), s: w.getUTCSeconds() };
+  }
   const p = Object.fromEntries(formatterFor(timeZone).formatToParts(date).map(x => [x.type, x.value]));
   return { y: +p.year, m: +p.month, d: +p.day, h: +p.hour, mi: +p.minute, s: +p.second };
 }
