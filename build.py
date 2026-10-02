@@ -643,6 +643,32 @@ def _worker_call(url, secret, method, path, payload):
         return json.loads(r.read().decode('utf-8'))
 
 
+SEAL_RETRY_WAITS = (5, 30, 35)   # seconds; a seal left 'sealing' by a Worker that stopped is taken over after 60 s
+
+
+def _seal_catalog_upload(url, secret, uid, waits=SEAL_RETRY_WAITS, sleep=None):
+    """Seal, retrying when the answer is lost or another seal holds the upload.
+    A repeated seal of a sealed upload replays its stored answer, so retrying is safe."""
+    import time
+    sleep = sleep or time.sleep
+    for attempt in range(len(waits) + 1):
+        try:
+            return _worker_call(url, secret, 'POST', f'/v1/ingest/catalog/uploads/{uid}/seal', {})
+        except urllib.error.HTTPError as e:
+            code = ''
+            try:
+                code = json.loads(e.read().decode('utf-8')).get('error', '')
+            except Exception:
+                pass
+            retry = e.code >= 500 or (e.code == 409 and code in ('seal_in_progress', 'seal_conflict'))
+            if not retry or attempt == len(waits):
+                raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt == len(waits):
+                raise
+        sleep(waits[attempt])
+
+
 def _push_catalog_chunked(url, secret, tables, body):
     """Chunked push (catalog_push.py). True when the Worker sealed it; False → use the one-request push."""
     from catalog_push import catalog_chunks
@@ -658,7 +684,7 @@ def _push_catalog_chunked(url, secret, tables, body):
         for table, part, group, entries in chunks:
             _worker_call(url, secret, 'PUT', f'/v1/ingest/catalog/uploads/{uid}/chunks/{table}/{part}',
                          {'entries': entries, **({'group': group} if group is not None else {})})
-        res = _worker_call(url, secret, 'POST', f'/v1/ingest/catalog/uploads/{uid}/seal', {})
+        res = _seal_catalog_upload(url, secret, uid)
     except urllib.error.HTTPError as e:
         print(f"\nCatalog push (chunked): HTTP {e.code}; using the one-request push")
         return False
