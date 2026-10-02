@@ -32,7 +32,7 @@ HP fallback env vars (only if HP_SHEET_URL not set):
   PRODUCT_COSTS_JSON1, PRODUCT_COSTS_JSON2, SKU_WEIGHTS_JSON
 """
 
-import os, json, csv, io, urllib.request
+import os, json, csv, io, urllib.request, urllib.error
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -630,6 +630,48 @@ def _hook_refresh_id(raw):
     return refresh_id_from_hook_body(raw)
 
 
+CATALOG_UA = 'sb-gp-build/1.0 (+netlify build.py catalog push)'
+
+
+def _worker_call(url, secret, method, path, payload):
+    req = urllib.request.Request(url.rstrip('/') + path, data=json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8'), method=method,
+                                 headers={'Content-Type': 'application/json', 'X-Ingest-Secret': secret,
+                                          # Cloudflare answers the default 'Python-urllib/x.y' agent with
+                                          # 403 'error code: 1010' before the Worker runs, so name the client.
+                                          'User-Agent': CATALOG_UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
+def _push_catalog_chunked(url, secret, tables, body):
+    """Chunked push (catalog_push.py). True when the Worker sealed it; False → use the one-request push."""
+    from catalog_push import catalog_chunks
+    try:
+        layout, chunks = catalog_chunks(tables)
+    except ValueError as e:
+        print(f"\nCatalog push (chunked): not possible ({e}); using the one-request push")
+        return False
+    try:
+        opened = _worker_call(url, secret, 'POST', '/v1/ingest/catalog/uploads',
+                              {'layout': layout, 'meta': body['meta'], **({'mcgExtraCsv': body['mcgExtraCsv']} if 'mcgExtraCsv' in body else {})})
+        uid = opened['uploadId']
+        for table, part, group, entries in chunks:
+            _worker_call(url, secret, 'PUT', f'/v1/ingest/catalog/uploads/{uid}/chunks/{table}/{part}',
+                         {'entries': entries, **({'group': group} if group is not None else {})})
+        res = _worker_call(url, secret, 'POST', f'/v1/ingest/catalog/uploads/{uid}/seal', {})
+    except urllib.error.HTTPError as e:
+        print(f"\nCatalog push (chunked): HTTP {e.code}; using the one-request push")
+        return False
+    except Exception as e:
+        print(f"\nCatalog push (chunked): failed ({type(e).__name__}); using the one-request push")
+        return False
+    status = 'accepted' if res.get('accepted') else 'REJECTED'
+    print(f"\nCatalog push (chunked, {len(chunks)} chunks): {status} {res.get('catalogRev')} (active: {res.get('activeCatalogRev')})")
+    for reason in res.get('reasons') or []:
+        print(f"    - {reason}")
+    return True
+
+
 def push_catalog():
     url = os.environ.get('CATALOG_PUSH_URL', '').strip()
     secret = os.environ.get('SB_INGEST_SECRET', '').strip()
@@ -666,13 +708,17 @@ def push_catalog():
                 body['mcgExtraCsv'] = r.read().decode('utf-8', errors='replace')
         except Exception as e:
             print(f"  ⚠ MCG extra sheet fetch failed ({e}); pushing catalog without it")
+    # Workers Free: push in bounded chunks; fall back to the one-request push if the Worker
+    # does not offer chunked uploads (404) or a chunk is refused.
+    if _push_catalog_chunked(url, secret, tables, body):
+        return
     try:
         req = urllib.request.Request(url.rstrip('/') + '/v1/ingest/catalog',
                                      data=json.dumps(body).encode('utf-8'), method='POST',
                                      headers={'Content-Type': 'application/json', 'X-Ingest-Secret': secret,
                                               # Cloudflare answers the default 'Python-urllib/x.y' agent with
                                               # 403 'error code: 1010' before the Worker runs, so name the client.
-                                              'User-Agent': 'sb-gp-build/1.0 (+netlify build.py catalog push)'})
+                                              'User-Agent': CATALOG_UA})
         with urllib.request.urlopen(req, timeout=30) as r:
             res = json.loads(r.read().decode('utf-8'))
         status = 'accepted' if res.get('accepted') else 'REJECTED'

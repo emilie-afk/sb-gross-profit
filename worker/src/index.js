@@ -14,6 +14,7 @@
  * The Worker never returns a secret, a D1 credential or customer data.
  */
 import { ApiError, json, errorResponse, withCors, preflight } from './http.js';
+import { openCatalogUpload, putCatalogChunk, sealCatalogUpload } from './catalogUpload.js';
 import { requireSecret, requireReader, login, logout, sessionInfo } from './auth.js';
 import { ingestShopify, ingestShipStation, ingestHpd, ingestCatalog } from './ingest.js';
 import { ingestShippingCostReport, listVersions, getVersion, acceptVersion, rejectVersion, rollbackActivation, getSegments, getEffectiveSummary } from './shippingCost.js';
@@ -55,6 +56,10 @@ async function route(request, env) {
   if (p.startsWith('/v1/ingest/')) {
     requireSecret(request, env, 'ingest');
     if (p === '/v1/ingest/week-plan' && m === 'GET') return weekPlan(request, env);
+    // Chunked catalog push (bounded CPU per request); the one-request POST /v1/ingest/catalog stays.
+    if ((g = p.match(/^\/v1\/ingest\/catalog\/uploads\/(cup_[0-9a-f]{20})\/chunks\/([a-z_]{1,40})\/(\d{1,4})$/)) && m === 'PUT') return putCatalogChunk(request, env, g[1], g[2], g[3]);
+    if (p === '/v1/ingest/catalog/uploads' && m === 'POST') return openCatalogUpload(request, env);
+    if ((g = p.match(/^\/v1\/ingest\/catalog\/uploads\/(cup_[0-9a-f]{20})\/seal$/)) && m === 'POST') return sealCatalogUpload(request, env, g[1]);
     if (m !== 'POST') throw new ApiError(405, 'method_not_allowed', 'POST only');
     if (p === '/v1/ingest/shopify') return ingestShopify(request, env);
     if (p === '/v1/ingest/shipstation') return ingestShipStation(request, env);

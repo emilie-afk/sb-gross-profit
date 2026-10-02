@@ -55,10 +55,14 @@ export function catalogCounts(catalog) {
  * @returns {{ accepted: boolean, reasons: string[], counts }}
  */
 export function validateCatalog(candidate, previous = null, opts = {}) {
+  return validateCatalogCounts(catalogCounts(candidate), previous, opts);
+}
+
+/** The same decision from the counts alone (the chunked upload sums them per chunk). */
+export function validateCatalogCounts(counts, previous = null, opts = {}) {
   const tol = opts.shrinkTolerance ?? 0.10;
   const mins = opts.vendorMinimums ?? VENDOR_MINIMUMS;
   const totalMin = opts.vendorTotalMinimum ?? VENDOR_TOTAL_MINIMUM;
-  const counts = catalogCounts(candidate);
   const reasons = [];
 
   for (const t of REQUIRED_NONEMPTY) if (!counts.tableCounts[t]) reasons.push(`required table ${t} is empty or missing`);
@@ -88,6 +92,26 @@ export function validateCatalog(candidate, previous = null, opts = {}) {
 export async function catalogRevOf(candidate) {
   const h = await contentHash({ tables: candidate.tables || {}, mcgExtra: candidate.mcgExtra || {}, overrides: candidate.overrides || {} });
   return `cat_${h.slice(0, 16)}`;
+}
+
+/**
+ * Revision of a catalog uploaded in chunks: content-addressed over its stored parts
+ * ([table, part, sha256(payload)], sorted), so the Worker computes it from per-chunk hashes
+ * without re-reading the catalog. The collector and verifier accept either definition.
+ */
+export async function catalogPartsRevOf(parts) {
+  const rows = [];
+  for (const [t, p, payload] of parts) rows.push([t, p, await sha256Text(payload)]);
+  return catalogPartsRevFromHashes(rows);
+}
+/** The same from [table, part, sha256(payload)] rows (the Worker keeps the hashes per chunk). */
+export async function catalogPartsRevFromHashes(rows) {
+  const sorted = rows.map(r => [r[0], Number(r[1]), r[2]]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] - b[1]));
+  return `cat_${(await sha256Text(JSON.stringify(sorted))).slice(0, 16)}`;
+}
+async function sha256Text(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
 /** Catalog → the cost arguments calculate() takes, assembled exactly as index.html does. */

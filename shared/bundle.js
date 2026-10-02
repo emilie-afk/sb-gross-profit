@@ -17,7 +17,7 @@
 import { weekStartOf, stableStringify } from './normalized.js';
 import { buildSnapshot, SHIPPING_SOURCES, ENGINE_VERSION } from './snapshot.js';
 import { effectiveFromDays, reportFromDays, sha256Hex, dayHash } from './scrDays.js';
-import { catalogRevOf } from './catalog.js';
+import { catalogRevOf, catalogPartsRevOf } from './catalog.js';
 
 export const MANIFEST_VERSION = 3;   // 2: aux hashes over the served JSON; 3: bounded result parts (orders:k, orderindex, scenario:j)
 
@@ -128,7 +128,9 @@ export async function snapshotInputFromParts(manifest, parts) {
   if (catalogParts.length !== cat.parts.length) throw fail('part_missing', 'A catalog part is missing');
   const catalog = catalogFromParts(cat.rev, catalogParts);
   // The catalog revision is content-addressed: the parts must hash back to it.
-  if (await catalogRevOf({ tables: catalog.tables, mcgExtra: catalog.mcgExtra, overrides: catalog.overrides }) !== cat.rev) {
+  // (Either definition: the content hash of a catalog pushed whole, or the parts hash of a chunked push.)
+  if (await catalogRevOf({ tables: catalog.tables, mcgExtra: catalog.mcgExtra, overrides: catalog.overrides }) !== cat.rev
+      && await catalogPartsRevOf(catalogParts) !== cat.rev) {
     throw fail('part_hash_mismatch', 'The catalog parts do not match the catalog revision');
   }
   if (await auxHash(parts.shipments) !== manifest.aux.shipmentsHash || await auxHash(parts.hpdOrders) !== manifest.aux.hpdHash) {
