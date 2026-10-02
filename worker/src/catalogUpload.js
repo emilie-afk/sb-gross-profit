@@ -21,9 +21,8 @@
  * An identical push (same chunks) gets the same revision and writes no catalog rows again.
  */
 import { ApiError, json, readJson } from './http.js';
-import { newId, nowIso, getSettings, atomic } from './db.js';
-import { latestAcceptedCatalogMeta } from './store.js';
-import { withRun, resolveRefresh } from './ingest.js';
+import { newId, nowIso, getSettings, atomic, SETTINGS_SQL, settingsFromRows } from './db.js';
+import { resolveRefresh } from './ingest.js';
 import { sha256Text } from './gz.js';
 import { stableStringify, assertNoCustomerFields } from '../../shared/normalized.js';
 import { CATALOG_TABLES, validateCatalogCounts, parseMcgExtraCsv, catalogPartsRevFromHashes } from '../../shared/catalog.js';
@@ -119,9 +118,17 @@ export async function putCatalogChunk(request, env, id, table, partText) {
 
 export async function sealCatalogUpload(request, env, id) {
   const db = env.DB;
-  const u = await openUpload(db, id);
-  const layout = P(u.layout, []), meta = P(u.meta, {});
-  const rows = (await db.prepare('SELECT table_name, part, grp, first_key, last_key, n, sha256 FROM catalog_upload_part WHERE upload_id = ?1').bind(id).all()).results || [];
+  // One read round: the upload, its chunk metadata (never the payloads), settings and the active catalog.
+  const [ur, pr, sr, lr] = await db.batch([
+    db.prepare('SELECT * FROM catalog_upload WHERE upload_id = ?1').bind(id),
+    db.prepare('SELECT table_name, part, grp, first_key, last_key, n, sha256 FROM catalog_upload_part WHERE upload_id = ?1').bind(id),
+    db.prepare(SETTINGS_SQL),
+    db.prepare("SELECT catalog_rev, table_counts, vendor_counts FROM cost_catalog WHERE status = 'accepted' ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1"),
+  ]);
+  const u = ur.results?.[0];
+  if (!u) throw new ApiError(404, 'upload_unknown', 'No such catalog upload');
+  if (u.status !== 'open') throw new ApiError(409, 'upload_closed', `This upload is ${u.status}`);
+  const layout = P(u.layout, []), meta = P(u.meta, {}), rows = pr.results || [];
   const byTable = new Map();
   for (const r of rows) (byTable.get(r.table_name) || byTable.set(r.table_name, []).get(r.table_name)).push(r);
   // Completeness and key order (keys strictly increase across the chunks of a table or group).
@@ -139,36 +146,31 @@ export async function sealCatalogUpload(request, env, id) {
     }
   }
   tableCounts.mcgExtra = meta.mcgExtraCount || 0; tableCounts.overrides = 0;
-  const counts = { tableCounts, vendorCounts, vendorTotal: Object.values(vendorCounts).reduce((s, n) => s + n, 0) };
+  const counts = { tableCounts, vendorCounts, vendorTotal: Object.values(vendorCounts).reduce((sum, n) => sum + n, 0) };
   const rev = await catalogPartsRevFromHashes(rows.map(r => [r.table_name, r.part, r.sha256]));
-  const body = { meta: { source: meta.source, builtAt: meta.builtAt, commit: meta.commit, refreshId: meta.refreshId } };
-  return withRun(env, 'catalog', body, async () => {
-    const settings = await getSettings(db);
-    const prev = await latestAcceptedCatalogMeta(db);
-    const previous = prev ? { tableCounts: JSON.parse(prev.table_counts), vendorCounts: JSON.parse(prev.vendor_counts) } : null;
-    const validation = validateCatalogCounts(counts, previous, { shrinkTolerance: Number(settings.catalog_shrink_tolerance) });
-    const exists = await db.prepare('SELECT status FROM cost_catalog WHERE catalog_rev = ?1').bind(rev).first();
-    const at = nowIso();
-    const done = [db.prepare('DELETE FROM catalog_upload_part WHERE upload_id = ?1').bind(id),
-                  db.prepare("UPDATE catalog_upload SET status = 'sealed', sealed_at = ?2 WHERE upload_id = ?1 AND status = 'open'").bind(id, at)];
-    if (exists) {
-      // Same content pushed again: it is the current catalog again (as the one-request push).
-      await atomic(db, [...(exists.status === 'accepted' ? [db.prepare('UPDATE cost_catalog SET last_pushed_at = ?2 WHERE catalog_rev = ?1').bind(rev, at)] : []), ...done]);
-    } else {
-      await atomic(db, [
-        db.prepare(`INSERT INTO cost_catalog (catalog_rev, captured_at, source, status, reject_reasons, table_counts, vendor_counts, vendor_total, meta)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`).bind(rev, at, meta.source, validation.accepted ? 'accepted' : 'rejected', JSON.stringify(validation.reasons),
-            JSON.stringify(counts.tableCounts), JSON.stringify(counts.vendorCounts), counts.vendorTotal, JSON.stringify({ builtAt: meta.builtAt, commit: meta.commit })),
-        // The fragments move into the catalog inside D1: the Worker never re-reads the catalog.
-        ...(validation.accepted ? [db.prepare('INSERT INTO cost_catalog_part (catalog_rev, table_name, part, payload) SELECT ?2, table_name, part, payload FROM catalog_upload_part WHERE upload_id = ?1').bind(id, rev)] : []),
-        ...done,
-      ]);
-    }
-    const accepted = exists ? exists.status === 'accepted' : validation.accepted;
-    const refresh = await resolveRefresh(db, meta.refreshId, { rev, accepted, reasons: validation.reasons });
-    return { rowsSeen: 1, written: exists ? 0 : 1, duplicates: exists ? 1 : 0,
-             diagnostics: { catalogRev: rev, accepted, reasons: validation.reasons, refresh },
-             response: { catalogRev: rev, accepted, status: exists ? exists.status : (validation.accepted ? 'accepted' : 'rejected'), reasons: validation.reasons, refresh,
-                         counts, activeCatalogRev: accepted ? rev : (prev?.catalog_rev || null) } };
-  });
+  const settings = settingsFromRows(sr.results || []), prev = lr.results?.[0] || null;
+  const previous = prev ? { tableCounts: JSON.parse(prev.table_counts), vendorCounts: JSON.parse(prev.vendor_counts) } : null;
+  const validation = validateCatalogCounts(counts, previous, { shrinkTolerance: Number(settings.catalog_shrink_tolerance) });
+  const exists = await db.prepare('SELECT status FROM cost_catalog WHERE catalog_rev = ?1').bind(rev).first();
+  const at = nowIso(), runId = newId('ing');
+  const accepted = exists ? exists.status === 'accepted' : validation.accepted;
+  const status = exists ? exists.status : (validation.accepted ? 'accepted' : 'rejected');
+  const refresh = meta.refreshId ? await resolveRefresh(db, meta.refreshId, { rev, accepted, reasons: validation.reasons })
+                                 : { status: 'none', note: 'no refreshId in this push; no refresh resolved' };
+  const diagnostics = { catalogRev: rev, accepted, reasons: validation.reasons, refresh };
+  // One write round: the catalog (or its re-push), the copy of the fragments inside D1, the ingest record.
+  await atomic(db, [
+    ...(exists
+      ? (exists.status === 'accepted' ? [db.prepare('UPDATE cost_catalog SET last_pushed_at = ?2 WHERE catalog_rev = ?1').bind(rev, at)] : [])
+      : [db.prepare(`INSERT INTO cost_catalog (catalog_rev, captured_at, source, status, reject_reasons, table_counts, vendor_counts, vendor_total, meta)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`).bind(rev, at, meta.source, status, JSON.stringify(validation.reasons),
+              JSON.stringify(counts.tableCounts), JSON.stringify(counts.vendorCounts), counts.vendorTotal, JSON.stringify({ builtAt: meta.builtAt, commit: meta.commit })),
+         ...(validation.accepted ? [db.prepare('INSERT INTO cost_catalog_part (catalog_rev, table_name, part, payload) SELECT ?2, table_name, part, payload FROM catalog_upload_part WHERE upload_id = ?1').bind(id, rev)] : [])]),
+    db.prepare('DELETE FROM catalog_upload_part WHERE upload_id = ?1').bind(id),
+    db.prepare("UPDATE catalog_upload SET status = 'sealed', sealed_at = ?2 WHERE upload_id = ?1 AND status = 'open'").bind(id, at),
+    db.prepare(`INSERT INTO ingest_run (run_id, source, week_start, started_at, finished_at, status, rows_seen, rows_written, duplicates, diagnostics, weeks_touched)
+        VALUES (?1, 'catalog', NULL, ?2, ?2, 'ok', 1, ?3, ?4, ?5, '{}')`).bind(runId, at, exists ? 0 : 1, exists ? 1 : 0, JSON.stringify(diagnostics)),
+  ]);
+  return json({ runId, source: 'catalog', weekStart: null, mode: null, rowsSeen: 1, rowsWritten: exists ? 0 : 1, duplicates: exists ? 1 : 0, weeksTouched: {},
+                catalogRev: rev, accepted, status, reasons: validation.reasons, refresh, counts, activeCatalogRev: accepted ? rev : (prev?.catalog_rev || null) });
 }

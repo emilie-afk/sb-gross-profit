@@ -15,8 +15,8 @@ table's canonical JSON. No network here: pure functions, tested from the JS suit
 import json
 
 DEPTH2 = {'vendor_costs'}
-CHUNK_BYTES = 48_000          # serialized entries per chunk (the Worker accepts ≤ 96 KB)
-CHUNK_ENTRIES = 1500          # (the Worker accepts ≤ 2,000)
+CHUNK_BYTES = 16_000          # serialized entries per chunk (the Worker accepts ≤ 96 KB); ~16 KB keeps a chunk well under 10 ms
+CHUNK_ENTRIES = 600           # (the Worker accepts ≤ 2,000)
 
 
 def js_key(s):

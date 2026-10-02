@@ -114,7 +114,29 @@ export function findCustomerFields(value, path = '$', out = []) {
   return out;
 }
 
+/** Normalized key (lower case, letters and digits only), cached: the same keys repeat on every row. */
+const KEY_CACHE = new Map();
+const normKey = k => {
+  let n = KEY_CACHE.get(k);
+  if (n === undefined) { n = k.toLowerCase().replace(/[^a-z0-9]/g, ''); if (KEY_CACHE.size < 10_000) KEY_CACHE.set(k, n); }
+  return n;
+};
+/** Same decision as findCustomerFields(value).length > 0, without building a path per value. */
+function hasCustomerFields(value) {
+  if (Array.isArray(value)) { for (const v of value) if (hasCustomerFields(v)) return true; return false; }
+  if (value && typeof value === 'object') {
+    for (const k in value) {
+      if (!Object.prototype.hasOwnProperty.call(value, k)) continue;
+      const v = value[k];
+      if (CUSTOMER_KEYS.has(normKey(k))) { if (v !== null && v !== undefined && v !== '') return true; }
+      else if (v && typeof v === 'object' && hasCustomerFields(v)) return true;
+    }
+  }
+  return false;
+}
+
 export function assertNoCustomerFields(value) {
+  if (!hasCustomerFields(value)) return;                     // the common case: one pass, no path strings
   const paths = findCustomerFields(value);
   if (paths.length) throw new CustomerDataError(paths);
 }
