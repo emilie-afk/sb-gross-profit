@@ -26,4 +26,17 @@ export async function detectShopifyAuthState(page, { adminOrigin, selectors = {}
   return r;
 }
 
+/**
+ * Shopify Admin renders after `domcontentloaded`: poll until a state is recognised or `settleMs`
+ * (default 20 s) passes, so a page still loading is not reported as unrecognised (exit 22).
+ */
+export async function settleShopifyAuthState(page, opts = {}, { settleMs = opts.settleMs ?? 20000, pollMs = 500 } = {}) {
+  const until = Date.now() + settleMs;
+  for (;;) {
+    const r = await detectShopifyAuthState(page, opts);
+    if (r.state !== 'unknown' || Date.now() >= until) return r;
+    await page.waitForTimeout(pollMs);
+  }
+}
+
 export const NEEDS_HUMAN = new Set(['two_factor_required', 'captcha', 'unknown']);

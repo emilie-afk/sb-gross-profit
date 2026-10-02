@@ -17,7 +17,7 @@ import { chromium } from 'playwright';
 import { lastCompletedWeek, weekFromStart, render, purgeOlderThan } from '../../shipstation-export/src/lib.mjs';
 import { uploadToWorker, workerEndpoint } from '../../shipstation-export/src/upload.mjs';
 import { readWindowsCredential } from './credentials.mjs';
-import { detectShopifyAuthState } from './authState.mjs';
+import { settleShopifyAuthState } from './authState.mjs';
 import { gmailAccessToken, gmailClient } from './gmail.mjs';
 import { assertCollectorConfig, adminOrigin, localPaths, EXIT, RETENTION_MS, INGEST_PATH, safeError, browserLaunchOptions, calendarDayPattern } from './lib.mjs';
 import { runCollector } from './collect.mjs';
@@ -40,7 +40,7 @@ export function playwrightBrowser({ config, paths, headed, launchOptions = {}, b
       page = context.pages()[0] || await context.newPage();
       await page.goto(config.adminUrl, { waitUntil: 'domcontentloaded' });
     },
-    authState: () => detectShopifyAuthState(page, { adminOrigin: origin, selectors: config.auth?.selectors, text: config.auth?.text }),
+    authState: () => settleShopifyAuthState(page, { adminOrigin: origin, selectors: config.auth?.selectors, text: config.auth?.text, settleMs: config.auth?.settleMs }),
     async login({ username, password }) {
       const f = config.loginForm || {};
       await page.locator(f.emailField || 'input#account_email').first().fill(username);
