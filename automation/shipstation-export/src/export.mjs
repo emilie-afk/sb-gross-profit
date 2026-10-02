@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { detectAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
+import { detectAuthState, settleAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
 import { readWindowsCredential } from './credentials.mjs';
 import { lastCompletedWeek, weekFromStart, render, localPaths, assertNoSecretsInConfig, purgeOlderThan, resolveDelivery, browserLaunchOptions } from './lib.mjs';
 import { uploadToWorker, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
@@ -87,7 +87,7 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
   try {
     const page = context.pages()[0] || await context.newPage();
     await page.goto(config.appUrl, { waitUntil: 'domcontentloaded' });
-    let { state, evidence } = await detectAuthState(page, config.auth);
+    let { state, evidence } = await settleAuthState(page, config.auth);
     manifest.authStateAtStart = state;
 
     if (state === 'login_required' || state === 'session_expired') {
@@ -98,7 +98,7 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
       await page.locator(config.loginForm.submit).first().click();
       await page.waitForLoadState('domcontentloaded');
       await page.waitForTimeout(2000);
-      ({ state, evidence } = await detectAuthState(page, config.auth));
+      ({ state, evidence } = await settleAuthState(page, config.auth));
       if (state === 'login_required') return finish('login_failed', EXIT.LOGIN_FAILED);
     }
     if (state === 'two_factor_required') return finish('needs_2fa', EXIT.NEEDS_2FA, { note: 'Run login.mjs in headed mode once to complete 2FA' });

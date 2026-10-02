@@ -56,6 +56,19 @@ export async function detectAuthState(page, opts = {}) {
   return { state: 'unknown', evidence: null };
 }
 
+/**
+ * Single-page apps render after `domcontentloaded`: poll detectAuthState until it names a state
+ * (or `settleMs`, default 20 s, passes), so a page still loading is not reported as unrecognised.
+ */
+export async function settleAuthState(page, opts = {}, { settleMs = opts.settleMs ?? 20000, pollMs = 500 } = {}) {
+  const until = Date.now() + settleMs;
+  for (;;) {
+    const r = await detectAuthState(page, opts);
+    if (r.state !== 'unknown' || Date.now() >= until) return r;
+    await page.waitForTimeout(pollMs);
+  }
+}
+
 /** States that need a person. The job exits and notifies rather than proceeding. */
 export const NEEDS_HUMAN = new Set(['two_factor_required', 'captcha', 'unknown']);
 
