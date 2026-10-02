@@ -602,7 +602,7 @@ The build-push path below still works and is retired after acceptance.
 
 | Netlify variable | Value |
 | --- | --- |
-| `CATALOG_PUSH_URL` | the Worker base URL, `https://sb-gp-worker.<account>.workers.dev` (`build.py` appends `/v1/ingest/catalog`) |
+| `CATALOG_PUSH_URL` | the Worker base URL, `https://sb-gp-worker.<account>.workers.dev` (`build.py` pushes the catalog in chunks to `/v1/ingest/catalog/uploads`; it falls back to one request to `/v1/ingest/catalog` if the Worker has no chunk routes) |
 | `SB_INGEST_SECRET` | the ingest secret |
 
 On this path an administrator (or `tools/catalog-refresh-acceptance.mjs`) first
@@ -783,7 +783,9 @@ The account stays on Workers Free (10 ms CPU per request; 100,000 D1 rows writte
 
 **Input epoch (migrations 0015–0016).** Triggers increment `input_epoch.n` on every write to a table a week's manifest reads (settings, `ord_ptr`, `scr_day_owner`, `scr_version`, catalog tables, snapshots, shipments, HPD and HPD ingest status). The manifest is issued with the epoch it was assembled at, signed together. Finalize commits only if the epoch is unchanged inside its commit transaction, so an upload that lands in between cannot finalize stale results. When the epoch still equals the manifest's (no input written since), the manifest is not rebuilt; otherwise it is rebuilt and compared.
 
-**Bounded requests.** Result parts hold at most 40 orders' rows: `orders:k` (orders grouped in the default gp_asc order), `lines:k` (their lines), `scenario:j` (40 orders each, in name order), a compact `orderindex` (one tuple per order in engine order: list fields and the part holding it) and `sections`. A part is at most 128 KB compressed / 512 KB decompressed. The order list filters and sorts the index and reads only the parts holding the requested page; an order's detail reads one order part and its line part; the scenario lines are joined from their parts without re-serializing.
+**Catalog push in chunks (migration 0017).** One ~360 KB catalog request took ~22 ms of Worker CPU on staging. `build.py` (`catalog_push.py`) now sends the catalog as ~16 KB chunks of key-sorted entries (`vendor_costs` split per vendor): `POST /v1/ingest/catalog/uploads` → `PUT …/chunks/:table/:part` → `POST …/seal`. Each chunk is stored as the exact fragment of its table's canonical JSON, so the stored catalog reads exactly as before; seal checks completeness and key order, applies the same validation from the summed counts and copies the fragments into the catalog inside D1. A chunked catalog's revision is the hash of its parts' hashes; the collector and verifier accept either definition. A repeat push is a duplicate.
+
+**Bounded requests.** Result parts hold at most 40 orders' rows: `orders:k` (orders grouped in the default gp_asc order), `lines:k` (their lines), `scenario:j` (40 orders each, in name order), a compact `orderindex` (one tuple per order in engine order: list fields and the part holding it) and `sections`. A part is at most 128 KB compressed / 512 KB decompressed. The order list filters and sorts the index and reads only the parts holding the requested page (at most 100 orders per page); an order's detail reads one order part and its line part; scenario input is paged (`?page=j`, 40 orders per page, `page.count` in the answer) and each page is served from one stored part as text. Sorts other than GP and filtered lists still read up to every order part of the week (≈ 8 ms at ~375 orders a week).
 
 **Tables (migration 0012).** `src_object`, `src_segment`, `ord_body`, `ord_ptr`, `scr_version`, `scr_day`, `scr_day_owner`, `scr_activation`, `result_upload`, `snapshot_blob`, `verify_report`; `snapshot.storage` (`rows` | `chunked`) and `snapshot.manifest_hash`. Text-keyed tables are `WITHOUT ROWID`, so one row is one D1 write. The existing tables and routes are unchanged; the csv_text path, manual uploads and backfill keep working.
 
@@ -800,6 +802,8 @@ The account stays on Workers Free (10 ms CPU per request; 100,000 D1 rows writte
 **Status.** `GET /v1/weeks/:w/status` (dashboard session or admin; the collector uses `/v1/collect/weeks/:w/status`) names what is pending — export, Shipping Cost Report review, compute or verification — and the target (`met`, `met_late`, `missed`, `pending`) against the scheduled slot (Monday 15:30 ICT). It never reports the target as met without a verified draft.
 
 **Measured locally** (workerd + D1, calibrated rows written; 3,000-order rolling window): first-load Monday 12,593 writes, steady Monday 1,982, a full repeat 0 (the input-epoch triggers add one row per input row written).
+
+**Measured on staging, 2026-10-01** (after bounded catalog chunks, 100-order pages and paged scenario input): a full steady cycle of 1,120 requests had median 3 ms, P99 8 ms, maximum 12 ms and one request above 10 ms (a manifest on a freshly started isolate; warm manifests take 3–7 ms); 0 errors; the chunked push of the real catalog was 64 requests, maximum 9 ms. Recomputing 8 full-size weeks wrote ~450 rows; repeating every upload and week on unchanged inputs wrote 0.
 
 **Measured on staging** (Workers Free, synthetic full-size set: 3,000 orders, ~375 a week; 2026-09-30): every draft verified; dashboard reads equal today's Worker path for all 2,970 orders; a full repeat of every upload and week writes 0 rows. Whole-request CPU on the weekly path, three steady full-size runs: median 2–3 ms, P99 8–12 ms; 2, 6 and 14 requests per ~850–1,080 above 10 ms (maximum 12–17 ms: manifests, 500-order list pages, scenario reads, the report upload, a few part uploads), all completed. Workers Free does not guarantee such requests, so this is not yet proof of reliable operation under its limit.
 
