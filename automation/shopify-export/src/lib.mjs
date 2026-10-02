@@ -25,7 +25,7 @@ import path from 'node:path';
 import { parseCSV } from '../../../shared/calculator.js';
 import { addDays } from '../../../shared/normalized.js';
 import {
-  prepareShopifyUpload, assertSanitizedShopifyOrderRows, currenciesOf, SHOPIFY_ORDERS_CSV_REQUIRED,
+  prepareShopifyUpload, assertSanitizedShopifyOrderRows, currenciesOf, SHOPIFY_ORDERS_CSV_REQUIRED, toCsvText,
 } from '../../../shared/adapters/shopifyCsv.js';
 import { assertReducedShopifyOrderRows } from '../../../shared/adapters/shopifyPrivacy.js';
 import { assertSafeLocalDir, assertNoSecretsInConfig } from '../../shipstation-export/src/lib.mjs';
@@ -194,29 +194,45 @@ export function prepareShopifyExport(text, { week, exportedAt }) {
     return { refused: 'sanitization_failed', reason: 'Sanitized rows fail the Worker contract', detail: { code: e.code || e.name, paths: (e.paths || []).length } };
   }
 
-  // The export must be the requested rolling window: every order date inside it.
+  // The export must be the requested rolling window: every order date inside it. Shopify's
+  // "Orders by date" filter can return a few orders created just after midnight following the last
+  // day (seen in real exports: one order at 00:10 the next morning). Those belong to the NEXT
+  // reporting week, which the next export covers, so up to BOUNDARY_SPILL_MAX of them, all on the
+  // day right after the window, are left out of the upload and counted. Anything else outside the
+  // window is still a wrong filter and refuses the export.
   const firstRow = new Map();
   for (const r of clean) { const n = String(r['Name'] || '').trim(); if (n && !firstRow.has(n)) firstRow.set(n, r); }
-  const dates = [...firstRow.values()].map(r => String(r['Created at'] || '').slice(0, 10));
+  const dateOf = r => String(r['Created at'] || '').slice(0, 10);
+  const dates = [...firstRow.values()].map(dateOf);
   const badDates = dates.filter(d => !/^\d{4}-\d{2}-\d{2}$/.test(d)).length;
-  const outside = dates.filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d) && (d < win.from || d > win.to)).length;
-  const sorted = dates.filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort();
-  const firstOrderDate = sorted[0] || null, lastOrderDate = sorted[sorted.length - 1] || null;
   if (badDates) return { refused: 'unknown_export_format', reason: `${badDates} order(s) have an unreadable Created at` };
-  if (outside) return { refused: 'export_window_mismatch', reason: `${outside} order(s) fall outside ${win.from} → ${win.to}; check the export filter`,
-                        detail: { outside, firstOrderDate, lastOrderDate } };
+  const dayAfter = addDays(win.to, 1);
+  const spill = new Set([...firstRow].filter(([, r]) => dateOf(r) === dayAfter).map(([n]) => n));
+  const outside = dates.filter(d => d < win.from || d > win.to).length;
+  const sorted = dates.slice().sort();
+  const firstOrderDate = sorted[0] || null, lastOrderDate = sorted[sorted.length - 1] || null;
+  if (outside && (outside !== spill.size || spill.size > BOUNDARY_SPILL_MAX)) return { refused: 'export_window_mismatch',
+    reason: `${outside} order(s) fall outside ${win.from} → ${win.to}; check the export filter`, detail: { outside, firstOrderDate, lastOrderDate } };
+  let upText = prep.text, kept = clean;
+  if (spill.size) {
+    kept = clean.filter(r => !spill.has(String(r['Name'] || '').trim()));
+    upText = toCsvText(kept, prep.columns);
+  }
 
-  const sanitizedSha256 = sha(prep.text);
+  const sanitizedSha256 = sha(upText);
   return {
     path: INGEST_PATH,
-    sanitizedText: prep.text,
-    payload: { format: 'csv_text', mode: 'rolling', weekStart: week.weekStart, text: prep.text, sanitizedSha256, exportedAt,
+    sanitizedText: upText,
+    payload: { format: 'csv_text', mode: 'rolling', weekStart: week.weekStart, text: upText, sanitizedSha256, exportedAt,
                windowFrom: win.from, windowTo: win.to },
-    facts: { kind: KIND, rawSha256, sanitizedSha256, rowCount: clean.length, orderCount: firstRow.size, columns: prep.columns,
-             droppedColumns: prep.droppedColumns, currencies: currenciesOf(clean), windowFrom: win.from, windowTo: win.to,
-             firstOrderDate, lastOrderDate },
+    facts: { kind: KIND, rawSha256, sanitizedSha256, rowCount: kept.length, orderCount: firstRow.size - spill.size, columns: prep.columns,
+             droppedColumns: prep.droppedColumns, currencies: currenciesOf(kept), windowFrom: win.from, windowTo: win.to,
+             firstOrderDate, lastOrderDate: spill.size ? (sorted.filter(d => d <= win.to).pop() || null) : lastOrderDate,
+             ...(spill.size ? { leftOutAfterWindow: spill.size } : {}) },
   };
 }
+/** At most this many orders created on the day after the window are left out instead of refusing the export. */
+export const BOUNDARY_SPILL_MAX = 10;
 
 // ─── Config and local folders ─────────────────────────────────────────────────
 
