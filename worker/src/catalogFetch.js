@@ -246,9 +246,10 @@ export async function ensureWeeklyCatalogRefresh(env, { weekStart, at, cutoffAt,
   }
   if (d.attempts > 0 && cutoffAt && at.getTime() > Date.parse(cutoffAt)) return { weekStart, action: 'none', reason: 'past_cutoff', refreshId };
   const next = { ...d, auto: true, attempts: (d.attempts || 0) + 1, lastAttemptAt: asOf };
-  const claim = await db.prepare("UPDATE catalog_refresh SET detail = ?2 WHERE refresh_id = ?1 AND status = 'pending' AND detail = ?3")
-    .bind(refreshId, JSON.stringify(next), row.detail).run();
-  if (claim.meta.changes !== 1) return { weekStart, action: 'none', reason: 'claimed_elsewhere', refreshId };
+  // RETURNING, not meta.changes: D1 counts the input-epoch trigger's write in `changes`.
+  const claim = await db.prepare("UPDATE catalog_refresh SET detail = ?2 WHERE refresh_id = ?1 AND status = 'pending' AND detail = ?3 RETURNING refresh_id")
+    .bind(refreshId, JSON.stringify(next), row.detail).all();
+  if ((claim.results || []).length !== 1) return { weekStart, action: 'none', reason: 'claimed_elsewhere', refreshId };
 
   let out;
   try { out = await (await refreshCatalog(env, { refreshId, fetchImpl, transientHold: true })).json(); }

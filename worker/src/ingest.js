@@ -263,11 +263,11 @@ export async function resolveRefresh(db, refreshId, { rev, accepted, reasons }) 
     return { refreshId, status: 'expired', note: 'refresh timed out before this push; not fulfilled' };
   }
   const status = accepted ? 'fulfilled' : 'rejected';
-  const u = await db.prepare('UPDATE catalog_refresh SET status = ?2, catalog_rev = ?3, resolved_at = ?4, detail = ?5 WHERE refresh_id = ?1 AND status = ?6')
-    .bind(refreshId, status, accepted ? rev : null, nowIso(), JSON.stringify({ ...prior, reasons: reasons || [], candidateRev: rev }), 'pending').run();
-  if (u.meta.changes === 1) {
-    const w = await db.prepare('SELECT week_start FROM catalog_refresh WHERE refresh_id = ?1').bind(refreshId).first();
-    await markCyclesChanged(db, [w?.week_start]);
-  }
-  return { refreshId, status: u.meta.changes === 1 ? status : 'already_resolved' };
+  // RETURNING, not meta.changes: D1 counts the input-epoch trigger's write in `changes`, so a
+  // resolved refresh read as "already resolved" (and its week was not re-evaluated) on real D1.
+  const u = await db.prepare('UPDATE catalog_refresh SET status = ?2, catalog_rev = ?3, resolved_at = ?4, detail = ?5 WHERE refresh_id = ?1 AND status = ?6 RETURNING week_start')
+    .bind(refreshId, status, accepted ? rev : null, nowIso(), JSON.stringify({ ...prior, reasons: reasons || [], candidateRev: rev }), 'pending').all();
+  const won = (u.results || []).length === 1;
+  if (won) await markCyclesChanged(db, [u.results[0].week_start]);
+  return { refreshId, status: won ? status : 'already_resolved' };
 }

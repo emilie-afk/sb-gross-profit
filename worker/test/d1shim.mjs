@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 
+const totalChanges = db => Number(db.prepare('SELECT total_changes() AS n').get().n);
 const norm = v => (v === undefined ? null : typeof v === 'boolean' ? (v ? 1 : 0) : v);
 
 class Stmt {
@@ -21,11 +22,13 @@ class Stmt {
   }
   async all() { return { success: true, results: this._st().all(...this.params).map(r => ({ ...r })), meta: {} }; }
   async run() {
+    const t0 = totalChanges(this.db);
     const r = this._st().run(...this.params);
     const size = this.db.prepare('SELECT page_count * page_size AS s FROM pragma_page_count(), pragma_page_size()').get().s;
-    return { success: true, meta: { changes: Number(r.changes), last_row_id: Number(r.lastInsertRowid), size_after: Number(size) } };
+    return { success: true, meta: { changes: totalChanges(this.db) - t0, last_row_id: Number(r.lastInsertRowid), size_after: Number(size) } };
   }
-  _runSync() { return this._st().run(...this.params); }
+  /** As in D1, `changes` counts every row written by the statement, including rows its triggers wrote. */
+  _runSync() { const t0 = totalChanges(this.db); const r = this._st().run(...this.params); return { ...r, changes: totalChanges(this.db) - t0 }; }
 }
 
 export class D1Shim {
