@@ -9,7 +9,9 @@
 import { ApiError, json, jsonText, intParam, WEEK_RE } from './http.js';
 import { totalsFromRow } from './compute.js';
 import { gunzipCapped, blobBytes } from './gz.js';
-import { scenarioLines, indexRow } from '../../shared/resultParts.js';
+import { scenarioLines, indexRow, ORDERS_PER_PART } from '../../shared/resultParts.js';
+
+export const ORDER_PAGE_MAX = 100;
 
 const P = (s, d) => { try { return s === null || s === undefined ? d : JSON.parse(s); } catch { return d; } };
 
@@ -147,7 +149,8 @@ const ORDER_SORT_FNS = {
 export async function listOrders(request, env, reader, weekStart) {
   const url = new URL(request.url);
   const s = await pickSnapshot(env.DB, weekStart, url, reader);
-  const limit = intParam(url, 'limit', 50, { min: 1, max: 500 });
+  // Pages are capped at 100 orders (Workers Free: bounded CPU per request); page with offset.
+  const limit = intParam(url, 'limit', 50, { min: 1, max: ORDER_PAGE_MAX });
   const offset = intParam(url, 'offset', 0, { min: 0 });
   const sort = url.searchParams.get('sort') || 'gp_asc';
   if (!ORDER_SORTS[sort]) throw new ApiError(400, 'bad_query', `sort must be one of ${Object.keys(ORDER_SORTS).join(', ')}`);
@@ -239,23 +242,37 @@ export async function listIssues(request, env, reader, weekStart) {
  * Route only, with just the fields scenario.js reads. Order-level shipping sits
  * on each order's first line, as the engine delivers it.
  */
+/**
+ * Paged (Workers Free: bounded CPU per request): page j holds the scenario lines of the orders
+ * j·40 … j·40+39 in order-name order, `page.count` pages in all; the pages joined are the
+ * week's scenario input. Both storages page identically.
+ */
 export async function scenarioInput(request, env, reader, weekStart) {
   const url = new URL(request.url);
   const s = await pickSnapshot(env.DB, weekStart, url, reader);
+  const page = intParam(url, 'page', 0, { min: 0, max: 9999 });
   if (s.storage === 'chunked') {
-    // The scenario parts' texts are canonical `{"lines":[…]}`: their arrays are joined as text, not parsed and re-serialized.
-    const names = ((await env.DB.prepare("SELECT part FROM snapshot_blob WHERE snapshot_id = ?1 AND part LIKE 'scenario:%'").bind(s.snapshot_id).all()).results || [])
-      .map(r => r.part).sort((a, b) => Number(a.slice(9)) - Number(b.slice(9)));
-    const texts = await partTexts(env.DB, s, names);
-    const inner = names.map(n => { const t = texts.get(n); if (!t.startsWith('{"lines":[') || !t.endsWith(']}')) throw new ApiError(500, 'snapshot_part_invalid', 'A stored scenario part is not canonical'); return t.slice(10, -2); }).filter(Boolean);
-    const head = JSON.stringify(header(s, reader));
-    return jsonText(`${head.slice(0, -1)}${head.length > 2 ? ',' : ''}"lines":[${inner.join(',')}]}`);
+    const [cnt, row] = await env.DB.batch([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND part LIKE 'scenario:%'").bind(s.snapshot_id),
+      env.DB.prepare('SELECT body FROM snapshot_blob WHERE snapshot_id = ?1 AND part = ?2').bind(s.snapshot_id, `scenario:${page}`),
+    ]);
+    const count = cnt.results?.[0]?.n || 0;
+    if (page >= count) throw new ApiError(404, 'page_unknown', `scenario-input has ${count} page(s)`);
+    // The stored text is canonical `{"lines":[…]}`: its array is served as text, not parsed and re-serialized.
+    const t = await gunzipCapped(blobBytes(row.results[0].body), PART_CAP);
+    if (!t.startsWith('{"lines":[') || !t.endsWith(']}')) throw new ApiError(500, 'snapshot_part_invalid', 'A stored scenario part is not canonical');
+    const head = JSON.stringify({ ...header(s, reader), page: { index: page, count } });
+    return jsonText(`${head.slice(0, -1)},"lines":${t.slice(9, -1)}}`);
   }
   const orders = (await env.DB.prepare('SELECT order_name, ship_collected, ship_paid, business_date FROM snapshot_order WHERE snapshot_id = ?1')
     .bind(s.snapshot_id).all()).results || [];
   const lines = (await env.DB.prepare('SELECT * FROM snapshot_line WHERE snapshot_id = ?1 ORDER BY order_name, line_index').bind(s.snapshot_id).all()).results || [];
-  const out = scenarioLines(orders, lines);                        // shared with the Free-tier result parts
-  return json({ ...header(s, reader), lines: out });
+  const names = [...new Set([...orders.map(o => o.order_name), ...lines.map(l => l.order_name)])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const count = Math.max(1, Math.ceil(names.length / ORDERS_PER_PART));
+  if (page >= count) throw new ApiError(404, 'page_unknown', `scenario-input has ${count} page(s)`);
+  const group = new Set(names.slice(page * ORDERS_PER_PART, (page + 1) * ORDERS_PER_PART));
+  const out = scenarioLines(orders, lines.filter(l => group.has(l.order_name)));   // shared with the Free-tier result parts
+  return json({ ...header(s, reader), page: { index: page, count }, lines: out });
 }
 
 export async function history(request, env, reader) {

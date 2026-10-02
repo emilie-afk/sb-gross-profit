@@ -67,3 +67,24 @@ test('finalize: with no input written since the manifest was issued, the manifes
   assert.equal(batches, 2, 'finalize = one read batch + the commit (no manifest rebuild)');
   c.call = realCall; env.DB.batch = realBatch;
 });
+
+test('bounded reads: order pages are at most 100; scenario input is paged by 40 orders; manifest hashes equal their definitions', async () => {
+  const d = dataset({ n: 900, lastWeek: '2020-03-09', prefix: '4' });             // ≈ 100 orders per week
+  const ft = await freeTierRun(d, { verify: false });
+  const env = ft.env, week = d.weeks[7];
+  assert.equal((await api(env, 'GET', `/v1/snapshot/${week}/orders?includeDrafts=1&limit=101`)).status, 400);
+  const p = (await api(env, 'GET', `/v1/snapshot/${week}/orders?includeDrafts=1&limit=100`)).json;
+  assert.ok(p.orders.length <= 100 && p.page.total > 40);
+  const s0 = (await api(env, 'GET', `/v1/snapshot/${week}/scenario-input?includeDrafts=1`)).json;
+  assert.equal(s0.page.index, 0);
+  assert.equal(s0.page.count, Math.ceil(p.page.total / 40));
+  assert.ok(new Set(s0.lines.map(l => l.orderNum)).size <= 40);
+  assert.equal((await api(env, 'GET', `/v1/snapshot/${week}/scenario-input?includeDrafts=1&page=${s0.page.count}`)).status, 404);
+  const { stableStringify } = await import('../../shared/normalized.js');
+  const { sha256Text } = await import('../src/gz.js');
+  const { inputsHashOf } = await import('../src/collectWeeks.js');
+  const m = await ft.c.call('GET', `/v1/collect/weeks/${week}/manifest`);
+  assert.equal(m.manifestHash, await sha256Text(stableStringify(m.manifest)));
+  const snap = await env.DB.prepare('SELECT manifest_hash FROM snapshot WHERE snapshot_id = ?1').bind(m.existing.snapshotId).first();
+  assert.equal(snap.manifest_hash, await inputsHashOf(m.manifest), 'the week is recognised as unchanged');
+});

@@ -209,12 +209,25 @@ const withoutAsOf = ({ asOf: _a, ...m }) => m;
  * week's revision does not cascade into new revisions of every later week.
  */
 export const inputsHashOf = ({ asOf: _a, previousShippingExpense: _p, previousDraft: _d, catalog: { info: _i, ...catalog }, ...m }) => sha256Text(stableStringify({ ...m, catalog }));
+const INPUT_EXCLUDED = new Set(['asOf', 'previousShippingExpense', 'previousDraft']);
+/**
+ * Both hashes from one key-sorted rendering of each top-level field (the order list dominates the
+ * manifest; it is rendered once instead of twice). Equal to sha256(stableStringify(m)) and inputsHashOf(m).
+ */
+async function manifestHashes(m) {
+  const keys = Object.keys(m).sort();
+  const piece = new Map(keys.map(k => [k, stableStringify(m[k])]));
+  const { info: _i, ...catalog } = m.catalog;
+  const join = (ks, f) => `{${ks.map(k => `${JSON.stringify(k)}:${f(k)}`).join(',')}}`;
+  return [await sha256Text(join(keys, k => piece.get(k))),
+          await sha256Text(join(keys.filter(k => !INPUT_EXCLUDED.has(k)), k => (k === 'catalog' ? stableStringify(catalog) : piece.get(k))))];
+}
 
 export async function getManifest(env, weekStart) {
   const { manifest, epoch, latestSnapshot: latest } = await assemble(env, weekStart);
-  const manifestHash = await sha256Text(stableStringify(manifest));
+  const [manifestHash, inputsHash] = await manifestHashes(manifest);
   // The week's newest revision was computed from exactly these inputs: nothing to do (a retry or re-run writes 0 rows).
-  const existing = latest?.storage === 'chunked' && latest.manifest_hash === await inputsHashOf(manifest)
+  const existing = latest?.storage === 'chunked' && latest.manifest_hash === inputsHash
     ? { snapshotId: latest.snapshot_id, revision: latest.revision, status: latest.status } : null;
   return json({ manifest, manifestHash, epoch, signature: await signManifest(env, manifestHash, epoch), existing });
 }

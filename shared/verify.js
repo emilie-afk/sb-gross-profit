@@ -181,8 +181,10 @@ export async function verifySnapshot(inputs, api, { now = () => Date.now(), sour
 
   const counts = { ordersChecked: new Set([...storedOrders.keys(), ...reOrders.keys()]).size, orderMismatches, sectionsChecked: sections.length + 5,
                    sectionMismatches: sectionMismatches + (gateInputsMatch ? 0 : 1) + (gateMatches ? 0 : 1), sequenceMatches, provenanceChecked, provenanceMismatches,
-                   gateInputsMatch, gateMatches, ...(gateInputsMatch && gateMatches ? { gateHash } : {}) };
+                   gateInputsMatch, gateMatches };
   const ok = !orderMismatches && !sectionMismatches && sequenceMatches && !provenanceMismatches && gateInputsMatch && gateMatches;
+  // The gate hash certifies a gate only when the whole draft verified.
+  if (ok) counts.gateHash = gateHash;
   return ok ? done('verified', counts) : done('mismatch', counts, diff);
 }
 

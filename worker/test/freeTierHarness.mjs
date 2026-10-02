@@ -101,15 +101,33 @@ export async function dashboardView(env, week) {
   const q = '?includeDrafts=1';
   const snap = strip((await api(env, 'GET', `/v1/snapshot/${week}${q}`)).json);
   const lists = {};
-  for (const sort of ['gp_asc', 'gp_desc', 'revenue_desc', 'date_desc', 'date_asc']) lists[sort] = strip((await api(env, 'GET', `/v1/snapshot/${week}/orders${q}&sort=${sort}&limit=500`)).json);
-  lists.missingCost = strip((await api(env, 'GET', `/v1/snapshot/${week}/orders${q}&missingCost=true&limit=500`)).json);
+  for (const sort of ['gp_asc', 'gp_desc', 'revenue_desc', 'date_desc', 'date_asc']) lists[sort] = await allPages(env, `/v1/snapshot/${week}/orders${q}&sort=${sort}`);
+  lists.missingCost = await allPages(env, `/v1/snapshot/${week}/orders${q}&missingCost=true`);
   lists.page2 = strip((await api(env, 'GET', `/v1/snapshot/${week}/orders${q}&limit=25&offset=25`)).json);
   const names = lists.gp_asc.orders.map(o => o.orderName);
   const details = [];
   for (const n of [names[0], names[Math.floor(names.length / 2)], names[names.length - 1]]) details.push(strip((await api(env, 'GET', `/v1/snapshot/${week}/orders/${encodeURIComponent(n)}${q}`)).json));
   const issues = strip((await api(env, 'GET', `/v1/snapshot/${week}/issues${q}&limit=1000`)).json);
-  const scenario = strip((await api(env, 'GET', `/v1/snapshot/${week}/scenario-input${q}`)).json);
+  const scenario = await allScenario(env, `/v1/snapshot/${week}/scenario-input${q}`);
   return { snap, lists, details, issues, scenario };
+}
+/** Every page of an order list (pages of 100), joined: the page block becomes { total }. */
+export async function allPages(env, path) {
+  let first = null, orders = [];
+  for (let offset = 0; ; offset += 100) {
+    const r = strip((await api(env, 'GET', `${path}&limit=100&offset=${offset}`)).json);
+    first ||= r; orders = orders.concat(r.orders);
+    if (offset + 100 >= r.page.total) break;
+  }
+  return { ...first, page: { total: first.page.total }, orders };
+}
+/** Every scenario-input page, joined. */
+export async function allScenario(env, path) {
+  const first = strip((await api(env, 'GET', `${path}&page=0`)).json);
+  let lines = first.lines;
+  for (let p = 1; p < first.page.count; p++) lines = lines.concat((await api(env, 'GET', `${path}&page=${p}`)).json.lines);
+  const { page, ...rest } = first;
+  return { ...rest, pages: page.count, lines };
 }
 
 
