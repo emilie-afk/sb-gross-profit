@@ -123,7 +123,7 @@ async function assemble(env, weekStart) {
   const rs = r => r.results || [], one = r => rs(r)[0] || null;
   // Batch 1: everything keyed by the week alone.
   const b1 = await db.batch([
-    db.prepare('SELECT n FROM input_epoch WHERE id = 1'),
+    db.prepare('SELECT n, aux_n FROM input_epoch WHERE id = 1'),
     db.prepare(SETTINGS_SQL),
     db.prepare('SELECT ship_date, version_id, day_hash FROM scr_day_owner WHERE ship_date BETWEEN ?1 AND ?2 ORDER BY ship_date').bind(weekStart, weekEnd),
     db.prepare('SELECT order_name, order_number, body_hash, source_id FROM ord_ptr WHERE week_start = ?1 ORDER BY order_name').bind(weekStart),
@@ -135,8 +135,14 @@ async function assemble(env, weekStart) {
     db.prepare(PREV_DRAFT_SQL).bind(prevWeek),
     db.prepare('SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1').bind(weekStart),
     db.prepare('SELECT snapshot_id, revision, status, storage, manifest_hash FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(weekStart),
+    db.prepare('SELECT aux_n, shipments_hash, hpd_hash, shipments, hpd_orders FROM aux_pin WHERE week_start = ?1').bind(weekStart),
   ]);
   const latestSnapshot = one(b1[11]);
+  // The week's aux hashes pinned by POST …/aux-pin while no aux table has changed since (same
+  // transaction as the epoch read): the shipments are then neither loaded nor hashed here.
+  const pin = one(b1[12]), auxN = one(b1[0])?.aux_n ?? null;
+  const pinned = pin && auxN !== null && pin.aux_n === auxN
+    ? { shipmentsHash: pin.shipments_hash, hpdHash: pin.hpd_hash, shipments: pin.shipments, hpdOrders: pin.hpd_orders } : null;
   const epoch = one(b1[0])?.n ?? null;
   const settings = settingsFromRows(rs(b1[1]));
   const weekOwned = rs(b1[2]), orders = rs(b1[3]);
@@ -150,26 +156,26 @@ async function assemble(env, weekStart) {
   // Batch 2: what depends on the week's orders, date owners and catalog.
   const b2 = await db.batch([
     db.prepare(BASIS_VERSIONS_SQL).bind(weekStart, weekEnd, JSON.stringify(vids)),
-    db.prepare(`SELECT d.groups FROM scr_day d JOIN json_each(?1) j ON d.version_id = json_extract(j.value, '$[0]') AND d.ship_date = json_extract(j.value, '$[1]')`)
-      .bind(JSON.stringify(weekOwned.map(o => [o.version_id, o.ship_date]))),
-    db.prepare(SHIPMENTS_SQL).bind(numsJson), db.prepare(SHIPMENT_ITEMS_SQL).bind(numsJson),
-    db.prepare(HPD_SQL).bind(numsJson), db.prepare(HPD_ITEMS_SQL).bind(numsJson),
+    db.prepare(`SELECT DISTINCT json_extract(g.value, '$[0]') AS k FROM scr_day d JOIN json_each(?1) j ON d.version_id = json_extract(j.value, '$[0]') AND d.ship_date = json_extract(j.value, '$[1]'),
+        json_each(d.groups) g`).bind(JSON.stringify(weekOwned.map(o => [o.version_id, o.ship_date]))),
     db.prepare('SELECT table_name, part FROM cost_catalog_part WHERE catalog_rev = ?1 ORDER BY table_name, part').bind(info.rev || ''),
     db.prepare('SELECT captured_at, meta FROM cost_catalog WHERE catalog_rev = ?1').bind(info.rev || ''),
+    ...(pinned ? [] : [db.prepare(SHIPMENTS_SQL).bind(numsJson), db.prepare(SHIPMENT_ITEMS_SQL).bind(numsJson),
+                       db.prepare(HPD_SQL).bind(numsJson), db.prepare(HPD_ITEMS_SQL).bind(numsJson)]),
   ]);
   const basis = scrBasisFrom({ weekStart, closedAt, own: new Map(weekOwned.map(o => [o.ship_date, { versionId: o.version_id, dayHash: o.day_hash }])), versionRows: rs(b2[0]) });
   if (basis.basisStatus !== 'ok') throw new ApiError(409, 'shipping_report_not_ready', `No snapshot: the week's Shipping Cost Report is ${basis.basisStatus} (${basis.label})`, { shippingReport: basis.basisStatus });
   // Same precedence as before the reads were batched: report basis, then catalog, then orders.
   if (!info.rev) throw new ApiError(409, 'no_catalog', 'No accepted cost catalog; push one before computing');
   if (!orders.length) throw new ApiError(409, 'week_empty', `No orders stored for the week of ${weekStart}`);
-  const shipments = shipmentsFromRows(rs(b2[2]), rs(b2[3])), hpdOrders = hpdFromRows(rs(b2[4]), rs(b2[5]));
-  const cat = one(b2[7]);
+  const aux = pinned || await auxOf(shipmentsFromRows(rs(b2[4]), rs(b2[5])), hpdFromRows(rs(b2[6]), rs(b2[7])));
+  const cat = one(b2[3]);
   info.capturedAt = cat?.captured_at || null;
   // Shipping Cost Report dates the week depends on: its own seven dates, and every owned date that
   // holds cost for one of its orders or for an order shipped in the week (that order's first ship
   // date decides the unmatched count). Other dates cannot change this week's figures, so they are
   // not pinned. The search over the stored groups runs in D1 (json_each), not in Worker CPU.
-  const weekKeys = [...new Set(rs(b2[1]).flatMap(r => (P(r.groups, []) || []).map(g => g[0])))];
+  const weekKeys = rs(b2[1]).map(r => r.k);                                          // distinct, extracted in D1
   const keys = [...new Set([...nums.map(n => String(n).replace(/^#/, '')), ...weekKeys])];
   // Batch 3: the related dates and the report orders that are known Shopify orders.
   const b3 = await db.batch([
@@ -187,17 +193,42 @@ async function assemble(env, weekStart) {
   const versions = rs(b3[2]);
   return { epoch, latestSnapshot, manifest: {
     v: MANIFEST_VERSION, weekStart, engineVersion: ENGINE_VERSION, asOf: new Date(now).toISOString(), storeTimezone: settings.store_timezone, settings,
-    catalog: { rev: info.rev, info, completeness: P(cat?.meta, {})?.completeness || null, parts: rs(b2[6]).map(p => [p.table_name, p.part]) },
+    catalog: { rev: info.rev, info, completeness: P(cat?.meta, {})?.completeness || null, parts: rs(b2[2]).map(p => [p.table_name, p.part]) },
     orders: orders.map(o => [o.order_name, o.body_hash, o.source_id]),
     scrDays: owners.map(o => [o.ship_date, o.version_id, o.day_hash]),
     scrVersions: versions.map(v => [v.version_id, v.source_id, v.requested_from, v.requested_to]),
     knownReportKeys: known,
-    aux: { shipmentsHash: await auxHash(shipments), hpdHash: await auxHash(hpdOrders), shipments: shipments.length, hpdOrders: hpdOrders.length },
+    aux,
     previous: prev.published, previousDraft: prev.draft, previousShippingExpense: last ? last.e : null,
     shippingReportBasis: basis, publicationAllowedEnv: env.PUBLICATION_ALLOWED === 'true',
   } };
 }
 const withoutAsOf = ({ asOf: _a, ...m }) => m;
+const auxOf = async (shipments, hpdOrders) => ({ shipmentsHash: await auxHash(shipments), hpdHash: await auxHash(hpdOrders), shipments: shipments.length, hpdOrders: hpdOrders.length });
+
+/**
+ * POST /v1/collect/weeks/:week/aux-pin (ingest). Computes the week's aux hashes (what GET …/aux
+ * serves, hashed as the manifest pins them) in this request, so the manifest request does not.
+ * A pin stays valid while input_epoch.aux_n is unchanged; an unchanged pin writes nothing.
+ */
+export async function pinAux(env, weekStart) {
+  if (!WEEK_RE.test(weekStart) || weekStartOf(weekStart) !== weekStart) throw new ApiError(400, 'bad_query', 'week must be a Monday (YYYY-MM-DD)');
+  const db = env.DB;
+  const [er, pr] = await db.batch([db.prepare('SELECT aux_n FROM input_epoch WHERE id = 1'), db.prepare('SELECT aux_n, shipments, hpd_orders FROM aux_pin WHERE week_start = ?1').bind(weekStart)]);
+  const now = er.results?.[0]?.aux_n, have = pr.results?.[0];
+  if (have && have.aux_n === now) return json({ weekStart, auxN: now, shipments: have.shipments, hpdOrders: have.hpd_orders, pinned: 'unchanged' });
+  // The rows and the counter in one transaction: the hashes belong to exactly that aux_n.
+  const WEEK = 'SELECT order_number FROM ord_ptr WHERE week_start = ?1', inWeek = sql => sql.split('SELECT value FROM json_each(?1)').join(WEEK);
+  const [e2, s1, s2, h1, h2] = await db.batch([db.prepare('SELECT aux_n FROM input_epoch WHERE id = 1'),
+    ...[SHIPMENTS_SQL, SHIPMENT_ITEMS_SQL, HPD_SQL, HPD_ITEMS_SQL].map(q => db.prepare(inWeek(q)).bind(weekStart))]);
+  const n = e2.results?.[0]?.aux_n;
+  const a = await auxOf(shipmentsFromRows(s1.results || [], s2.results || []), hpdFromRows(h1.results || [], h2.results || []));
+  await db.prepare(`INSERT INTO aux_pin (week_start, aux_n, shipments_hash, hpd_hash, shipments, hpd_orders, pinned_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+      ON CONFLICT(week_start) DO UPDATE SET aux_n = excluded.aux_n, shipments_hash = excluded.shipments_hash, hpd_hash = excluded.hpd_hash,
+        shipments = excluded.shipments, hpd_orders = excluded.hpd_orders, pinned_at = excluded.pinned_at WHERE aux_pin.aux_n < excluded.aux_n`)
+    .bind(weekStart, n, a.shipmentsHash, a.hpdHash, a.shipments, a.hpdOrders, nowIso()).run();
+  return json({ weekStart, auxN: n, shipments: a.shipments, hpdOrders: a.hpdOrders, pinned: 'pinned' });
+}
 
 /**
  * Hash of the week's inputs alone: equal means nothing the week is computed from has
@@ -379,7 +410,9 @@ export async function putResultPart(request, env, id, name) {
   // whitespace or alternative escapes): reads may serve it as text. Key order is the collector's
   // canonical order; the verifier compares every part byte for byte with its own recomputation.
   if (JSON.stringify(v) !== text) throw new ApiError(400, 'not_canonical', 'Part is not canonical JSON');
-  await db.prepare('INSERT OR IGNORE INTO snapshot_blob (snapshot_id, part, sha256, body) VALUES (?1, ?2, ?3, ?4)').bind(id, name, want, bytes).run();
+  // Order and line parts also keep their validated text: order lists and details run in D1 over it.
+  await db.prepare('INSERT OR IGNORE INTO snapshot_blob (snapshot_id, part, sha256, body, body_text) VALUES (?1, ?2, ?3, ?4, ?5)')
+    .bind(id, name, want, bytes, /^(orders|lines):/.test(name) ? text : null).run();
   return json({ snapshotId: id, part: name, status: 'stored' });
 }
 
@@ -400,7 +433,7 @@ export async function finalizeResults(request, env, id) {
   const names = Object.keys(index.parts);
   // One round for every read finalize needs besides the manifest re-assembly.
   const [epochRow, partRows, hpdRun, otherTz, maxRev] = await db.batch([
-    db.prepare('SELECT n FROM input_epoch WHERE id = 1'),
+    db.prepare('SELECT n, aux_n FROM input_epoch WHERE id = 1'),
     db.prepare('SELECT part FROM snapshot_blob WHERE snapshot_id = ?1').bind(id),
     db.prepare("SELECT status FROM ingest_run WHERE source = 'hpd' AND week_start = ?1 ORDER BY started_at DESC LIMIT 1").bind(u.week_start),
     db.prepare('SELECT COUNT(*) AS n FROM ord_ptr WHERE week_start = ?1 AND timezone <> ?2').bind(u.week_start, pinned.settings?.store_timezone ?? ''),

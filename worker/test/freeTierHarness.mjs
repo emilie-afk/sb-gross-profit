@@ -105,6 +105,16 @@ export async function dashboardView(env, week) {
   lists.missingCost = await allPages(env, `/v1/snapshot/${week}/orders${q}&missingCost=true`);
   lists.page2 = strip((await api(env, 'GET', `/v1/snapshot/${week}/orders${q}&limit=25&offset=25`)).json);
   const names = lists.gp_asc.orders.map(o => o.orderName);
+  // Every filter, alone and with a non-default sort (values taken from the week's own orders).
+  const pick = k => { const vs = [...new Set(lists.gp_asc.orders.map(o => o[k]).filter(v => v !== null && v !== undefined))]; return vs[Math.floor(vs.length / 2)]; };
+  lists.missingShipping = await allPages(env, `/v1/snapshot/${week}/orders${q}&missingShipping=true&sort=date_desc`);
+  for (const [param, key] of [['channel', 'channel'], ['category', 'orderCat'], ['status', 'profitabilityStatus']]) {
+    const v = pick(key);
+    if (v === undefined) continue;
+    lists[`${param}`] = await allPages(env, `/v1/snapshot/${week}/orders${q}&${param}=${encodeURIComponent(v)}`);
+    lists[`${param}_revenue`] = await allPages(env, `/v1/snapshot/${week}/orders${q}&${param}=${encodeURIComponent(v)}&sort=revenue_desc`);
+  }
+  lists.combined = await allPages(env, `/v1/snapshot/${week}/orders${q}&missingCost=true&channel=${encodeURIComponent(pick('channel') ?? '')}&sort=date_asc`);
   const details = [];
   for (const n of [names[0], names[Math.floor(names.length / 2)], names[names.length - 1]]) details.push(strip((await api(env, 'GET', `/v1/snapshot/${week}/orders/${encodeURIComponent(n)}${q}`)).json));
   const issues = strip((await api(env, 'GET', `/v1/snapshot/${week}/issues${q}&limit=1000`)).json);

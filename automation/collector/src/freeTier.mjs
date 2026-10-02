@@ -157,6 +157,10 @@ export const newCache = (bodies = new Map()) => ({ bodies, days: new Map(), cata
  */
 export async function computeAndUploadWeek(c, weekStart, cache) {
   let m;
+  // Pin the week's ShipStation/HPD hashes in their own request first (a no-op when nothing changed),
+  // so the manifest request stays within the Workers Free CPU limit at peak week sizes.
+  try { await c.call('POST', `/v1/collect/weeks/${weekStart}/aux-pin`, { json: {} }); }
+  catch (e) { if (!(e instanceof WorkerCallError && e.status === 404)) throw e; }   // an older Worker without the route: the manifest hashes inline
   try { m = await c.call('GET', `/v1/collect/weeks/${weekStart}/manifest`); }
   catch (e) { if (e instanceof WorkerCallError && e.status === 409) return { weekStart, status: 'pending', code: e.code }; throw e; }
   if (m.existing) return { weekStart, status: 'unchanged', snapshotId: m.existing.snapshotId, revision: m.existing.revision, snapshotStatus: m.existing.status };

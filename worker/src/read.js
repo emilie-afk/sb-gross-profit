@@ -155,9 +155,30 @@ export async function listOrders(request, env, reader, weekStart) {
   const sort = url.searchParams.get('sort') || 'gp_asc';
   if (!ORDER_SORTS[sort]) throw new ApiError(400, 'bad_query', `sort must be one of ${Object.keys(ORDER_SORTS).join(', ')}`);
   if (s.storage === 'chunked') {
-    // Filter and sort on the compact index; read only the parts that hold the page's orders
-    // (parts group orders in gp_asc order, so the default sort touches one or two parts).
     const q = url.searchParams;
+    // Order parts stored with their text (migration 0019): D1 filters, sorts and pages the week's
+    // orders; the Worker parses only the page's rows, whatever the sort or filter.
+    const X = c => `json_extract(j.value, '$.${c}')`;
+    const where = ["b.snapshot_id = ?1", "b.part >= 'orders:' AND b.part < 'orders;'"], vals = [s.snapshot_id];
+    const add = (c, v) => { vals.push(v); where.push(`${X(c)} = ?${vals.length}`); };
+    if (q.get('missingCost') === 'true') where.push(`${X('missing_cost_lines')} > 0`);
+    if (q.get('missingShipping') === 'true') where.push(`${X('shipping_expense_status')} = 'missing_shipstation_rate'`);
+    if (q.get('channel')) add('channel', q.get('channel'));
+    if (q.get('category')) add('order_cat', q.get('category'));
+    if (q.get('status')) add('profitability_status', q.get('status'));
+    const from = `FROM snapshot_blob b, json_each(b.body_text, '$.orders') j WHERE ${where.join(' AND ')}`;
+    const orderBy = ORDER_SORTS[sort].split(', ').map(t => { const [c, dir] = t.split(' '); return `${X(c)} ${dir}`; }).join(', ');
+    const [nt, ct, pr] = await env.DB.batch([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND part >= 'orders:' AND part < 'orders;' AND body_text IS NULL").bind(s.snapshot_id),
+      env.DB.prepare(`SELECT COUNT(*) AS n ${from}`).bind(...vals),
+      env.DB.prepare(`SELECT j.value AS o ${from} ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${offset}`).bind(...vals),
+    ]);
+    if ((nt.results?.[0]?.n ?? 1) === 0) {
+      return json({ ...header(s, reader), page: { offset, limit, total: ct.results?.[0]?.n || 0 }, sort, orders: (pr.results || []).map(r => orderOut(JSON.parse(r.o))) });
+    }
+    // Older snapshots (parts without text): filter and sort on the compact index; read only the
+    // parts that hold the page's orders (parts group orders in gp_asc order).
+
     const idx = (await orderIndex(env.DB, s)).filter(o =>
       (q.get('missingCost') !== 'true' || o.missing_cost_lines > 0) &&
       (q.get('missingShipping') !== 'true' || o.shipping_expense_status === 'missing_shipstation_rate') &&
@@ -204,6 +225,18 @@ export async function getOrder(request, env, reader, weekStart, orderName) {
   const s = await pickSnapshot(env.DB, weekStart, url, reader);
   let o, lines;
   if (s.storage === 'chunked') {
+    // Parts stored with their text (migration 0019): D1 finds the order and its lines; nothing is gunzipped.
+    const X = c => `json_extract(j.value, '$.${c}')`;
+    const [nt, orr, lr] = await env.DB.batch([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND ((part >= 'orders:' AND part < 'orders;') OR (part >= 'lines:' AND part < 'lines;')) AND body_text IS NULL").bind(s.snapshot_id),
+      env.DB.prepare(`SELECT j.value AS o FROM snapshot_blob b, json_each(b.body_text, '$.orders') j WHERE b.snapshot_id = ?1 AND b.part >= 'orders:' AND b.part < 'orders;' AND ${X('order_name')} = ?2 LIMIT 1`).bind(s.snapshot_id, orderName),
+      env.DB.prepare(`SELECT j.value AS l FROM snapshot_blob b, json_each(b.body_text, '$.lines') j WHERE b.snapshot_id = ?1 AND b.part >= 'lines:' AND b.part < 'lines;' AND ${X('order_name')} = ?2 ORDER BY ${X('line_index')} ASC`).bind(s.snapshot_id, orderName),
+    ]);
+    if ((nt.results?.[0]?.n ?? 1) === 0) {
+      const row = orr.results?.[0];
+      if (!row) throw new ApiError(404, 'order_unknown', `No order ${orderName} in this snapshot`);
+      return json({ ...header(s, reader), order: orderOut(JSON.parse(row.o)), lines: (lr.results || []).map(r => lineOut(JSON.parse(r.l))) });
+    }
     const t = (await part(env.DB, s, 'orderindex')).orders.find(x => x[0] === orderName);
     const hit = t ? indexRow(t) : null;
     if (hit) {

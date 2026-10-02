@@ -28,7 +28,7 @@ import { environmentGuard, bindEnvironment, isSafeRead } from './environment.js'
 import { requireOneOf } from './auth.js';
 import { openSource, putSegment, sealSource, getSourceMeta, getSegment } from './collectSources.js';
 import { uploadScrVersion, getScrOwners, getScrDays, listScrVersions, getScrVersion, acceptScrVersion, rejectScrVersion, rollbackScrActivation } from './collectScr.js';
-import { ordersDiff, uploadOrders, getManifest, orderBodies, catalogPart, weekAux, openResults, putResultPart, finalizeResults } from './collectWeeks.js';
+import { ordersDiff, uploadOrders, getManifest, orderBodies, catalogPart, weekAux, pinAux, openResults, putResultPart, finalizeResults } from './collectWeeks.js';
 import { pendingVerifications, verifyInputs, verifyPart, postVerifyReport } from './verifyRoutes.js';
 import { getWeekStatus } from './weekStatus.js';
 
@@ -89,6 +89,7 @@ async function route(request, env) {
     if (p === '/v1/collect/scr/owners' && m === 'POST') return getScrOwners(request, env);
     if (p === '/v1/collect/orders/diff' && m === 'POST') return ordersDiff(request, env);
     if (p === '/v1/collect/orders' && m === 'POST') return uploadOrders(request, env);
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/aux-pin$`))) && m === 'POST') return pinAux(env, g[1]);
     if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/results$`))) && m === 'POST') return openResults(request, env, g[1]);
     if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/parts\/(orderindex|sections|orders:\d{1,4}|lines:\d{1,4}|scenario:\d{1,4})$/)) && m === 'PUT') return putResultPart(request, env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/finalize$/)) && m === 'POST') return finalizeResults(request, env, g[1]);
