@@ -244,6 +244,19 @@ test('C5 collector: happy path — email link, sanitized upload, manifest with h
   assert.deepEqual(allFiles(paths.downloads).concat(allFiles(paths.quarantine)), [], 'nothing but the manifest on disk');
 });
 
+test('C5 collector: a zipped export (Shopify emails large exports as a ZIP) is unzipped in memory and handled like the CSV', async () => {
+  const { default: zlib } = await import('node:zlib');
+  const data = Buffer.from(rawCsv()), comp = zlib.deflateRawSync(data), nm = Buffer.from('orders_export_1.csv'), crc = zlib.crc32(data);
+  const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(8, 8); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(nm.length, 26);
+  const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(8, 10); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(nm.length, 28);
+  const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(1, 8); end.writeUInt16LE(1, 10); end.writeUInt32LE(46 + nm.length, 12); end.writeUInt32LE(30 + nm.length + comp.length, 16);
+  const body = Buffer.concat([lh, nm, comp, ch, nm, end]);
+  const { m, f, paths } = await run({ download: { status: 200, contentType: 'application/zip', body, finalHost: 'storage.example' } });
+  assert.deepEqual([m.status, m.download.format, m.download.unzippedBytes, m.facts.orderCount, f.log.uploads.length], ['ok', 'zip', data.length, 2, 1]);
+  assert.ok(body.every(x => x === 0), 'the zipped raw bytes are zeroed');
+  assert.deepEqual(allFiles(paths.downloads).concat(allFiles(paths.quarantine)), [], 'nothing on disk');
+});
+
 test('C5 collector: a small export that downloads directly skips the email wait', async () => {
   const { m, f } = await run({ direct: Buffer.from(rawCsv()) });
   assert.deepEqual([m.status, m.download.via, f.log.searches, f.log.fetched.length], ['ok', 'direct_download', 0, 0]);
@@ -273,7 +286,7 @@ test('C5 collector: no email, two emails, a login page or an unknown file stop t
   const login = await run({ download: { status: 200, contentType: 'text/html', body: Buffer.from('<html>Log in</html>') } });
   assert.equal(login.m.status, 'download_requires_login');
   const zip = await run({ download: { status: 200, contentType: 'application/zip', body: Buffer.from([0x50, 0x4b, 0x03, 0x04]) } });
-  assert.deepEqual([zip.m.status, zip.m.format], ['unknown_export_format', 'zip']);
+  assert.deepEqual([zip.m.status, zip.m.format], ['unknown_export_format', 'zip_unreadable'], 'a zip that is not exactly one readable CSV');
   const http = await run({ download: { status: 403, contentType: 'text/plain', body: Buffer.from('no') } });
   assert.deepEqual([http.m.status, http.m.httpStatus], ['download_failed', 403]);
   for (const r of [timeout, two, login, zip, http]) assert.equal(r.f.log.uploads.length, 0);

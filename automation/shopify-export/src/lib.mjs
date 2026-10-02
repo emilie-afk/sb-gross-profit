@@ -18,6 +18,7 @@
  *     with the Worker's own validators before upload;
  *   • refusals name columns, rules and counts, never values.
  */
+import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -118,6 +119,42 @@ export function detectExportFormat(buf, contentType = '') {
   const first = head.split(/\r?\n/, 1)[0];
   if (/^"?Name"?,/.test(first)) return 'shopify_orders_csv';
   return 'unknown';
+}
+
+/**
+ * Shopify emails large order exports as a ZIP holding one CSV. Extract that one entry in memory
+ * (stored or deflate; no encryption, no ZIP64, CRC checked, output capped). Anything else → null.
+ */
+export const ZIP_MAX_CSV_BYTES = 512 * 1024 * 1024;
+export function unzipSingleCsv(buf, { maxBytes = ZIP_MAX_CSV_BYTES } = {}) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || '');
+  let eocd = -1;
+  for (let i = b.length - 22; i >= Math.max(0, b.length - 22 - 65535); i--) if (b.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) return null;
+  const count = b.readUInt16LE(eocd + 10), cdOffset = b.readUInt32LE(eocd + 16);
+  if (count === 0xffff || cdOffset === 0xffffffff) return null;                    // ZIP64
+  const files = [];
+  for (let n = 0, p = cdOffset; n < count; n++) {
+    if (p + 46 > b.length || b.readUInt32LE(p) !== 0x02014b50) return null;
+    const flags = b.readUInt16LE(p + 8), method = b.readUInt16LE(p + 10), crc = b.readUInt32LE(p + 16);
+    const csize = b.readUInt32LE(p + 20), usize = b.readUInt32LE(p + 24);
+    const nl = b.readUInt16LE(p + 28), el = b.readUInt16LE(p + 30), cl = b.readUInt16LE(p + 32), local = b.readUInt32LE(p + 42);
+    const name = b.subarray(p + 46, p + 46 + nl).toString('utf8');
+    if (!name.endsWith('/')) files.push({ name, flags, method, crc, csize, usize, local });
+    p += 46 + nl + el + cl;
+  }
+  if (files.length !== 1 || !/\.csv$/i.test(files[0].name)) return null;
+  const f = files[0];
+  if (f.flags & 1 || f.csize === 0xffffffff || f.usize === 0xffffffff || f.usize > maxBytes) return null;   // encrypted, ZIP64 or too large
+  if (b.readUInt32LE(f.local) !== 0x04034b50) return null;
+  const start = f.local + 30 + b.readUInt16LE(f.local + 26) + b.readUInt16LE(f.local + 28);
+  const data = b.subarray(start, start + f.csize);
+  let out;
+  if (f.method === 0) out = Buffer.from(data);
+  else if (f.method === 8) { try { out = zlib.inflateRawSync(data, { maxOutputLength: maxBytes }); } catch { return null; } }
+  else return null;
+  if (out.length !== f.usize || zlib.crc32(out) !== f.crc) { out.fill(0); return null; }
+  return { name: f.name, body: out };
 }
 
 /** Columns the collector requires beyond the Worker's minimum (C3 evidence and refunds). */

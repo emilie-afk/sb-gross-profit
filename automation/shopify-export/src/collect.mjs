@@ -23,7 +23,7 @@
 import crypto from 'node:crypto';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
-import { EXIT, KIND, rollingWindow, prepareShopifyExport, selectExportMessage, detectExportFormat, safeError, hostAllowed } from './lib.mjs';
+import { EXIT, KIND, rollingWindow, prepareShopifyExport, selectExportMessage, detectExportFormat, safeError, hostAllowed, unzipSingleCsv } from './lib.mjs';
 import { NEEDS_HUMAN } from './authState.mjs';
 
 const hash16 = s => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 16);
@@ -131,8 +131,16 @@ export async function runCollector(d) {
     }
     if (file.finalHost) manifest.downloadFinalHost = file.finalHost;
     if (file.status !== 200) return finish('download_failed', EXIT.EXPORT_FAILED, { httpStatus: file.status });
-    const format = detectExportFormat(file.body, file.contentType);
+    let format = detectExportFormat(file.body, file.contentType);
     manifest.download = { via: file.via, bytes: file.body.length, format };
+    if (format === 'zip') {                                                // large exports are emailed zipped: one CSV inside
+      const z = unzipSingleCsv(file.body);
+      file.body.fill(0);
+      if (!z) return finish('unknown_export_format', EXIT.EXPORT_FAILED, { format: 'zip_unreadable' });
+      file = { ...file, body: z.body };
+      format = detectExportFormat(file.body, 'text/csv');
+      manifest.download.unzippedBytes = file.body.length;
+    }
     if (format === 'html') { file.body.fill(0); return finish('download_requires_login', EXIT.EXPORT_FAILED); }
     if (format !== 'shopify_orders_csv') { file.body.fill(0); return finish('unknown_export_format', EXIT.EXPORT_FAILED, { format }); }
 

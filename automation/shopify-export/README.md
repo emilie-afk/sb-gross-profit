@@ -59,7 +59,7 @@ The updated-order scan is this same rolling eight-week export. A refund or cance
 ## Checks before upload (the job stops rather than guesses)
 
 - **Sign-in state:** the job stops on a 2FA prompt, a captcha, an expired session that login does not fix, or any page it does not recognise, including an Admin-looking page outside the Admin origin.
-- **File format:** the download must be a Shopify orders CSV. An HTML page (usually a sign-in), a ZIP file or anything else is refused.
+- **File format:** the download must be a Shopify orders CSV. Shopify emails large exports as a ZIP holding one CSV: that one entry is extracted in memory (stored or deflate, CRC checked, size capped) and handled exactly like the CSV. An HTML page (usually a sign-in), any other ZIP or anything else is refused.
 - **Required columns:** the Worker minimum plus `Cancelled at`, `Fulfilled at`, `Financial Status` and `Refunded Amount`.
 - **Order dates:** every order's `Created at` must fall inside the rolling window. If any does not, the export filter is wrong (`export_window_mismatch`).
 - **Free text:** any free text outside the approved form, such as an unapproved Source or Channel value, stops the job (`sanitization_failed`). The refusal names columns and rules, never values.
