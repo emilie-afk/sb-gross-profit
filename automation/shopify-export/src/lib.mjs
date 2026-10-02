@@ -255,7 +255,7 @@ export function adminOrigin(adminUrl) {
 export function localPaths(config = {}) {
   const base = config.localDir || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'sb-shopify-export');
   assertSafeLocalDir(base);
-  return { base, profile: path.join(base, 'profile'), runs: path.join(base, 'runs'), downloads: path.join(base, 'downloads'),
+  return { base, profile: path.join(base, config.browserChannel === 'chrome' ? 'profile-chrome' : 'profile'), runs: path.join(base, 'runs'), downloads: path.join(base, 'downloads'),
            quarantine: path.join(base, 'quarantine') };
 }
 

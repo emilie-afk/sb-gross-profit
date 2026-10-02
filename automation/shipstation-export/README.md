@@ -12,7 +12,7 @@ By default it exports the Shipping Cost Report for the rolling eight weeks endin
 
 **Nothing secret lives in this folder or in the repository.** The ShipStation login and the Worker ingest secret are in Windows Credential Manager; the browser session is in a profile under `%LOCALAPPDATA%\sb-shipstation-export\profile`; run logs are under `%LOCALAPPDATA%\sb-shipstation-export\runs`. No password, 2FA code, cookie or token is ever written to the config, a log or the manifest.
 
-**Browser.** If Playwright's bundled Chromium does not start on the PC (seen on one Windows 11 laptop: "side-by-side configuration is incorrect"), set `"browserChannel": "msedge"` (or `"chrome"`) in `config.local.json`; the collector then drives the installed browser with its own profile folder. Record steps with `npx playwright codegen --channel=msedge <url>`.
+**Browser.** If Playwright's bundled Chromium does not start on the PC (seen on one Windows 11 laptop: "side-by-side configuration is incorrect"), set `"browserChannel": "msedge"` (or `"chrome"`) in `config.local.json`; the collector then drives the installed browser with its own profile folder (`profile-chrome` for Chrome: Chrome cannot read Edge's saved session, so the two never share one). On the Windows laptop Edge 154 crashed whenever a ShipStation CSV download started; Chrome is the fallback there. Record steps with `npx playwright codegen --channel=msedge <url>`.
 
 ## One-time setup
 

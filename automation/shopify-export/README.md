@@ -27,7 +27,7 @@ The updated-order scan is this same rolling eight-week export. A refund or cance
 - **Search:** fixed in code (`lib.mjs`): `from:shopify.com subject:export after:<request time − 5 min>`. The config cannot set or extend it, and a config that contains a `query`/`search`/`filter` key is refused.
 - **Matching:** the job accepts exactly one email received after the export request. It must come from a `shopify.com` sender, have "export" and "order" in the subject, and contain exactly one https download link on a Shopify-owned host (`shopify.com`, `myshopify.com`, `shopifycloud.com`, `shopifycdn.com`, `shopifysvc.com`). No email means a timeout (exit 32). Two matching emails is ambiguous (exit 30), and the job does not guess.
 
-**Browser.** If Playwright's bundled Chromium does not start on the PC (seen on one Windows 11 laptop: "side-by-side configuration is incorrect"), set `"browserChannel": "msedge"` (or `"chrome"`) in `config.local.json`; the collector then drives the installed browser with its own profile folder. Record steps with `npx playwright codegen --channel=msedge <url>`.
+**Browser.** If Playwright's bundled Chromium does not start on the PC (seen on one Windows 11 laptop: "side-by-side configuration is incorrect"), set `"browserChannel": "msedge"` (or `"chrome"`) in `config.local.json`; the collector then drives the installed browser with its own profile folder (`profile-chrome` for Chrome: Chrome cannot read Edge's saved session, so the two never share one). On the Windows laptop Edge 154 crashed whenever a ShipStation CSV download started; Chrome is the fallback there. Record steps with `npx playwright codegen --channel=msedge <url>`.
 
 ## One-time setup
 

@@ -13,3 +13,12 @@ test('collectors: browserChannel selects the installed Edge or Chrome; anything 
     assert.throws(() => lib.browserLaunchOptions({ browserChannel: 'C:\\evil.exe' }), /browserChannel/);
   }
 });
+
+test('collectors: Chrome gets its own profile folder (it cannot read the Edge/Chromium saved session)', () => {
+  const dir = process.platform === 'win32' ? 'C:\\sb-test-local' : '/var/tmp/sb-test-local';
+  for (const lib of [SS, SH]) {
+    const p = c => lib.localPaths({ localDir: dir, ...(c ? { browserChannel: c } : {}) }).profile;
+    assert.ok(p(null).endsWith('profile') && p('msedge').endsWith('profile'));
+    assert.ok(p('chrome').endsWith('profile-chrome'));
+  }
+});
