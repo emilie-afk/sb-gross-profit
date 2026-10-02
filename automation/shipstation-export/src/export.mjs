@@ -38,7 +38,7 @@ function argv() {
   return o;
 }
 
-async function runSteps(page, steps, vars, downloadsDir) {
+export async function runSteps(page, steps, vars, downloadsDir) {
   let file = null;
   for (const [i, s] of steps.entries()) {
     const at = `step ${i + 1} (${s.action})`;
@@ -47,9 +47,30 @@ async function runSteps(page, steps, vars, downloadsDir) {
     else if (s.action === 'fill') await page.locator(s.selector).first().fill(render(s.value, vars), { timeout: s.timeout || 15000 });
     else if (s.action === 'select') await page.locator(s.selector).first().selectOption(render(s.value, vars));
     else if (s.action === 'waitFor') await page.locator(s.selector).first().waitFor({ timeout: s.timeout || 30000 });
+    else if (s.action === 'waitForLoad') await page.waitForLoadState('networkidle', { timeout: s.timeout || 30000 }).catch(() => {});   // a busy app may never go idle: bounded
+    else if (s.action === 'wait') await page.waitForTimeout(Math.min(Number(s.ms) || 0, 120000));
+    else if (s.action === 'download' && s.capture) {
+      // Take the file from the network instead of the browser's download manager: on the Windows
+      // laptop Edge 154 and Chrome 154 driven by Playwright closed ~3 s after a download started.
+      // The matching request is fetched by Playwright and answered with an empty 204 to the page.
+      let settle; const got = new Promise(r => { settle = r; });
+      await page.route(s.capture, async route => {
+        try { const res = await route.fetch({ timeout: s.timeout || 180000 }); settle({ status: res.status(), body: await res.body() }); }
+        catch (e) { settle({ status: 0, error: String(e.message).split('\n')[0].slice(0, 120) }); }
+        await route.fulfill({ status: 204, body: '' }).catch(() => {});
+      });
+      await page.locator(s.selector).first().click({ timeout: 15000 });
+      const r = await Promise.race([got, new Promise(res => setTimeout(() => res({ status: 0, error: 'capture_timeout' }), s.timeout || 180000))]);
+      await page.unroute(s.capture).catch(() => {});
+      if (r.status !== 200 || !r.body?.length) throw new Error(`${at}: report download failed (${r.status} ${r.error || 'empty'})`);
+      file = path.join(downloadsDir, `download_${Date.now()}.csv`);
+      fs.writeFileSync(file, r.body);
+      r.body.fill(0);
+    }
     else if (s.action === 'download') {
       // One retry: on the real Windows run the browser twice reported the download target closed
       // ("Target page, context or browser has been closed") where a manual run of the same steps worked.
+      let firstError = null;
       for (let attempt = 1; ; attempt++) {
         try {
           const [dl] = await Promise.all([page.waitForEvent('download', { timeout: s.timeout || 120000 }), page.locator(s.selector).first().click()]);
@@ -59,7 +80,8 @@ async function runSteps(page, steps, vars, downloadsDir) {
           await dl.saveAs(file);
           break;
         } catch (e) {
-          if (attempt >= 2) throw e;
+          if (attempt >= 2 || page.isClosed()) throw new Error(firstError ? `${firstError} | retry: ${String(e.message).split('\n')[0]}` : String(e.message).split('\n')[0]);
+          firstError = String(e.message).split('\n')[0].slice(0, 160);
           await page.waitForTimeout(5000);
           if (s.reopen) await page.locator(s.reopen).first().click({ timeout: 15000 }).catch(() => {});
         }

@@ -27,15 +27,30 @@
   },
   "exportSteps": [
     {
-      "_comment": "RECORD THESE ON THE WINDOWS HOST with `npm run codegen`. Open Orders, filter Date created from {{windowFromUS}} (or {{windowFrom}}) to {{windowToUS}} ({{windowTo}}), choose Export → Current search → CSV for Excel, numbers, or other spreadsheet programs, then Export orders. The last step must be requestExport."
+      "_comment": "Recorded on the Windows PC (2026-10-02): Orders → Export → Orders by date (calendar only) → Export orders. Large exports are emailed as a ZIP holding one CSV."
     },
-    { "action": "goto", "url": "https://admin.shopify.com/store/<store-handle>/orders" },
-    { "action": "click", "selector": "REPLACE: date created filter" },
-    { "action": "fill", "selector": "REPLACE: date from", "value": "{{windowFrom}}" },
-    { "action": "fill", "selector": "REPLACE: date to", "value": "{{windowTo}}" },
-    { "action": "click", "selector": "REPLACE: Export button" },
-    { "action": "check", "selector": "REPLACE: Current search radio" },
-    { "action": "check", "selector": "REPLACE: CSV for Excel radio" },
-    { "action": "requestExport", "selector": "REPLACE: Export orders button", "directDownloadWaitMs": 20000 }
+    {
+      "action": "goto",
+      "url": "https://admin.shopify.com/store/<store-handle>/orders"
+    },
+    {
+      "action": "click",
+      "selector": "role=button[name=\"Export\"i]",
+      "timeout": 30000
+    },
+    {
+      "action": "check",
+      "selector": "role=dialog >> role=radio[name=\"Orders by date\"]"
+    },
+    {
+      "action": "pickDateRange",
+      "from": "{{windowFrom}}",
+      "to": "{{windowTo}}"
+    },
+    {
+      "action": "requestExport",
+      "selector": "role=dialog >> role=button[name=\"Export orders\"]",
+      "directDownloadWaitMs": 20000
+    }
   ]
 }
