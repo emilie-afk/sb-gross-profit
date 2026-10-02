@@ -64,6 +64,16 @@ export function saveState(file, state, fsImpl = fs) { fsImpl.mkdirSync(path.dirn
  * @param {string} d.lockFile
  * @param {string} d.stateFile
  */
+/**
+ * A source job that throws (e.g. the browser cannot start) is that source's failure only: it is
+ * reported with an exit code, and the other source and the compute step still run.
+ */
+export const SOURCE_CRASHED = 30;
+async function guarded(job) {
+  try { return await job(); }
+  catch (e) { return { status: 'failed', exitCode: Number.isInteger(e?.exitCode) ? e.exitCode : SOURCE_CRASHED }; }
+}
+
 export async function runWeeklyCollection(d) {
   const log = d.log || (() => {});
   if (!d.week.closed) return { status: 'week_not_closed', exitCode: EXIT.NOT_DUE, sources: {} };
@@ -84,14 +94,14 @@ export async function runWeeklyCollection(d) {
     let pending = null;
     if (needReport) {
       log('shipstation: collecting');
-      const r = await d.shipstation.collect();
+      const r = await guarded(() => d.shipstation.collect());
       if (r.status === 'prepared' && r.pending) pending = r.pending;
       else sources.shipping_cost_report = r.status === 'ok' ? 'ok' : `${r.status} (exit ${r.exitCode})`;
     } else sources.shipping_cost_report = 'ok';
     const uploadShipStation = async () => {
       if (!pending) return 'nothing_pending';
       const p = pending; pending = null;
-      const u = await d.shipstation.upload(p);
+      const u = await guarded(() => d.shipstation.upload(p));
       sources.shipping_cost_report = u.status === 'ok' ? 'ok' : `${u.status} (exit ${u.exitCode})`;
       return `shipstation ${u.status}`;
     };
@@ -99,7 +109,7 @@ export async function runWeeklyCollection(d) {
     // 2–4. Shopify (browser B); the ShipStation upload happens during the email wait
     if (needShopify) {
       log('shopify: requesting export');
-      const m = await d.shopify.run({ onWaiting: uploadShipStation });
+      const m = await guarded(() => d.shopify.run({ onWaiting: uploadShipStation }));
       sources.shopify = m.status === 'ok' ? 'ok' : `${m.status} (exit ${m.exitCode})`;
     } else sources.shopify = 'ok';
     if (pending) await uploadShipStation();                               // direct download or Shopify skipped

@@ -69,6 +69,23 @@ test('C7 collector: sources are independent — one failing never blocks the oth
   assert.ok(!c.log.some(l => l.startsWith('shipstation:upload')));
 });
 
+test('C7 collector: a source job that throws (the browser cannot start) fails only that source; the other source and compute still run', async () => {
+  const r = rig();
+  r.d.shipstation.collect = async () => { throw new Error('browserType.launchPersistentContext: spawn UNKNOWN'); };
+  let computed = false;
+  r.d.compute = async () => { computed = true; return { status: 'ok' }; };
+  const out = await runWeeklyCollection(r.d);
+  assert.equal(out.exitCode, EXIT.PARTIAL);
+  assert.equal(out.sources.shipping_cost_report, 'failed (exit 30)');
+  assert.equal(out.sources.shopify, 'ok');
+  assert.equal(computed, true);
+  const t = rig();
+  t.d.shopify.run = async () => { throw Object.assign(new Error('x'), { exitCode: 23 }); };
+  const o2 = await runWeeklyCollection(t.d);
+  assert.deepEqual([o2.sources.shipping_cost_report, o2.sources.shopify], ['ok', 'failed (exit 23)'], 'a pending ShipStation upload still happens');
+  assert.equal(fs.existsSync(t.d.lockFile), false, 'the lock is released');
+});
+
 test('C7 collector: catch-up after a missed start collects only what the Worker still lacks', async () => {
   const done = rig({ collected: { shopify: 'ok', shopify_updates: 'ok', shipping_cost_report: 'ok' } });
   const o1 = await runWeeklyCollection(done.d);
