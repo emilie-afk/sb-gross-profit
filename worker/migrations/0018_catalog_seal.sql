@@ -10,4 +10,5 @@
 ALTER TABLE catalog_upload ADD COLUMN seal_token TEXT;
 ALTER TABLE catalog_upload ADD COLUMN sealing_at TEXT;
 ALTER TABLE catalog_upload ADD COLUMN catalog_rev TEXT;
-ALTER TABLE catalog_upload ADD COLUMN result TEXT;     -- JSON: the seal's answer, replayed to a repeated seal
+-- result: JSON, the seal's answer, replayed to a repeated seal
+ALTER TABLE catalog_upload ADD COLUMN result TEXT;
