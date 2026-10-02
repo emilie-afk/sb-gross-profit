@@ -48,9 +48,22 @@ async function runSteps(page, steps, vars, downloadsDir) {
     else if (s.action === 'select') await page.locator(s.selector).first().selectOption(render(s.value, vars));
     else if (s.action === 'waitFor') await page.locator(s.selector).first().waitFor({ timeout: s.timeout || 30000 });
     else if (s.action === 'download') {
-      const [dl] = await Promise.all([page.waitForEvent('download', { timeout: s.timeout || 120000 }), page.locator(s.selector).first().click()]);
-      file = path.join(downloadsDir, `download_${Date.now()}.csv`);
-      await dl.saveAs(file);
+      // One retry: on the real Windows run the browser twice reported the download target closed
+      // ("Target page, context or browser has been closed") where a manual run of the same steps worked.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const [dl] = await Promise.all([page.waitForEvent('download', { timeout: s.timeout || 120000 }), page.locator(s.selector).first().click()]);
+          const failure = await dl.failure();
+          if (failure) throw new Error(`download failed (${String(failure).slice(0, 60)})`);
+          file = path.join(downloadsDir, `download_${Date.now()}.csv`);
+          await dl.saveAs(file);
+          break;
+        } catch (e) {
+          if (attempt >= 2) throw e;
+          await page.waitForTimeout(5000);
+          if (s.reopen) await page.locator(s.reopen).first().click({ timeout: 15000 }).catch(() => {});
+        }
+      }
     } else throw new Error(`${at}: unknown action`);
   }
   if (!file) throw new Error('Export steps finished without a download step');
