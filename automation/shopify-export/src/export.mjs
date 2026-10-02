@@ -19,7 +19,7 @@ import { uploadToWorker, workerEndpoint } from '../../shipstation-export/src/upl
 import { readWindowsCredential } from './credentials.mjs';
 import { detectShopifyAuthState } from './authState.mjs';
 import { gmailAccessToken, gmailClient } from './gmail.mjs';
-import { assertCollectorConfig, adminOrigin, localPaths, EXIT, RETENTION_MS, INGEST_PATH, safeError, browserLaunchOptions } from './lib.mjs';
+import { assertCollectorConfig, adminOrigin, localPaths, EXIT, RETENTION_MS, INGEST_PATH, safeError, browserLaunchOptions, calendarDayPattern } from './lib.mjs';
 import { runCollector } from './collect.mjs';
 
 function argv() {
@@ -63,6 +63,15 @@ export function playwrightBrowser({ config, paths, headed, launchOptions = {}, b
         else if (s.action === 'select') await page.locator(s.selector).first().selectOption(render(s.value, vars));
         else if (s.action === 'check') await page.locator(s.selector).first().check({ timeout: t });
         else if (s.action === 'waitFor') await page.locator(s.selector).first().waitFor({ timeout: s.timeout || 30000 });
+        else if (s.action === 'pickDateRange') {
+          // Shopify's export calendar has no date fields: page back (or forward) to each month and click the day.
+          // The calendar opens on the current month: page back to the start date, then forward to the end date.
+          for (const [ymd, step] of [[render(s.from, vars), /^Show previous month/], [render(s.to, vars), /^Show next month/]]) {
+            const day = page.getByRole('button', { name: calendarDayPattern(ymd) });
+            for (let n = 0; n < 24 && !(await day.count()); n++) await page.getByRole('button', { name: step }).first().click({ timeout: t });
+            await day.first().click({ timeout: t });
+          }
+        }
         else if (s.action === 'requestExport') {
           // Click "Export orders". Small exports download at once; large ones are emailed.
           const dl = page.waitForEvent('download', { timeout: s.directDownloadWaitMs || 20000 }).catch(() => null);

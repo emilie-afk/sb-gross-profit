@@ -241,3 +241,18 @@ export function browserLaunchOptions(config) {
   if (!['msedge', 'chrome'].includes(ch)) throw new Error('browserChannel must be "msedge", "chrome" or absent');
   return { channel: ch };
 }
+
+/**
+ * The accessible name Shopify Admin's calendar gives a day button: "Monday August 3 2026"
+ * (prefixed with "Start of range", "End of range" or "Today" when those apply).
+ */
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+export function calendarDayLabel(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd));
+  if (!m) throw new Error('calendarDayLabel needs YYYY-MM-DD');
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return `${WEEKDAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${d.getUTCFullYear()}`;
+}
+/** Matches a day button by its label, whatever range/today prefix it carries. */
+export const calendarDayPattern = ymd => new RegExp(`(^|\\s)${calendarDayLabel(ymd)}$`);
