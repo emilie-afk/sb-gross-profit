@@ -350,6 +350,34 @@ Each secret is at least 32 random characters (`openssl rand -base64 48`). Store
 copies in the password manager; the Windows host keeps the ingest secret in
 Credential Manager (`sb-gp-ingest`). The dashboard password hash is not the password.
 
+### Production (rolled out 2026-10-02)
+
+Workers Free, the verified Cloudflare account. Nothing is published; all five controls are false.
+
+| Piece | Production |
+| --- | --- |
+| Worker | `sb-gp-worker` → `https://sb-gp-worker.sb-gp.workers.dev`, deployed from pushed `2e80b5b`, no cron trigger, `SB_ENVIRONMENT = "production"` |
+| D1 | `sb-gp` (APAC), migrations 0001–0019 applied one at a time in order, bound once with `POST /v1/admin/environment/bind` (audited) |
+| Secrets | own values (not shared with staging): `INGEST_SECRET`, `ADMIN_SECRET`, `SESSION_SIGNING_KEY`, `VERIFY_SECRET`, `DASHBOARD_PASSWORD_HASH`; the D1 id and the values stay out of Git |
+| Verifier | Netlify site `sb-gp-verify` (functions only, from `git archive 2e80b5b netlify/functions shared package.json`): `https://sb-gp-verify.netlify.app/.netlify/functions/gp-verify-background`; production-context variables `SB_WORKER_ORIGIN`, `SB_VERIFY_SECRET`, `SB_VERIFY_TRIGGER_SECRET` |
+| Dashboard | `sb-profit` production context has `SB_WORKER_ORIGIN`, `CATALOG_PUSH_URL` (production Worker), `SB_INGEST_SECRET` (builds), `SB_VERIFY_SECRET`, `SB_VERIFY_TRIGGER_SECRET`. They take effect when `main` carries this code. Signed-in dashboard sessions see published weeks only. |
+| Catalog | pushed in chunks with the same tables as the `2e80b5b` branch build (every table byte-identical); rev `cat_f9204acf5d0b4192` |
+| Collector | the Windows PC; `config.local.json` files point at the production Worker; Credential Manager `sb-gp-ingest-production`, `sb-gp-verify-trigger-production`, `sb-gp-admin-production` (for `windows/scr-review.mjs`), `sb-gp-dashboard-production` |
+
+**Weekly task** (`automation/collector/windows/weekly-task.ps1`, registered as "SB GP weekly collector"): weekly Monday 15:05 ICT,
+stored as `2026-10-05T15:05:00+07:00`, i.e. 08:05 UTC wherever the laptop is, plus at logon (5-minute delay). Settings:
+start when available after a missed start, wake to run, run on battery, ignore a second instance, 3-hour limit, restart 3 × 15 min on
+failure. The script skips a week that already finished on this PC, runs the collector headless and, while the result is partial,
+retries every 15 minutes up to 6 times.
+
+**Shipping Cost Report review each Monday.** Auto-acceptance stays off, so each new report version (the new week's dates) waits for
+review. `node automation\collector\windows\scr-review.mjs list | show <id> | accept <id> "<reason>"` (audited). An accepted
+version is picked up by the task's next retry, or by starting the task again.
+
+**Backfill on production (2026-10-02).** Weeks Jun 8 – Sep 21 2026 are computed and verified (Aug 3 is revision 2, after
+the orders of the week before were loaded). Dec 22 2025 – Jun 7 2026 is waiting for the Source allowlist change; the
+Dec 22 – Feb 15 report version stays held until then.
+
 ### Schedule and time zones
 
 The two zones are D1 settings, and every change to them is audited with a reason:
