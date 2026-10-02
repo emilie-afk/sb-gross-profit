@@ -58,7 +58,7 @@ test('collector on the Free-tier path: collect → upload → compute every week
   // Second run: sources already held (nothing re-collected), but the run still computes: every
   // week computed and verified (before, the restart returned at once and the weeks stayed uncomputed).
   const r2 = await run(d, mk(), dir);
-  assert.equal(r2.status, 'already_collected');
+  assert.equal(r2.status, 'already_collected', JSON.stringify(r2.compute).slice(0, 600));
   const r3 = r2.compute;
   assert.equal(r3.status, "ok", JSON.stringify(r3.weeks));
   assert.equal(r3.weeks.length, d.weeks.length);

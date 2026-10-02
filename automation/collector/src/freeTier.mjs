@@ -51,7 +51,7 @@ export function collectClient({ workerUrl, ingestSecret, fetchImpl = fetch, atte
   if (!ingestSecret) throw new Error('Missing ingest secret');
   const stats = { requests: 0, retries: 0 };
   async function call(method, path, { json, bytes, raw = false } = {}) {
-    if (!/^\/v1\/collect\/[\w:/.-]+$/.test(path)) throw new Error('unexpected collect path');
+    if (!/^\/v1\/collect\/[\w:/.-]+(\?[\w=,&-]+)?$/.test(path)) throw new Error('unexpected collect path');
     const headers = { 'X-Ingest-Secret': ingestSecret, 'User-Agent': 'sb-gp-collector/1.0' };
     let body;
     if (json !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(json); }
@@ -201,8 +201,19 @@ export async function requestVerification({ verifyUrl, triggerSecret, snapshots,
   } catch { accepted = false; }
   if (!accepted) return snapshots.map(s => ({ snapshotId: s.snapshotId, status: 'verifier_unreachable' }));
   const out = new Map(), t0 = now();
+  let batched = true;                       // GET /v1/collect/verification: one light request per poll (404/400 → per-week status)
   for (;;) {
-    for (const s of snapshots) {
+    if (batched) {
+      const pending = snapshots.filter(s => !out.has(s.snapshotId));
+      try {
+        const r = await client.call('GET', `/v1/collect/verification?ids=${pending.map(s => s.snapshotId).join(',')}`);
+        for (const x of r.snapshots || []) {
+          if (x.superseded) out.set(x.snapshotId, 'superseded');
+          else if (x.verification) out.set(x.snapshotId, x.verification);
+        }
+      } catch (e) { if (!(e instanceof WorkerCallError) || e.status === 404 || e.status === 400) batched = false; }   // older Worker or refused: per-week status
+    }
+    if (!batched) for (const s of snapshots) {
       if (out.has(s.snapshotId)) continue;
       const st = await client.call('GET', `/v1/collect/weeks/${s.weekStart}/status`).catch(() => null);
       if (st?.draft?.snapshotId === s.snapshotId && st.verification) out.set(s.snapshotId, st.verification.status);

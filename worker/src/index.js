@@ -30,7 +30,7 @@ import { openSource, putSegment, sealSource, getSourceMeta, getSegment } from '.
 import { uploadScrVersion, getScrOwners, getScrDays, listScrVersions, getScrVersion, acceptScrVersion, rejectScrVersion, rollbackScrActivation } from './collectScr.js';
 import { ordersDiff, uploadOrders, getManifest, orderBodies, catalogPart, weekAux, pinAux, openResults, putResultPart, finalizeResults } from './collectWeeks.js';
 import { pendingVerifications, verifyInputs, verifyPart, postVerifyReport } from './verifyRoutes.js';
-import { getWeekStatus } from './weekStatus.js';
+import { getWeekStatus, verificationStatuses } from './weekStatus.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -82,6 +82,7 @@ async function route(request, env) {
     // Writes (and the week's collection status): the collector only.
     requireSecret(request, env, 'ingest');
     if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/status$`))) && m === 'GET') return getWeekStatus(env, g[1]);
+    if (p === '/v1/collect/verification' && m === 'GET') return verificationStatuses(request, env);
     if (p === '/v1/collect/sources' && m === 'POST') return openSource(request, env);
     if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/segments\/(\d+)$/)) && m === 'PUT') return putSegment(request, env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/seal$/)) && m === 'POST') return sealSource(request, env, g[1]);

@@ -74,3 +74,19 @@ export async function getWeekStatus(env, weekStart) {
   if (!WEEK_RE.test(weekStart)) throw new ApiError(400, 'bad_query', 'week must be YYYY-MM-DD');
   return json(await weekStatus(env.DB, weekStart));
 }
+
+/**
+ * GET /v1/collect/verification?ids=snp_…,snp_… (ingest, ≤ 16 ids): the verification status of the
+ * drafts the collector is waiting for, in ONE light query. The collector polls this instead of
+ * every week's full status (8 requests every 15 s while the verifier is loading the Worker).
+ * `superseded`: a newer revision of that week exists.
+ */
+export async function verificationStatuses(request, env) {
+  const ids = (new URL(request.url).searchParams.get('ids') || '').split(',').filter(Boolean);
+  if (!ids.length || ids.length > 16 || ids.some(id => !/^snp_[0-9a-f]{20}$/.test(id))) throw new ApiError(400, 'bad_query', 'ids: 1–16 snapshot ids');
+  const rows = (await env.DB.prepare(`SELECT s.snapshot_id, v.status, v.at,
+      EXISTS (SELECT 1 FROM snapshot n WHERE n.week_start = s.week_start AND n.storage = 'chunked' AND n.revision > s.revision) AS superseded
+    FROM snapshot s LEFT JOIN verify_report v ON v.snapshot_id = s.snapshot_id WHERE s.snapshot_id IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(ids)).all()).results || [];
+  const by = new Map(rows.map(r => [r.snapshot_id, r]));
+  return json({ snapshots: ids.map(id => { const r = by.get(id); return r ? { snapshotId: id, verification: r.status || null, at: r.at || null, superseded: !!r.superseded } : { snapshotId: id, unknown: true }; }) });
+}
