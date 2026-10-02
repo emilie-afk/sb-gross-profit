@@ -88,7 +88,18 @@ export async function runWeeklyCollection(d) {
     // A source counts as collected only when the WORKER has it; the local record is a fallback when the Worker is unreachable.
     const needReport = plan ? workerSays('shipping_cost_report') !== 'ok' : mine.shipping_cost_report !== 'ok';
     const needShopify = plan ? (workerSays('shopify') !== 'ok' || workerSays('shopify_updates') !== 'ok') : mine.shopify !== 'ok';
-    if (!needReport && !needShopify) return { status: 'already_collected', exitCode: EXIT.OK, sources: { shipping_cost_report: 'ok', shopify: 'ok' } };
+    if (!needReport && !needShopify) {
+      // Free-tier path: the sources being in does not mean the weeks are computed (e.g. a report
+      // review was accepted after the last run, or a run stopped mid-compute). Computing is
+      // idempotent: unchanged weeks are skipped and write nothing.
+      if (!d.compute) return { status: 'already_collected', exitCode: EXIT.OK, sources: { shipping_cost_report: 'ok', shopify: 'ok' } };
+      let compute;
+      try { compute = await d.compute({ sources: { shipping_cost_report: 'ok', shopify: 'ok' } }); }
+      catch (e) { compute = { status: 'failed', code: typeof e?.code === 'string' ? e.code.slice(0, 64) : 'compute_failed' }; }
+      log(`compute: ${compute.status}`);
+      return { status: compute.status === 'ok' ? 'already_collected' : 'partial', exitCode: compute.status === 'ok' ? EXIT.OK : EXIT.PARTIAL,
+               sources: { shipping_cost_report: 'ok', shopify: 'ok' }, compute };
+    }
 
     // 1. ShipStation (browser A), upload deferred
     let pending = null;

@@ -42,7 +42,7 @@ function run(d, ft, dir, { collectedReport = true } = {}) {
   });
 }
 
-test('collector on the Free-tier path: collect → upload → compute every week → verified; a second run collects nothing', { timeout: 300_000 }, async () => {
+test('collector on the Free-tier path: collect → upload → compute every week → verified; a second run collects nothing and computes what the review unblocked', { timeout: 300_000 }, async () => {
   const d = dataset({ n: 150, scr: { zeroEvery: 1e9 } });
   const { env, fetchImpl, logs } = await setup(d);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-ft-'));
@@ -55,11 +55,11 @@ test('collector on the Free-tier path: collect → upload → compute every week
   const v = (await api(env, 'GET', '/v1/admin/scr/versions')).json.versions[0];
   assert.deepEqual(v.reviewReasons, ['first_version', 'auto_acceptance_disabled']);
   await ok(api(env, 'POST', `/v1/admin/scr/versions/${v.versionId}/accept`, { reason: 'test: first version reviewed' }), 'accept');
-  // Second run: sources already held (nothing re-collected); every week computed and verified.
+  // Second run: sources already held (nothing re-collected), but the run still computes: every
+  // week computed and verified (before, the restart returned at once and the weeks stayed uncomputed).
   const r2 = await run(d, mk(), dir);
   assert.equal(r2.status, 'already_collected');
-  const ft = mk();
-  const r3 = await ft.compute();
+  const r3 = r2.compute;
   assert.equal(r3.status, "ok", JSON.stringify(r3.weeks));
   assert.equal(r3.weeks.length, d.weeks.length);
   assert.ok(r3.weeks.every(w => w.status === 'computed' && w.verification === 'verified'));

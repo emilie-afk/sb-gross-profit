@@ -17,7 +17,7 @@ The job starts at **Monday 14:05 Ho Chi Minh time** on the Free-tier path (15:05
 
 1. Works out the last closed reporting week (Monday–Sunday, America/Los_Angeles). A week that has not closed is never collected.
 2. Asks the Worker's week plan (`GET /v1/ingest/week-plan`, ingest secret) which sources that week still lacks (`collected`).
-3. Collects only those. A restart after a successful week does nothing, and a restart after a partial week collects only the missing source. If the Worker is unreachable, the local `state.json` (sources and statuses only) decides. Uploads are idempotent either way.
+3. Collects only those. A restart after a successful week opens no browser (on the Free-tier path it still runs the compute step, which skips unchanged weeks and writes nothing), and a restart after a partial week collects only the missing source. If the Worker is unreachable, the local `state.json` (sources and statuses only) decides. Uploads are idempotent either way.
 4. Holds `collector.lock` so two starts never overlap. A lock older than 3 hours, left by a crashed run, is replaced.
 
 ## Setup

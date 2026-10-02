@@ -89,7 +89,14 @@ test('C7 collector: a source job that throws (the browser cannot start) fails on
 test('C7 collector: catch-up after a missed start collects only what the Worker still lacks', async () => {
   const done = rig({ collected: { shopify: 'ok', shopify_updates: 'ok', shipping_cost_report: 'ok' } });
   const o1 = await runWeeklyCollection(done.d);
-  assert.deepEqual([o1.status, done.log], ['already_collected', []], 'restart after a successful week does nothing');
+  assert.deepEqual([o1.status, done.log], ['already_collected', []], 'restart after a successful week opens no browser');
+  // Free-tier path: the restart still runs the (idempotent) compute step, so weeks unblocked since are computed.
+  let computed = 0;
+  const ft = rig({ collected: { shopify: 'ok', shopify_updates: 'ok', shipping_cost_report: 'ok' } });
+  const o3 = await runWeeklyCollection({ ...ft.d, compute: async () => { computed++; return { status: 'ok' }; } });
+  assert.deepEqual([o3.status, o3.exitCode, computed, ft.log], ['already_collected', EXIT.OK, 1, []]);
+  const o4 = await runWeeklyCollection({ ...rig({ collected: { shopify: 'ok', shopify_updates: 'ok', shipping_cost_report: 'ok' } }).d, compute: async () => ({ status: 'partial' }) });
+  assert.deepEqual([o4.status, o4.exitCode], ['partial', EXIT.PARTIAL]);
   const onlyShopify = rig({ collected: { shopify: 'missing', shopify_updates: 'missing', shipping_cost_report: 'ok' } });
   await runWeeklyCollection(onlyShopify.d);
   assert.ok(!onlyShopify.log.some(l => l.startsWith('shipstation')), 'the report already arrived');
