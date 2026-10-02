@@ -4,6 +4,8 @@
   "loginUrl": "https://ship.shipstation.com/",
   "credentialTarget": "sb-shipstation-export",
   "timeZone": "America/Los_Angeles",
+  "_browserChannelComment": "null = Playwright's bundled Chromium. \"msedge\" or \"chrome\" drives the installed browser (with this collector's own profile) where the bundled build will not start.",
+  "browserChannel": null,
   "delivery": "worker",
   "workerUrl": "https://sb-gp-worker-staging.<account>.workers.dev",
   "ingestCredentialTarget": "sb-gp-ingest",

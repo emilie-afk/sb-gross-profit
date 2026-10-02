@@ -28,7 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { detectAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
 import { readWindowsCredential } from './credentials.mjs';
-import { lastCompletedWeek, weekFromStart, render, localPaths, assertNoSecretsInConfig, purgeOlderThan, resolveDelivery } from './lib.mjs';
+import { lastCompletedWeek, weekFromStart, render, localPaths, assertNoSecretsInConfig, purgeOlderThan, resolveDelivery, browserLaunchOptions } from './lib.mjs';
 import { uploadToWorker, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
 import { prepareExport, reportWindow, KINDS, DEFAULT_KIND, assertKindEnabled } from './kinds.mjs';
 
@@ -83,7 +83,7 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
     return { status, exitCode, manifest, paths };
   };
 
-  const context = await chromium.launchPersistentContext(paths.profile, { headless: !headed, acceptDownloads: true });
+  const context = await chromium.launchPersistentContext(paths.profile, { headless: !headed, acceptDownloads: true, ...browserLaunchOptions(config) });
   try {
     const page = context.pages()[0] || await context.newPage();
     await page.goto(config.appUrl, { waitUntil: 'domcontentloaded' });

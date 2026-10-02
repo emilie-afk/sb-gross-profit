@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import { chromium } from 'playwright';
 import { detectShopifyAuthState } from './authState.mjs';
-import { assertCollectorConfig, adminOrigin, localPaths } from './lib.mjs';
+import { assertCollectorConfig, adminOrigin, localPaths, browserLaunchOptions } from './lib.mjs';
 
 const i = process.argv.indexOf('--config');
 const config = JSON.parse(fs.readFileSync(i > 0 ? process.argv[i + 1] : 'config.local.json', 'utf8'));
@@ -19,7 +19,7 @@ const { profile } = localPaths(config);
 fs.mkdirSync(profile, { recursive: true });
 const origin = adminOrigin(config.adminUrl);
 
-const context = await chromium.launchPersistentContext(profile, { headless: false });
+const context = await chromium.launchPersistentContext(profile, { headless: false, ...browserLaunchOptions(config) });
 const page = context.pages()[0] || await context.newPage();
 await page.goto(config.adminUrl);
 console.log('Sign in with the dedicated Shopify staff account and complete any verification. Waiting up to 10 minutes…');

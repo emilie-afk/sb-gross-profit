@@ -14,7 +14,7 @@
 import fs from 'node:fs';
 import { chromium } from 'playwright';
 import { detectAuthState } from './authState.mjs';
-import { localPaths, assertNoSecretsInConfig } from './lib.mjs';
+import { localPaths, assertNoSecretsInConfig, browserLaunchOptions } from './lib.mjs';
 
 const i = process.argv.indexOf('--config');
 const config = JSON.parse(fs.readFileSync(i > 0 ? process.argv[i + 1] : 'config.local.json', 'utf8'));
@@ -22,7 +22,7 @@ assertNoSecretsInConfig(config);
 const { profile } = localPaths(config);
 fs.mkdirSync(profile, { recursive: true });
 
-const context = await chromium.launchPersistentContext(profile, { headless: false });
+const context = await chromium.launchPersistentContext(profile, { headless: false, ...browserLaunchOptions(config) });
 const page = context.pages()[0] || await context.newPage();
 await page.goto(config.loginUrl || config.appUrl);
 console.log('Sign in and complete any verification in the browser window. Waiting up to 10 minutes…');

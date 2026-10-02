@@ -19,7 +19,7 @@ import { uploadToWorker, workerEndpoint } from '../../shipstation-export/src/upl
 import { readWindowsCredential } from './credentials.mjs';
 import { detectShopifyAuthState } from './authState.mjs';
 import { gmailAccessToken, gmailClient } from './gmail.mjs';
-import { assertCollectorConfig, adminOrigin, localPaths, EXIT, RETENTION_MS, INGEST_PATH, safeError } from './lib.mjs';
+import { assertCollectorConfig, adminOrigin, localPaths, EXIT, RETENTION_MS, INGEST_PATH, safeError, browserLaunchOptions } from './lib.mjs';
 import { runCollector } from './collect.mjs';
 
 function argv() {
@@ -97,7 +97,7 @@ export async function runShopifyJob({ config, week, headed = false, onWaiting = 
   const runId = `shx_${new Date().toISOString().replace(/[:.]/g, '-')}`;
   return runCollector({
     config, week, paths, runId, onWaiting,
-    browser: playwrightBrowser({ config, paths, headed }),
+    browser: playwrightBrowser({ config, paths, headed, launchOptions: browserLaunchOptions(config) }),
     credential: target => readWindowsCredential(target),
     gmailClient: async () => {
       const client = readWindowsCredential(config.gmail.clientCredentialTarget || 'sb-gmail-oauth-client');

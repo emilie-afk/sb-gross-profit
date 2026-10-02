@@ -229,3 +229,15 @@ export function safeError(e) {
     .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '<email>')
     .slice(0, 300);
 }
+
+/**
+ * Optional `browserChannel` ("msedge" or "chrome"): drive the installed Edge or Chrome instead of
+ * Playwright's bundled Chromium (on some Windows PCs the bundled build will not start). The
+ * collector's own profile folder is used either way, never the person's browser profile.
+ */
+export function browserLaunchOptions(config) {
+  const ch = config?.browserChannel ?? null;
+  if (ch === null || ch === undefined || ch === '') return {};
+  if (!['msedge', 'chrome'].includes(ch)) throw new Error('browserChannel must be "msedge", "chrome" or absent');
+  return { channel: ch };
+}

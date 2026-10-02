@@ -159,3 +159,15 @@ export function assertNoSecretsInConfig(config) {
   walk(config, '$');
   if (bad.length) throw new Error(`Config must not contain credentials: ${bad.join(', ')}. Use the Windows Credential Manager.`);
 }
+
+/**
+ * Optional `browserChannel` ("msedge" or "chrome"): drive the installed Edge or Chrome instead of
+ * Playwright's bundled Chromium (on some Windows PCs the bundled build will not start). The
+ * collector's own profile folder is used either way, never the person's browser profile.
+ */
+export function browserLaunchOptions(config) {
+  const ch = config?.browserChannel ?? null;
+  if (ch === null || ch === undefined || ch === '') return {};
+  if (!['msedge', 'chrome'].includes(ch)) throw new Error('browserChannel must be "msedge", "chrome" or absent');
+  return { channel: ch };
+}
