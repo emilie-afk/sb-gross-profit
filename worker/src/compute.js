@@ -179,6 +179,29 @@ export function anchorFromRows(pub, last) {
 
 export { weekAnchor };
 
+/** The week's latest audited acceptance of its pinned catalog (run_id 'pinned'; see acceptPinnedCatalog). */
+export const PINNED_ACCEPTANCE_SQL = "SELECT catalog_rev, reason, actor_class, actor_label, at FROM catalog_reuse_acceptance WHERE run_id = 'pinned' AND week_start = ?1 ORDER BY id DESC LIMIT 1";
+
+/**
+ * POST /v1/admin/weeks/:week/accept-pinned-catalog { catalogRev, reason }: an administrator states,
+ * with a reason, that the catalog the week is ALREADY pinned to (its latest snapshot's) is the right
+ * catalog for that period. Nothing is recomputed and no other catalog is selected: a request naming
+ * any other revision is refused, and a week with a published snapshot keeps that snapshot's catalog.
+ * The next compute of the week records freshness 'reused_accepted' (a labelled gate warning).
+ */
+export async function acceptPinnedCatalog(db, weekStart, { catalogRev, reason }, actor) {
+  const why = String(reason || '').trim();
+  if (why.length < 10) throw new ApiError(400, 'bad_payload', 'Accepting a pinned catalog needs a reason of at least 10 characters');
+  const anchor = await weekAnchor(db, weekStart);
+  if (!anchor) throw new ApiError(409, 'no_snapshot', `The week of ${weekStart} has no snapshot, so no catalog is pinned yet`);
+  if (anchor.basis !== 'previous_snapshot') throw new ApiError(409, 'catalog_already_anchored', 'This week has a published snapshot; its catalog is kept as is');
+  if (catalogRev !== anchor.rev) throw new ApiError(409, 'not_pinned_catalog', `The week is pinned to ${anchor.rev}; only that catalog can be accepted (no catalog is replaced)`);
+  const at = nowIso();
+  await db.prepare("INSERT INTO catalog_reuse_acceptance (run_id, week_start, catalog_rev, reason, actor_class, actor_label, at) VALUES ('pinned', ?1, ?2, ?3, ?4, ?5, ?6)")
+    .bind(weekStart, anchor.rev, why, actor.cls, actor.label, at).run();
+  return { weekStart, catalogRev: anchor.rev, accepted: true, at, note: 'Recompute and re-verify the week to record the acceptance on a new revision' };
+}
+
 /** Rule 1 or 3. Rule 2 is the caller reusing run.catalog_info; rule 4 is restateCosts(). */
 export async function chooseCatalog(db, weekStart) {
   const anchor = await weekAnchor(db, weekStart);
@@ -215,6 +238,13 @@ export function catalogFreshnessFrom(info) {
     const ok = ['current', 'restated', 'reused_accepted', 'intentionally_reused'].includes(info.inheritedFreshness);
     status = ok ? 'intentionally_reused' : 'stale';
     if (!ok) reason = `inherited_${info.inheritedFreshness || 'unverified'}_catalog`;
+    // An audited acceptance that the week's PINNED catalog is the right one for that period
+    // (POST /v1/admin/weeks/:w/accept-pinned-catalog). It never selects another catalog: it
+    // applies only while the acceptance names exactly the revision the week is pinned to.
+    if (!ok && info.pinnedAcceptance?.catalogRev === info.rev) {
+      const { catalogRev: _r, ...acceptance } = info.pinnedAcceptance;
+      return { status: 'reused_accepted', reason: 'pinned_catalog_accepted', acceptance };
+    }
   }
   else if (info.basis === 'cost_restatement') status = 'restated';
   else if (info.basis === 'week_refresh') status = 'current';
@@ -558,6 +588,25 @@ const transitionInsert = (db, runId, from, to, at, actor, note) =>
 const isGuardAbort = e => /NOT NULL constraint failed: write_guard/i.test(String(e?.message || e));
 
 /**
+ * POST /v1/collect/weeks/:week/publish (ingest; automatic publication, owner decision 2026-10-05):
+ * publishes the week's newest collector-computed revision through publishSnapshot, so every check
+ * still applies (verification of this exact gate, the gate, the Carrier Fee lock, provisional and
+ * go-live switches, PUBLICATION_EARLIEST_WEEK, the report basis, newest revision, comparison).
+ * A refusal is an answer, not an error: { published: false, reason }.
+ */
+export async function publishLatestVerified(env, weekStart) {
+  const s = await env.DB.prepare("SELECT snapshot_id FROM snapshot WHERE week_start = ?1 AND storage = 'chunked' ORDER BY revision DESC LIMIT 1").bind(weekStart).first();
+  if (!s) return { weekStart, published: false, reason: 'no_snapshot' };
+  try {
+    const r = await publishSnapshot(env, s.snapshot_id, { cls: 'ingest_secret', label: 'collector:auto-publish' });
+    return { ...r, weekStart, published: true };
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409) return { weekStart, snapshotId: s.snapshot_id, published: false, reason: e.detail?.reason || e.code };
+    throw e;
+  }
+}
+
+/**
  * Publish a validated draft. Refused unless the Carrier Fee priority is locked,
  * the gate passed, and BOTH go-live locks are set. The snapshot, any superseded
  * snapshot and the run move together in ONE transaction. A retry after any
@@ -590,6 +639,12 @@ export async function publishSnapshot(env, snapshotId, actor) {
     if (rep.gateInputsMatch !== true || rep.gateMatches !== true || rep.gateHash !== await sha256Text(stableStringify(gateCore(gate)))) {
       throw new ApiError(409, 'not_publishable', 'Publication refused: verification_gate_unchecked', { reason: 'verification_gate_unchecked' });
     }
+  }
+  // Weeks before PUBLICATION_EARLIEST_WEEK are held (owner decision 2026-10-05: costs before the
+  // MCG volume discount of Aug 1, 2026 are not period-accurate). Unset means no such hold.
+  const earliest = /^\d{4}-\d{2}-\d{2}$/.test(env.PUBLICATION_EARLIEST_WEEK || '') ? env.PUBLICATION_EARLIEST_WEEK : null;
+  if (earliest && snap.week_start < earliest) {
+    throw new ApiError(409, 'not_publishable', `Publication refused: costs_not_period_accurate (weeks before ${earliest} are held)`, { reason: 'costs_not_period_accurate' });
   }
   const verdict = canPublish(gate, settings, env.PUBLICATION_ALLOWED);
   if (!verdict.allowed) throw new ApiError(409, 'not_publishable', `Publication refused: ${verdict.reason}`, { reason: verdict.reason });

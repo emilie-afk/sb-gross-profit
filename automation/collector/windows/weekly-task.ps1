@@ -4,10 +4,12 @@
   * Works out the last completed reporting week (Monday–Sunday, America/Los_Angeles).
   * Exits at once if that week already finished successfully on this PC (done-<week>.txt), so the
     at-logon trigger and restarts never re-run a completed week.
-  * Otherwise runs the collector (src/run.mjs; Chrome for ShipStation, Edge for Shopify, headless:
-    measured 2026-10-02, the emailed Shopify file downloads reliably only from a headless context,
-    and both exports work headless once the browser profiles are signed in) and, while the result is partial (e.g. a Shipping Cost Report held for review, a
-    verification still running), retries every 15 minutes up to 6 times. Every retry is idempotent:
+  * Otherwise runs the collector (src/run.mjs; Chrome for ShipStation, Edge for Shopify, headed:
+    on 2026-10-05 Shopify Admin answered the headless profile with a "Just a moment..." check while
+    the same profile was signed in when headed, so the task runs headed in the user's session) and, while the result is partial (e.g. a Shipping Cost Report held for review, a
+    verification still running), retries every 15 minutes up to 6 times. A retryable publication failure (network, Worker error,
+    verification not finished, a comparison or report basis that moved) also makes the run partial;
+    intentional publication holds (switched off, week not eligible, gate fails) do not. Every retry is idempotent:
     sources the Worker already holds are not exported again, unchanged weeks write nothing.
   * Logs (codes and counts only) go to %LOCALAPPDATA%\sb-collector\logs; logs older than 90 days are removed.
   Parameters: -RepoDir (default C:\Users\<you>\sb-gp), -Retries, -RetryMinutes.
@@ -37,7 +39,7 @@ for ($attempt = 0; $attempt -le $Retries; $attempt++) {
   if ($attempt -gt 0) { Start-Sleep -Seconds ($RetryMinutes * 60) }
   $log = Join-Path $logs ("run-{0}-{1}.log" -f $week, (Get-Date -Format 'yyyyMMdd-HHmmss'))
   Push-Location $collector
-  & node src\run.mjs --config config.local.json *> $log
+  & node src\run.mjs --config config.local.json --headed *> $log
   $code = $LASTEXITCODE
   Pop-Location
   if ($code -eq 0) { Set-Content -Path $done -Value ([DateTime]::UtcNow.ToString('o')); break }

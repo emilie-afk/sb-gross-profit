@@ -37,7 +37,7 @@ import { ApiError, json, readJson } from './http.js';
 import { newId, nowIso, getSettings, selectIn, atomic } from './db.js';
 import { actorFor } from './actor.js';
 import { addDays, weekStartOf } from '../../shared/normalized.js';
-import { dayHash, classifyDay, versionReviewReasons } from '../../shared/scrDays.js';
+import { dayHash, classifyDay, versionReviewReasons, autoDecision, mergePreserved } from '../../shared/scrDays.js';
 import { weekWindowUtc } from '../../shared/schedule.js';
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -128,9 +128,31 @@ export async function uploadScrVersion(request, env) {
   const cov = await coverage(db);
   const reasons = versionReviewReasons({ flags: summary.flags || {}, firstVersion: !cov, coverage: cov, from: b.requestedFrom, to: b.requestedTo,
                                          exportedAt: declared.exportedAt || b.exportedAt, timeZone: s.shipping_report_timezone || 'America/Los_Angeles' });
+  // Automatic acceptance rules (owner decision 2026-10-05): with auto-acceptance on AND
+  // shipping_cost_auto_accept_rules = 'flag_and_accept', a version that passes the automated checks is
+  // accepted without a person and its unusual values are flags; without that rule the earlier strict
+  // auto-acceptance applies (any review reason or changed accepted cost waits for a decision).
+  const enabled = s.shipping_cost_auto_accept_enabled === true;
+  const auto = enabled && s.shipping_cost_auto_accept_rules === 'flag_and_accept';
   // Per-date classification against the current owners.
   const differing = days.filter(d => own.has(d.date) && own.get(d.date).dayHash !== d.hash);
   const ownerGroups = await dayGroupsOf(db, differing.map(d => [own.get(d.date).versionId, d.date]));
+  // Automatic acceptance never drops an accepted cost the new report omits: it is kept explicitly
+  // on the date, while the report's additions and corrections on the same date still apply.
+  const omittedDates = [];
+  if (auto && differing.length) {
+    const ownerVids = [...new Set(differing.map(d => own.get(d.date).versionId))];
+    const prev = new Map((await selectIn(db, "SELECT version_id, json_extract(outcome, '$.preserved') AS p FROM scr_version WHERE version_id IN (SELECT value FROM json_each(?1))", ownerVids))
+      .map(r => [r.version_id, P(r.p, {}) || {}]));
+    for (const d of differing) {
+      const o = own.get(d.date);
+      const m = mergePreserved({ groups: d.groups, ownerGroups: ownerGroups.get(`${o.versionId}|${d.date}`) || [], ownerPreserved: prev.get(o.versionId)?.[d.date] || [], ownerVersionId: o.versionId });
+      if (!m.preserved.length) continue;
+      omittedDates.push(d.date);
+      d.groups = m.groups; d.preserved = m.preserved; d.hash = await dayHash(d.date, m.groups);
+      d.costCents = m.groups.reduce((n, g) => n + g[1], 0); d.rowCount = m.groups.reduce((n, g) => n + g[2], 0);
+    }
+  }
   const newKeys = [...new Set(differing.flatMap(d => {
     const had = new Set((ownerGroups.get(`${own.get(d.date).versionId}|${d.date}`) || []).map(g => g[0]));
     return d.groups.map(g => g[0]).filter(k => !had.has(k));
@@ -143,26 +165,48 @@ export async function uploadScrVersion(request, env) {
     d.outcome = classifyDay({ day: d, owner: o ? { ...o, groups: ownerGroups.get(`${o.versionId}|${d.date}`) || [] } : null, acceptedKeys: accepted });
     outcome[d.date] = d.outcome;
   }
+  // Automatic acceptance: with omitted costs kept, a date that still differs from its owner holds
+  // corrections or additions to costed orders — late corrections, activated and flagged.
+  if (auto) for (const d of days) if (d.outcome === 'held') { d.outcome = 'changed'; outcome[d.date] = 'changed'; }
   const count = k => days.filter(d => d.outcome === k).length;
-  const counts = { new: count('new'), identical: count('identical'), fill_in: count('fill_in'), held: count('held') };
-  // Owner rule: nothing activates by itself unless auto-acceptance is explicitly enabled.
-  if (s.shipping_cost_auto_accept_enabled !== true && days.some(d => d.outcome !== 'identical')) reasons.push('auto_acceptance_disabled');
-  const review = reasons.length > 0;
-  const activate = review ? [] : days.filter(d => d.outcome === 'new' || d.outcome === 'fill_in');
+  const counts = { new: count('new'), identical: count('identical'), fill_in: count('fill_in'), held: count('held'), ...(auto ? { changed: count('changed') } : {}) };
+  // Owner rule (until 2026-10-05): nothing activates by itself unless auto-acceptance is explicitly enabled.
+  if (!enabled && days.some(d => d.outcome !== 'identical')) reasons.push('auto_acceptance_disabled');
+  const { invalid, flags } = auto ? autoDecision(reasons) : { invalid: [], flags: [] };
+  if (auto && omittedDates.length) flags.push('accepted_cost_removed');
+  if (auto && counts.changed) flags.push('changed_cost');
+  const rejectInvalid = auto && invalid.length > 0;
+  const review = !auto && reasons.length > 0;
+  const activate = review || rejectInvalid ? [] : days.filter(d => ['new', 'fill_in', 'changed'].includes(d.outcome));
   const store = days.filter(d => d.outcome !== 'identical');
-  const status = review ? 'pending_review' : counts.held ? 'partially_accepted' : activate.length ? 'accepted' : 'no_change';
+  const status = rejectInvalid ? 'rejected' : review ? 'pending_review' : counts.held ? 'partially_accepted' : activate.length ? 'accepted' : 'no_change';
   const versionId = newId('scr'), at = nowIso(), activationId = activate.length ? newId('sca') : null;
   const weeks = activate.length ? await affectedWeeks(db, activate) : [];
-  const out = { reviewReasons: reasons, counts, dates: outcome, affectedWeeks: weeks, heldDates: days.filter(d => d.outcome === 'held').map(d => d.date) };
+  // The weeks each flag concerns (ship weeks and the order weeks of the orders involved), recorded
+  // whether or not this version owns any date, so the dashboard can show them on those weeks.
+  const changedDays = days.filter(d => d.outcome === 'changed');
+  const omittedDays = days.filter(d => d.preserved).map(d => ({ date: d.date, groups: d.preserved.map(([k]) => [k]) }));
+  const changedWeeks = auto && changedDays.length ? await affectedWeeks(db, changedDays) : [];
+  const omittedWeeks = auto && omittedDays.length ? await affectedWeeks(db, omittedDays) : [];
+  const out = { reviewReasons: auto ? [] : reasons, counts, dates: outcome, affectedWeeks: weeks, heldDates: days.filter(d => d.outcome === 'held').map(d => d.date),
+                ...(auto ? { automatic: true, flags, ...(rejectInvalid ? { invalidReasons: invalid } : {}),
+                             changedDates: days.filter(d => d.outcome === 'changed').map(d => d.date),
+                             // Dates where this report omitted accepted costs (kept), whether or not it activates them.
+                             omittedDates, changedWeeks, omittedWeeks,
+                             ...(activate.some(d => d.preserved) ? { preserved: Object.fromEntries(activate.filter(d => d.preserved).map(d => [d.date, d.preserved])) } : {}) } : {}) };
+  const dayOutcome = d => (review ? 'pending' : rejectInvalid ? 'rejected_invalid' : d.outcome);
   const stmts = [
     db.prepare(`INSERT INTO scr_version (version_id, source_id, requested_from, requested_to, exported_at, imported_at, status, outcome)
       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`).bind(versionId, src.source_id, b.requestedFrom, b.requestedTo, declared.exportedAt || b.exportedAt || null, at, status, JSON.stringify(out)),
     ...store.map(d => db.prepare('INSERT INTO scr_day (version_id, ship_date, day_hash, cost_cents, row_count, groups, outcome) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
-      .bind(versionId, d.date, d.hash, d.costCents, d.rowCount, JSON.stringify(d.groups), review ? 'pending' : d.outcome)),
+      .bind(versionId, d.date, d.hash, d.costCents, d.rowCount, JSON.stringify(d.groups), dayOutcome(d))),
   ];
   if (activate.length) stmts.push(...activationStatements(db, { activationId, versionId, at, actorCls: 'ingest_secret', days: activate, own, weeks }),
-    decisionStmt(db, { versionId, kind: 'auto_activate', at, actor: { cls: 'ingest_secret', label: 'collector' }, reason: 'automatic: new dates and fill-ins (auto-acceptance enabled)',
+    decisionStmt(db, { versionId, kind: 'auto_activate', at, actor: { cls: 'ingest_secret', label: 'collector' },
+                       reason: `automatic: passed automated checks${flags.length ? `; flagged ${flags.join(', ')}` : ''}${counts.changed ? `; ${counts.changed} date(s) with changed cost` : ''}`,
                        dates: activate.map(d => d.date), weeks }));
+  if (rejectInvalid) stmts.push(decisionStmt(db, { versionId, kind: 'auto_reject_invalid', at, actor: { cls: 'ingest_secret', label: 'collector' },
+                       reason: `automatic: failed automated checks (${invalid.join(', ')}); re-exported on the next attempt`, dates: [], weeks: [] }));
   try { await atomic(db, stmts); }
   catch (e) {
     // A duplicate delivery of the same upload raced this one: the first version stands.
@@ -256,6 +300,9 @@ export function scrBasisFrom({ weekStart, closedAt, own, versionRows }) {
            signature: null, versionId: null, requestedFrom: null, requestedTo: null };
 }
 function heldInWeek(v, from, to) {
+  // An automatically decided version never holds a date (omitted accepted costs are kept on the
+  // activated date and flagged `accepted_cost_removed`), so it never blocks a week.
+  if (P(v.outcome, {})?.automatic === true) return false;
   const held = P(v.outcome, {})?.heldDates || [];
   return held.some(d => d >= from && d <= to);
 }

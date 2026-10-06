@@ -5,7 +5,8 @@
  * function api-proxy.js forwards to the Worker. Same-origin is what lets the
  * Worker's SameSite=Strict, HttpOnly session cookie travel; the browser never
  * sees the cookie, a secret or a Worker URL. The manual workflow stays the
- * default; C7 wires only the read-only weekly automation status (Reports screen).
+ * default; the read-only weekly automation status (Reports screen) and the read-only automated
+ * weekly reports (upload screen, js/weeklyReports.js) use this client.
  */
 export const API_BASE = '/api/v1';
 
@@ -31,5 +32,12 @@ export const logout = o => workerApi('/auth/logout', { method: 'POST', body: {},
 export const session = o => workerApi('/auth/session', o);
 export const weeks = o => workerApi('/weeks', o);
 export const snapshot = (weekStart, o) => workerApi(`/snapshot/${weekStart}`, o);
+/** A week's orders, one page at a time (the Worker serves at most 100 per page). */
+export const orders = (weekStart, { offset = 0, limit = 100, sort = 'date_asc' } = {}, o) =>
+  workerApi(`/snapshot/${weekStart}/orders?offset=${Number(offset) || 0}&limit=${Math.min(100, Number(limit) || 100)}&sort=${encodeURIComponent(sort)}`, o);
+/** One order with its line items. */
+export const order = (weekStart, orderName, o) => workerApi(`/snapshot/${weekStart}/orders/${encodeURIComponent(orderName)}`, o);
+/** A week's exact status: pending codes, shipping-report flags, verification (codes and timestamps only). */
+export const weekStatus = (weekStart, o) => workerApi(`/weeks/${weekStart}/status`, o);
 /** C7: the weekly automation status (codes and timestamps only). */
 export const automationStatus = (weekStart, o) => workerApi(`/automation/status${weekStart ? `?weekStart=${encodeURIComponent(weekStart)}` : ''}`, o);

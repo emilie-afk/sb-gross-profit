@@ -88,7 +88,8 @@ export async function listWeeks(request, env, reader) {
   const url = new URL(request.url);
   const allowed = statuses(url, reader);
   const rows = (await env.DB.prepare(`SELECT s.week_start, s.revision, s.status, s.profitability_status, s.computed_at, s.storage, v.status AS verification,
-      t.operating_revenue, t.operating_gp_after_shipping, t.operating_gp_margin
+      t.operating_revenue, t.operating_gp_after_shipping, t.operating_gp_margin, t.cost_coverage_by_revenue,
+      t.orders_requiring_shipstation_rate, t.orders_with_valid_shipstation_rate, json_extract(t.labels, '$.partialWeek') AS partial_week
     FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id LEFT JOIN verify_report v ON v.snapshot_id = s.snapshot_id
     WHERE s.status IN (SELECT value FROM json_each(?1)) ORDER BY s.week_start DESC, s.revision DESC`).bind(JSON.stringify(allowed)).all()).results || [];
   const weeks = new Map();
@@ -96,7 +97,9 @@ export async function listWeeks(request, env, reader) {
     if (!weeks.has(r.week_start)) weeks.set(r.week_start, { weekStart: r.week_start, revisions: [] });
     weeks.get(r.week_start).revisions.push({ revision: r.revision, status: r.status, profitabilityStatus: r.profitability_status,
       computedAt: r.computed_at, operatingRevenue: r.operating_revenue, operatingGpAfterShipping: r.operating_gp_after_shipping,
-      operatingGpMargin: r.operating_gp_margin,
+      operatingGpMargin: r.operating_gp_margin, costCoverageByRevenue: r.cost_coverage_by_revenue,
+      shippingCoverage: { ordersWithCost: r.orders_with_valid_shipstation_rate, ordersRequiringCost: r.orders_requiring_shipstation_rate },
+      ...(r.partial_week ? { partialWeek: P(r.partial_week, null) } : {}),
       ...(r.storage === 'chunked' ? { computedBy: 'collector', verification: r.verification || 'pending' } : {}) });
   }
   return json({ weeks: [...weeks.values()] });

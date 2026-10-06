@@ -186,6 +186,48 @@ export function versionReviewReasons({ flags, firstVersion, coverage, from, to, 
 }
 
 /**
+ * Automatic acceptance (owner decision 2026-10-05, active only while `shipping_cost_auto_accept_enabled`):
+ * a version that fails an automated check is not accepted (its week shows the exact codes and the
+ * collector re-exports on its next attempt); every other review reason is a visible flag on an
+ * accepted version, never a reason to wait for a person. A $0.00 row is the report's own value
+ * and is flagged; a cost the report does not contain is never filled in with zero.
+ */
+export const INVALID_REASONS = Object.freeze(['unexpected_store', 'export_time_unknown', 'possible_incomplete_trailing_date', 'ship_date_time_not_midnight']);
+export function autoDecision(reasons) {
+  const invalid = reasons.filter(r => INVALID_REASONS.includes(r));
+  return { invalid, flags: reasons.filter(r => !INVALID_REASONS.includes(r)) };
+}
+/**
+ * Automatic acceptance: a later report that omits an order whose cost is accepted on that date
+ * does not remove the cost. The date is activated as the report's own groups (additions and
+ * corrections apply) plus each omitted accepted group, kept explicitly with the version whose
+ * source holds it (`preserved`: [[orderKey, sourceVersionId]], so the verifier can trace it).
+ * `ownerPreserved` is the current owner's own list for the date (a cost kept earlier keeps its
+ * original source). Returns the merged groups (sorted, as dayHash expects) and the list.
+ */
+export function mergePreserved({ groups, ownerGroups, ownerPreserved = [], ownerVersionId }) {
+  const now = new Set(groups.map(g => g[0]));
+  const origin = new Map(ownerPreserved);
+  const kept = ownerGroups.filter(g => !now.has(g[0]));
+  if (!kept.length) return { groups, preserved: [] };
+  return { groups: [...groups, ...kept].sort((x, y) => cmp(x[0], y[0])),
+           preserved: kept.map(g => [g[0], origin.get(g[0]) || ownerVersionId]) };
+}
+/**
+ * Verifier side of mergePreserved: a stored day equals its version's own source groups plus each
+ * preserved group exactly as the named source version holds it. Returns the groups or null.
+ */
+export function rebuildPreserved({ ownGroups, preserved, sourceGroups }) {
+  const own = new Set(ownGroups.map(g => g[0])), out = [...ownGroups];
+  for (const [k, v] of preserved) {
+    const g = (sourceGroups(v) || []).find(x => x[0] === k);
+    if (!g || own.has(k)) return null;
+    out.push(g);
+  }
+  return out.sort((x, y) => cmp(x[0], y[0]));
+}
+
+/**
  * Per-date outcome. `owner` is the current owner { versionId, dayHash, groups } or null;
  * `acceptedKeys` is the set of the date's NEW order keys that already have accepted
  * cost on some owned date (the Worker asks D1 for exactly these).

@@ -61,6 +61,7 @@ test('an unapproved Source or Channel is a problem, not a silent relabel', () =>
   assert.ok(!JSON.stringify(problems).includes('SomeNewMarket'), 'problems never carry values');
   assert.ok(APPROVED_SOURCES.includes('294412976129'), 'a 12-digit app id is a valid source, not a phone number');
   for (const id of ['5827291', '88312']) assert.ok(APPROVED_SOURCES.includes(id), `historical app id ${id} (Dec 2025–May 2026 exports) is approved`);
+  assert.ok(APPROVED_SOURCES.includes('subscription_contract'), 'the subscription-renewal source (Apr–Jun 2026 export) is approved');
 });
 
 test('the Worker check rejects raw free text that skipped the reduction', () => {

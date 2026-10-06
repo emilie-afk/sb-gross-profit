@@ -29,6 +29,11 @@ ALLOWED_ORIGINS = "https://sb-profit.netlify.app"
 COOKIE_SAMESITE = "Strict"
 # Second go-live lock. Leave "false" until the Revision 5 go-live gate passes.
 PUBLICATION_ALLOWED = "false"
+# Owner decisions 2026-10-05: reporting starts Jan 1, 2026 (the week of Dec 29 is a partial week of
+# Jan 1–4; earlier weeks are not reported), and weeks before Aug 3, 2026 are never published because
+# their product costs predate the MCG volume discount (Aug 1) and are not period-accurate yet.
+REPORTING_START_DATE = "2026-01-01"
+PUBLICATION_EARLIEST_WEEK = "2026-08-03"
 # Fifth control: scheduled computation. Leave "false" until the automation commit is approved.
 AUTOMATION_ENABLED = "false"
 D1_QUOTA_BYTES = "5000000000"

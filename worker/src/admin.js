@@ -3,7 +3,7 @@
  */
 import { ApiError, json, readJson, WEEK_RE } from './http.js';
 import { getSettings, validateSetting, REASON_REQUIRED, CLEARS_SHIPPING_VERIFICATION, nowIso, newId, selectIn, atomic } from './db.js';
-import { computeWeek, computeScheduledWeek, recomputeScheduledRun, publishSnapshot, readiness, latestRefresh, weekAnchor, REFRESH_TIMEOUT_MINUTES } from './compute.js';
+import { computeWeek, computeScheduledWeek, recomputeScheduledRun, publishSnapshot, readiness, latestRefresh, weekAnchor, REFRESH_TIMEOUT_MINUTES, acceptPinnedCatalog } from './compute.js';
 import { actorFor, actorJson } from './actor.js';
 import { getRun, createRun } from './runs.js';
 import { loadShipmentsForOrders, latestAcceptedCatalogMeta } from './store.js';
@@ -227,6 +227,13 @@ export async function publish(request, env) {
   const body = await readJson(request);
   if (!body.snapshotId) throw new ApiError(400, 'bad_payload', 'snapshotId is required');
   return json(await publishSnapshot(env, body.snapshotId, actorFor('admin_secret', body)));
+}
+
+/** POST /v1/admin/weeks/:week/accept-pinned-catalog { catalogRev, reason } — see compute.js acceptPinnedCatalog. */
+export async function acceptWeekPinnedCatalog(request, env, weekStart) {
+  const body = await readJson(request);
+  if (typeof body.catalogRev !== 'string' || !/^cat_[0-9a-f]{16}$/.test(body.catalogRev)) throw new ApiError(400, 'bad_payload', 'catalogRev (cat_ + 16 hex) is required');
+  return json(await acceptPinnedCatalog(env.DB, weekStart, body, actorFor('admin_secret', body)));
 }
 
 export async function settings(request, env) {

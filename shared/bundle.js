@@ -71,8 +71,9 @@ export function storedOrderForm(o) {
 export const orderBodyString = o => stableStringify(storedOrderForm(o));
 
 /** Stored orders of one business week, in loadOrdersForWeek order (created_at_local, order_name). */
-export function weekOrdersFrom(storedOrders, weekStart) {
-  return storedOrders.filter(o => weekStartOf(o.businessDate) === weekStart)
+export function weekOrdersFrom(storedOrders, weekStart, reportingStart = null) {
+  // Reporting starts on `reportingStart` (manifest field, only on the week containing it): earlier orders are not reported.
+  return storedOrders.filter(o => weekStartOf(o.businessDate) === weekStart && (!reportingStart || o.businessDate >= reportingStart))
     .sort((a, b) => cmp(a.createdAtLocal, b.createdAtLocal) || cmp(a.orderName, b.orderName));
 }
 
@@ -136,7 +137,7 @@ export async function snapshotInputFromParts(manifest, parts) {
   if (await auxHash(parts.shipments) !== manifest.aux.shipmentsHash || await auxHash(parts.hpdOrders) !== manifest.aux.hpdHash) {
     throw fail('part_hash_mismatch', 'Shipments or HPD records do not match the manifest');
   }
-  const weekOrders = weekOrdersFrom(orders, manifest.weekStart);
+  const weekOrders = weekOrdersFrom(orders, manifest.weekStart, manifest.reportingStart || null);
   const report = reportFromDays({ effective: effectiveFromDays(days), weekStart: manifest.weekStart, orders: weekOrders,
                                   knownReportKeys: manifest.knownReportKeys, previousShippingExpense: manifest.previousShippingExpense });
   const s = manifest.settings;
@@ -151,7 +152,8 @@ export async function snapshotInputFromParts(manifest, parts) {
           unmatchedReportOrders: report.unmatched, sourceVerified: s.shipping_cost_report_source_verified === true,
           catalogCompleteness: cat.completeness ?? null, provisionalEnabled: s.provisional_publication_enabled === true,
           shippingReportBasis: manifest.shippingReportBasis,
-          publicationAllowed: s.publication_enabled === true && manifest.publicationAllowedEnv === true },
+          publicationAllowed: s.publication_enabled === true && manifest.publicationAllowedEnv === true,
+          ...(manifest.reportingStart ? { reportingStart: manifest.reportingStart } : {}) },
   };
 }
 

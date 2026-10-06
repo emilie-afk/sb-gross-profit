@@ -246,6 +246,12 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
   <!-- Upload screen -->
   <div id="upload-screen">
+    <!-- Automated weekly reports: read from the production Worker; nothing is uploaded. -->
+    <div class="upload-card" id="auto-reports-card">
+      <h2>Automated weekly reports</h2>
+      <p>Weeks collected, computed and independently verified by the weekly automation. Read-only; manual uploads below remain the fallback.</p>
+      <div id="auto-reports"><p class="meta">Loading…</p></div>
+    </div>
     <div class="upload-card">
       <h2>Upload your exports</h2>
       <p>Files are processed entirely in your browser — nothing is uploaded to any server.</p>
@@ -1334,6 +1340,7 @@ import { unmatchedShippingOrders, exportPeriodOf, shippingCostBridge, filterUnma
 import { catalogRevOf } from './shared/catalog.js';
 import { initScenarioView, renderScenarioView } from './js/scenarioUI.js';
 import { automationStatus } from './js/workerClient.js';
+import { createWeeklyReports } from './js/weeklyReports.js';
 import { renderAutomationStatus, automationStatusError } from './js/automationStatus.js';
 import { SCREENS, initTheme, toggleTheme, initRouter, showScreen, currentScreen,
          buildAlerts, renderAlerts, renderStoreBars, renderChannelDonut,
@@ -1348,6 +1355,8 @@ window.loadAutomationStatus = async () => {
   try { el.innerHTML = renderAutomationStatus(await automationStatus()); }
   catch (e) { el.textContent = automationStatusError(e); }
 };
+// Automated weekly reports (read-only, same-origin Worker proxy).
+{ const el = document.getElementById('auto-reports'); if (el) { window.weeklyReports = createWeeklyReports(el); window.weeklyReports.load(); } }
 initTheme();
 
 // ─── MCG Extra Costs — proxied via server-side edge function ──────

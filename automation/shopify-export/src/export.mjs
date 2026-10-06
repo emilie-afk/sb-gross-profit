@@ -90,10 +90,40 @@ export function playwrightBrowser({ config, paths, headed, launchOptions = {}, b
     async fetchDownload(link) {
       const res = await context.request.get(link, { maxRedirects: 5, timeout: 120000 });
       let finalHost = null; try { finalHost = new URL(res.url()).hostname; } catch { /* keep null */ }
-      return { status: res.status(), contentType: res.headers()['content-type'] || '', body: Buffer.from(await res.body()), finalHost };
+      if (res.status() === 200) return { status: 200, contentType: res.headers()['content-type'] || '', body: Buffer.from(await res.body()), finalHost };
+      // Shopify answers the link's admin redirect with a "Verifying your connection" page (403) to a
+      // non-browser request now and then (production, 2026-10-02 and -05). The browser's own navigation
+      // passes it, so open the link in the page and take the file from the browser's response (CDP Fetch,
+      // response stage), answering 204 so no browser-managed download starts (Edge closes on those).
+      return browserFetchFile(context, page, link, { fallbackStatus: res.status(), fallbackHost: finalHost });
     },
     async close() { if (context) await context.close(); },
   };
+}
+
+/** The export file through the browser's own navigation (in memory; nothing written to disk). */
+async function browserFetchFile(context, page, link, { fallbackStatus, fallbackHost, timeoutMs = 90000 }) {
+  const cdp = await context.newCDPSession(page);
+  let got = null;
+  cdp.on('Fetch.requestPaused', async ev => {
+    try {
+      const h = Object.fromEntries((ev.responseHeaders || []).map(x => [x.name.toLowerCase(), x.value]));
+      const isFile = ev.responseStatusCode === 200 && (/attachment/i.test(h['content-disposition'] || '') || /zip|csv|octet-stream/i.test(h['content-type'] || ''));
+      if (!isFile) return await cdp.send('Fetch.continueRequest', { requestId: ev.requestId });
+      const b = await cdp.send('Fetch.getResponseBody', { requestId: ev.requestId });
+      got = { status: 200, contentType: h['content-type'] || '', body: Buffer.from(b.body, b.base64Encoded ? 'base64' : 'utf8'), finalHost: new URL(ev.request.url).hostname, via: 'browser' };
+      await cdp.send('Fetch.fulfillRequest', { requestId: ev.requestId, responseCode: 204, responseHeaders: [], body: '' });
+    } catch { /* the page moved on; the timeout below decides */ }
+  });
+  try {
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Response' }] });
+    await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});   // ends in ERR_ABORTED once the file is taken
+    for (let waited = 0; !got && waited < timeoutMs; waited += 1000) await page.waitForTimeout(1000);
+  } finally {
+    await cdp.send('Fetch.disable').catch(() => {});
+    await cdp.detach().catch(() => {});
+  }
+  return got || { status: fallbackStatus, contentType: '', body: Buffer.alloc(0), finalHost: fallbackHost };
 }
 
 /** One Shopify collection (used by the CLI and by the C7 collector orchestrator). */

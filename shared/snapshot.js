@@ -196,6 +196,10 @@ export function buildSnapshot({ weekStart, orders, shipments = [], hpdOrders = [
     snap.totals.labels = { ...snap.totals.labels, c3: snap.shipping.c3, headline: 'Provisional operating GP after shipping' };
   }
   delete snap.totals._internal;
+  // The week containing the reporting start date is a partial week (orders from that date only).
+  if (c3.reportingStart && weekStart < c3.reportingStart) {
+    snap.totals.labels = { ...snap.totals.labels, partialWeek: { from: c3.reportingStart, to: addDays(weekStart, 6), reportingStart: c3.reportingStart } };
+  }
   snap.narrative = buildNarrative(snap, previous);
   snap.draftComparison = draftComparison(snap, previousDraft);
   return snap;

@@ -27,7 +27,7 @@ import { stableStringify, addDays } from './normalized.js';
 import { ENGINE_VERSION } from './snapshot.js';
 import { computeFromParts, orderBodyString } from './bundle.js';
 import { resultParts } from './resultParts.js';
-import { sha256Hex, versionDays } from './scrDays.js';
+import { sha256Hex, versionDays, dayHash, rebuildPreserved } from './scrDays.js';
 import { parseCSV } from './calculator.js';
 import { csvRowsToNormalizedOrders } from './adapters/legacy.js';
 import { parseShippingCostReport } from './adapters/shippingCostReport.js';
@@ -168,13 +168,31 @@ export async function verifySnapshot(inputs, api, { now = () => Date.now(), sour
     const weekEnd = addDays(manifest.weekStart, 6);
     const needed = manifest.scrDays.filter(([d, , h]) => (d >= manifest.weekStart && d <= weekEnd) || (parts.dayGroups.get(h) || []).some(g => weekKeys.has(g[0])));
     const byVersion = new Map();
-    for (const [d, v, h] of needed) (byVersion.get(v) || byVersion.set(v, []).get(v)).push([d, h]);
+    for (const [d, v, h, kept] of needed) (byVersion.get(v) || byVersion.set(v, []).get(v)).push([d, h, kept]);
     const versions = new Map(manifest.scrVersions.map(([v, src, from, to]) => [v, { src, from, to }]));
-    for (const [v, dates] of byVersion) {
+    const derivedCache = new Map();
+    // A version's days as its retained source gives them (date → { hash, groups }).
+    const derived = async v => {
+      if (derivedCache.has(v)) return derivedCache.get(v);
       const meta = versions.get(v);
+      if (!meta) { derivedCache.set(v, null); return null; }
       const rows = await sourceRows(api, meta.src, sourceCache);
-      const days = new Map((await versionDays(parseShippingCostReport(rows, { requestedFrom: meta.from, requestedTo: meta.to }).rows, meta.from, meta.to)).map(x => [x.date, x.hash]));
-      for (const [d, h] of dates) { provenanceChecked++; if (days.get(d) !== h) provenanceMismatches++; }
+      const m = new Map((await versionDays(parseShippingCostReport(rows, { requestedFrom: meta.from, requestedTo: meta.to }).rows, meta.from, meta.to)).map(x => [x.date, x]));
+      derivedCache.set(v, m);
+      return m;
+    };
+    for (const [v, dates] of byVersion) {
+      const days = await derived(v);
+      for (const [d, h, kept] of dates) {
+        provenanceChecked++;
+        if (!kept) { if (days?.get(d)?.hash !== h) provenanceMismatches++; continue; }
+        // A date that kept accepted costs a later report omitted: its own source groups plus each kept
+        // group exactly as the named source version holds it on that date.
+        const sources = new Map();
+        for (const [, kv] of kept) sources.set(kv, (await derived(kv))?.get(d)?.groups || null);
+        const groups = rebuildPreserved({ ownGroups: days?.get(d)?.groups || [], preserved: kept, sourceGroups: kv => sources.get(kv) });
+        if (!groups || await dayHash(d, groups) !== h) provenanceMismatches++;
+      }
     }
   } catch { return done('unavailable', { reason: 'sources_unreachable' }); }
   if (provenanceMismatches) diff.provenance = { mismatches: provenanceMismatches };

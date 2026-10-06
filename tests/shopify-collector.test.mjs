@@ -143,17 +143,14 @@ test('C5 Shopify: unknown formats, missing columns, wrong windows and unapproved
   noPii(JSON.stringify([miss, out, src]), 'refusals');
 });
 
-test('Shopify: an order created the morning after the window is left out and counted; other strays still refuse', () => {
+test('Shopify: an order created the morning after the window is kept and counted; other strays still refuse', () => {
   const x = (t, o = {}) => prepareShopifyExport(t, { week, exportedAt: 'x', ...o });
-  const spill = x(rawCsv({ dates: ['2026-09-21 00:10:10 -0700', '2026-08-02 09:00:00 -0700'] }));
+  const csv = rawCsv({ dates: ['2026-09-21 00:10:10 -0700', '2026-08-02 09:00:00 -0700'] });
+  const spill = x(csv);
   assert.equal(spill.refused, undefined);
-  assert.deepEqual([spill.facts.orderCount, spill.facts.leftOutAfterWindow, spill.facts.lastOrderDate], [1, 1, '2026-08-02']);
-  assert.ok(!spill.payload.text.includes('#920001') && spill.payload.text.includes('#920002'));
-  // Byte-identical to an export that never contained the stray order.
-  const only = rawExportRows({ dates: ['2026-09-21 00:10:10 -0700', '2026-08-02 09:00:00 -0700'] }).filter(r => r['Name'] === '#920002');
-  const same = x(toCsvText(only, Object.keys(only[0])));
-  assert.equal(spill.payload.text, same.payload.text);
-  assert.equal(spill.payload.sanitizedSha256, same.payload.sanitizedSha256);
+  assert.deepEqual([spill.facts.orderCount, spill.facts.keptAfterWindow, spill.facts.lastOrderDate], [2, 1, '2026-09-21']);
+  // Shopify's next export does not repeat such an order, so it must be uploaded here.
+  assert.ok(spill.payload.text.includes('#920001') && spill.payload.text.includes('#920002'));
   for (const d of ['2026-09-22 00:10:00 -0700', '2026-07-26 23:50:00 -0700']) {
     const r = x(rawCsv({ dates: [d, '2026-08-02 09:00:00 -0700'] }));
     assert.deepEqual([r.refused, r.detail.outside], ['export_window_mismatch', 1], d);

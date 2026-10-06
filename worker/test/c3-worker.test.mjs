@@ -47,7 +47,7 @@ test('a later report version that changes a week makes the next compute "updated
   assert.ok(b.json.snapshotId);
 });
 
-test('shipping-policy settings are audited, need a reason, and are validated; provisional publication stays off', async () => {
+test('shipping-policy settings are audited, need a reason, and are validated; provisional publication defaults off and needs a reason', async () => {
   const env = await makeEnv();
   const s = (await admin(env, 'GET', '/v1/admin/settings')).json;
   assert.deepEqual(s.settings.vendor_first_paid_shipping_dates, { 'Air Plant Shop': '2026-08-14', 'Live to Give': '2026-09-15', 'Surfside Arrangement': '2026-09-15' });
@@ -61,7 +61,10 @@ test('shipping-policy settings are audited, need a reason, and are validated; pr
   assert.equal((await admin(env, 'POST', '/v1/admin/settings', { vendor_first_paid_shipping_dates: next, reason: 'cut-off moved one day (test)' })).status, 200);
   const row1 = await env.DB.prepare("SELECT old_value, new_value, reason FROM settings_audit WHERE key = 'vendor_first_paid_shipping_dates' ORDER BY id DESC LIMIT 1").first();
   assert.match(row1.new_value, /2026-08-15/);
-  assert.equal((await admin(env, 'POST', '/v1/admin/settings', { provisional_publication_enabled: true, reason: 'try (test)' })).status, 400);
+  assert.equal((await admin(env, 'POST', '/v1/admin/settings', { provisional_publication_enabled: true })).status, 400, 'a reason is required');
+  assert.equal((await admin(env, 'POST', '/v1/admin/settings', { provisional_publication_enabled: 'yes', reason: 'not a boolean (test)' })).status, 400);
+  assert.equal((await admin(env, 'POST', '/v1/admin/settings', { provisional_publication_enabled: true, reason: 'approved provisional visibility (test)' })).status, 200);
+  assert.equal((await admin(env, 'POST', '/v1/admin/settings', { shipping_cost_report_source_verified: true, reason: 'still locked (test)' })).status, 400, 'source verification stays locked');
   assert.equal((await admin(env, 'POST', '/v1/admin/settings', { shipping_coverage_aging_days: 0, reason: 'bad' })).status, 400);
 });
 

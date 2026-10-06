@@ -18,6 +18,7 @@
  *     with the Worker's own validators before upload;
  *   • refusals name columns, rules and counts, never values.
  */
+import { scrub } from '../../shipstation-export/src/redact.mjs';
 import zlib from 'node:zlib';
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -25,7 +26,7 @@ import path from 'node:path';
 import { parseCSV } from '../../../shared/calculator.js';
 import { addDays } from '../../../shared/normalized.js';
 import {
-  prepareShopifyUpload, assertSanitizedShopifyOrderRows, currenciesOf, SHOPIFY_ORDERS_CSV_REQUIRED, toCsvText,
+  prepareShopifyUpload, assertSanitizedShopifyOrderRows, currenciesOf, SHOPIFY_ORDERS_CSV_REQUIRED,
 } from '../../../shared/adapters/shopifyCsv.js';
 import { assertReducedShopifyOrderRows } from '../../../shared/adapters/shopifyPrivacy.js';
 import { assertSafeLocalDir, assertNoSecretsInConfig } from '../../shipstation-export/src/lib.mjs';
@@ -195,11 +196,11 @@ export function prepareShopifyExport(text, { week, exportedAt }) {
   }
 
   // The export must be the requested rolling window: every order date inside it. Shopify's
-  // "Orders by date" filter can return a few orders created just after midnight following the last
-  // day (seen in real exports: one order at 00:10 the next morning). Those belong to the NEXT
-  // reporting week, which the next export covers, so up to BOUNDARY_SPILL_MAX of them, all on the
-  // day right after the window, are left out of the upload and counted. Anything else outside the
-  // window is still a wrong filter and refuses the export.
+  // "Orders by date" filter does not use Created at: it returned an order created at 00:10 the
+  // morning after the window, and the NEXT window's export did NOT contain it (production backfill,
+  // 2026-10-02: leaving it out lost the order). So up to BOUNDARY_SPILL_MAX orders created on the day
+  // right after the window are KEPT and uploaded (the Worker files each order under its own Created-at
+  // week) and counted. Anything else outside the window is still a wrong filter and refuses the export.
   const firstRow = new Map();
   for (const r of clean) { const n = String(r['Name'] || '').trim(); if (n && !firstRow.has(n)) firstRow.set(n, r); }
   const dateOf = r => String(r['Created at'] || '').slice(0, 10);
@@ -213,11 +214,7 @@ export function prepareShopifyExport(text, { week, exportedAt }) {
   const firstOrderDate = sorted[0] || null, lastOrderDate = sorted[sorted.length - 1] || null;
   if (outside && (outside !== spill.size || spill.size > BOUNDARY_SPILL_MAX)) return { refused: 'export_window_mismatch',
     reason: `${outside} order(s) fall outside ${win.from} → ${win.to}; check the export filter`, detail: { outside, firstOrderDate, lastOrderDate } };
-  let upText = prep.text, kept = clean;
-  if (spill.size) {
-    kept = clean.filter(r => !spill.has(String(r['Name'] || '').trim()));
-    upText = toCsvText(kept, prep.columns);
-  }
+  const upText = prep.text, kept = clean;
 
   const sanitizedSha256 = sha(upText);
   return {
@@ -225,13 +222,12 @@ export function prepareShopifyExport(text, { week, exportedAt }) {
     sanitizedText: upText,
     payload: { format: 'csv_text', mode: 'rolling', weekStart: week.weekStart, text: upText, sanitizedSha256, exportedAt,
                windowFrom: win.from, windowTo: win.to },
-    facts: { kind: KIND, rawSha256, sanitizedSha256, rowCount: kept.length, orderCount: firstRow.size - spill.size, columns: prep.columns,
+    facts: { kind: KIND, rawSha256, sanitizedSha256, rowCount: kept.length, orderCount: firstRow.size, columns: prep.columns,
              droppedColumns: prep.droppedColumns, currencies: currenciesOf(kept), windowFrom: win.from, windowTo: win.to,
-             firstOrderDate, lastOrderDate: spill.size ? (sorted.filter(d => d <= win.to).pop() || null) : lastOrderDate,
-             ...(spill.size ? { leftOutAfterWindow: spill.size } : {}) },
+             firstOrderDate, lastOrderDate, ...(spill.size ? { keptAfterWindow: spill.size } : {}) },
   };
 }
-/** At most this many orders created on the day after the window are left out instead of refusing the export. */
+/** At most this many orders created on the day after the window are kept instead of refusing the export. */
 export const BOUNDARY_SPILL_MAX = 10;
 
 // ─── Config and local folders ─────────────────────────────────────────────────
@@ -275,9 +271,13 @@ export function localPaths(config = {}) {
            quarantine: path.join(base, 'quarantine') };
 }
 
-/** Error text safe for a manifest: no URLs, no e-mail addresses, bounded length. */
+/**
+ * Error text safe for a manifest: the first line only (Playwright's "Call log" can repeat typed
+ * values), no quoted fill/type arguments, no URLs, no e-mail addresses, bounded length.
+ */
 export function safeError(e) {
-  return String(e?.message || e || 'error')
+  return scrub(String(e?.message || e || 'error')).split('\n')[0]
+    .replace(/(fill|type|press|pressSequentially)\((["'`]).*?\2\)/g, '$1(<redacted>)')
     .replace(/https?:\/\/\S+/gi, '<url>')
     .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '<email>')
     .slice(0, 300);

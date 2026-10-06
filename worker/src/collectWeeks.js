@@ -26,7 +26,7 @@ import { newId, nowIso, getSettings, selectIn, atomic, SETTINGS_SQL, settingsFro
 import { signManifest, manifestSignatureValid } from './auth.js';
 import { readBytes, gunzipCapped, sha256Text, HEX64 } from './gz.js';
 import { loadShipmentsForOrders, loadHpdForOrders, shipmentsFromRows, hpdFromRows, SHIPMENTS_SQL, SHIPMENT_ITEMS_SQL, HPD_SQL, HPD_ITEMS_SQL } from './store.js';
-import { catalogFreshnessFrom, anchorFromRows, chooseCatalogFrom, refreshFromRow, previousFromRows, ANCHOR_PUBLISHED_SQL, ANCHOR_LATEST_SQL, LATEST_REFRESH_SQL, PREV_PUBLISHED_SQL, PREV_DRAFT_SQL } from './compute.js';
+import { catalogFreshnessFrom, anchorFromRows, chooseCatalogFrom, refreshFromRow, previousFromRows, ANCHOR_PUBLISHED_SQL, ANCHOR_LATEST_SQL, LATEST_REFRESH_SQL, PREV_PUBLISHED_SQL, PREV_DRAFT_SQL, PINNED_ACCEPTANCE_SQL } from './compute.js';
 import { createRunStatements } from './runs.js';
 import { scrBasisFrom, BASIS_VERSIONS_SQL } from './collectScr.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
@@ -139,6 +139,7 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
     db.prepare('SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1').bind(weekStart),
     db.prepare('SELECT snapshot_id, revision, status, storage, manifest_hash FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(weekStart),
     db.prepare('SELECT aux_n, shipments_hash, hpd_hash, shipments, hpd_orders FROM aux_pin WHERE week_start = ?1').bind(weekStart),
+    db.prepare(PINNED_ACCEPTANCE_SQL).bind(weekStart),
   ]);
   const latestSnapshot = one(b1[11]);
   // The week's aux hashes pinned by POST …/aux-pin while no aux table has changed since (same
@@ -155,6 +156,19 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
   const ordersList = () => JSON.parse(ow.j);
   const anchor = anchorFromRows(one(b1[4]), one(b1[5]));
   const info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[6]), now), latest: one(b1[7]) });
+  // The week's audited acceptance of its pinned catalog counts only for exactly that revision.
+  // In the inputs (catalogAcceptance) whatever the anchor, so publishing the week does not change its inputs.
+  const pinAcc = one(b1[13]);
+  const catalogAcceptance = pinAcc && pinAcc.catalog_rev === info.rev ? { rev: info.rev, at: pinAcc.at } : null;
+  if (catalogAcceptance && info.basis === 'previous_snapshot') {
+    info.pinnedAcceptance = { catalogRev: pinAcc.catalog_rev, reason: pinAcc.reason, actorClass: pinAcc.actor_class, actorLabel: pinAcc.actor_label, at: pinAcc.at };
+  }
+  // Reporting starts on REPORTING_START_DATE (owner decision: the 2026 view starts Jan 1, 2026). A week
+  // that ends before it is not reported; the week containing it is a partial week (orders from that date).
+  const reportingStart = reportingStartOf(env);
+  if (reportingStart && addDays(weekStart, 6) < reportingStart) {
+    throw new ApiError(409, 'before_reporting_start', `The week of ${weekStart} ends before reporting starts (${reportingStart})`);
+  }
   const prev = previousFromRows(one(b1[8]), one(b1[9]));
   const last = one(b1[10]);
   const closedAt = weekWindowUtc(weekStart, settings.store_timezone).endUtcExclusive;
@@ -190,7 +204,7 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
         JOIN scr_day d ON d.version_id = o.version_id AND d.ship_date = o.ship_date, json_each(d.groups) g
         WHERE json_extract(g.value, '$[0]') IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(keys)),
     db.prepare('SELECT DISTINCT order_number FROM ord_ptr WHERE order_number IN (SELECT value FROM json_each(?1)) ORDER BY order_number').bind(JSON.stringify(weekKeys)),
-    db.prepare(`SELECT v.version_id, v.source_id, v.requested_from, v.requested_to FROM scr_version v WHERE v.version_id IN (
+    db.prepare(`SELECT v.version_id, v.source_id, v.requested_from, v.requested_to, json_extract(v.outcome, '$.preserved') AS preserved FROM scr_version v WHERE v.version_id IN (
         SELECT DISTINCT o.version_id FROM scr_day_owner o JOIN scr_day d ON d.version_id = o.version_id AND d.ship_date = o.ship_date, json_each(d.groups) g
         WHERE json_extract(g.value, '$[0]') IN (SELECT value FROM json_each(?1))) OR v.version_id IN (SELECT value FROM json_each(?2)) ORDER BY v.version_id`)
       .bind(JSON.stringify(keys), JSON.stringify(vids)),
@@ -198,19 +212,30 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
   const owners = [...new Map([...weekOwned, ...rs(b3[0])].map(o => [o.ship_date, o])).values()].sort((a, b) => (a.ship_date < b.ship_date ? -1 : 1));
   const known = weekKeys.length ? rs(b3[1]).map(r => r.order_number) : [];
   const versions = rs(b3[2]);
+  // Dates whose owner kept accepted costs a later report omitted: the manifest names each kept cost's
+  // source version, so the verifier can trace it, and lists those versions among scrVersions.
+  const preservedOf = new Map(versions.map(v => [v.version_id, P(v.preserved, null) || {}]));
+  const keptFrom = [...new Set(owners.flatMap(o => (preservedOf.get(o.version_id)?.[o.ship_date] || []).map(x => x[1])))]
+    .filter(v => !preservedOf.has(v));
+  if (keptFrom.length) versions.push(...rs(await db.prepare('SELECT version_id, source_id, requested_from, requested_to FROM scr_version WHERE version_id IN (SELECT value FROM json_each(?1))').bind(JSON.stringify(keptFrom)).all()));
+  versions.sort((a, b) => (a.version_id < b.version_id ? -1 : a.version_id > b.version_id ? 1 : 0));
   return { epoch, latestSnapshot, ordersText, manifest: {
     v: MANIFEST_VERSION, weekStart, engineVersion: ENGINE_VERSION, asOf: new Date(now).toISOString(), storeTimezone: settings.store_timezone, settings,
     catalog: { rev: info.rev, info, completeness: P(cat?.meta, {})?.completeness || null, parts: rs(b2[2]).map(p => [p.table_name, p.part]) },
     orders: rawOrders && ordersText ? RAW_ORDERS : ordersList(),
-    scrDays: owners.map(o => [o.ship_date, o.version_id, o.day_hash]),
+    scrDays: owners.map(o => { const kept = preservedOf.get(o.version_id)?.[o.ship_date]; return kept?.length ? [o.ship_date, o.version_id, o.day_hash, kept] : [o.ship_date, o.version_id, o.day_hash]; }),
     scrVersions: versions.map(v => [v.version_id, v.source_id, v.requested_from, v.requested_to]),
     knownReportKeys: known,
     aux,
     previous: prev.published, previousDraft: prev.draft, previousShippingExpense: last ? last.e : null,
     shippingReportBasis: basis, publicationAllowedEnv: env.PUBLICATION_ALLOWED === 'true',
+    ...(reportingStart && weekStart < reportingStart ? { reportingStart } : {}),
+    ...(catalogAcceptance ? { catalogAcceptance } : {}),
   } };
 }
 const withoutAsOf = ({ asOf: _a, ...m }) => m;
+/** REPORTING_START_DATE (Worker variable, YYYY-MM-DD) or null when reporting has no start date. */
+export const reportingStartOf = env => (/^\d{4}-\d{2}-\d{2}$/.test(env?.REPORTING_START_DATE || '') ? env.REPORTING_START_DATE : null);
 const auxOf = async (shipments, hpdOrders) => ({ shipmentsHash: await auxHash(shipments), hpdHash: await auxHash(hpdOrders), shipments: shipments.length, hpdOrders: hpdOrders.length });
 
 /**

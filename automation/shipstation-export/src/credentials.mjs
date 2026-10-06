@@ -15,6 +15,7 @@
  * A 2FA prompt stops the job so a person can complete it (see login.mjs).
  */
 import { execFileSync } from 'node:child_process';
+import { registerSecret } from './redact.mjs';
 
 export function readWindowsCredential(target) {
   if (!/^[\w.-]{1,128}$/.test(target || '')) throw new Error('Invalid credential target name');
@@ -35,5 +36,7 @@ export function readWindowsCredential(target) {
   }
   const j = JSON.parse(out);
   if (!j.u || !j.p) throw new Error(`Stored credential ${target} is incomplete`);
+  // Registered before anything can use them: run records and console output scrub these values.
+  registerSecret(j.p); registerSecret(j.u);
   return { username: j.u, password: j.p };
 }

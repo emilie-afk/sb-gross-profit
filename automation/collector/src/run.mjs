@@ -5,6 +5,7 @@
  * Task Scheduler: weekly Monday 15:05 (ICT) AND at startup/logon, with
  * "Run task as soon as possible after a scheduled start is missed".
  */
+import { scrub } from '../../shipstation-export/src/redact.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -51,7 +52,7 @@ const ft = config.pipeline === 'free_tier' ? freeTierPipeline({
 const r = await runWeeklyCollection({
   week: { ...w, closed },
   lockFile: path.join(base, 'collector.lock'), stateFile: path.join(base, 'state.json'),
-  log: m => console.log(m),
+  log: m => console.log(scrub(m)),
   weekPlan: ft ? () => ft.weekPlan() : async () => {
     const { password } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
     const url = workerEndpoint(config.workerUrl, '/v1/ingest/week-plan');
@@ -67,5 +68,5 @@ const r = await runWeeklyCollection({
   shopify: { run: ({ onWaiting }) => runShopifyJob({ config: shConfig, week: w, headed: !!args.headed, onWaiting, ...(ft ? { uploadImpl: ft.uploadImpl } : {}) }) },
   ...(ft ? { compute: () => ft.compute() } : {}),
 });
-console.log(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}${r.compute ? ` compute ${JSON.stringify(r.compute)}` : ''}`);
+console.log(scrub(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}${r.compute ? ` compute ${JSON.stringify(r.compute)}` : ''}`));
 process.exitCode = r.exitCode;

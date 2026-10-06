@@ -20,6 +20,7 @@
  *   7. Write the run manifest: hashes, window, counts, statuses — never a row,
  *      a link, an email header or body, a token or a secret.
  */
+import { writeRunRecord, registerSecret } from '../../shipstation-export/src/redact.mjs';
 import crypto from 'node:crypto';
 import nodeFs from 'node:fs';
 import nodePath from 'node:path';
@@ -54,7 +55,7 @@ export async function runCollector(d) {
   const finish = (status, exitCode, extra = {}) => {
     Object.assign(manifest, { status, exitCode, finishedAt: now().toISOString(), ...extra });
     fs.mkdirSync(paths.runs, { recursive: true });
-    fs.writeFileSync(nodePath.join(paths.runs, `${runId}.json`), JSON.stringify(manifest, null, 2));
+    writeRunRecord(nodePath.join(paths.runs, `${runId}.json`), manifest, fs);
     return manifest;
   };
 
@@ -76,7 +77,9 @@ export async function runCollector(d) {
     let { state, evidence } = await browser.authState();
     manifest.authStateAtStart = state;
     if (state === 'login_required' || state === 'session_expired') {
-      await browser.login(d.credential(config.credentialTarget || 'sb-shopify-export'));
+      const cred = d.credential(config.credentialTarget || 'sb-shopify-export');
+      registerSecret(cred?.password); registerSecret(cred?.username);      // whatever supplied the login, it never reaches the run record
+      await browser.login(cred);
       ({ state, evidence } = await browser.authState());
       if (state === 'login_required') return finish('login_failed', EXIT.LOGIN_FAILED);
     }

@@ -23,6 +23,8 @@ export function buildNarrative(current, previous = null) {
   const headline = `${gpWord} was ${fmtUsd(t.operatingGpAfterShipping)} on operating revenue of ` +
     `${fmtUsd(t.operatingRevenue)} (${pctText(t.operatingGpMargin)}) for the week of ${current.weekStart}.`;
 
+  const pw = t.labels?.partialWeek;
+  if (pw) points.push(`Partial reporting week: only orders from ${pw.from} to ${pw.to} are included (reporting starts ${pw.reportingStart}).`);
   if (provisional) {
     points.push(`These figures are provisional: ${t.labels.notes.filter(n => /^Excludes/.test(n)).join('; ')}.`);
   }

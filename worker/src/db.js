@@ -84,7 +84,7 @@ export const SETTABLE_KEYS = new Set([
   'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
   'lively_root_cost_source', 'catalog_overlay_base_rev',
   'vendor_first_paid_shipping_dates', 'mcg_free_shipping_threshold', 'shipping_coverage_aging_days', 'provisional_publication_enabled',
-  'shipping_cost_review_cap_cents', 'shipping_cost_auto_accept_enabled',
+  'shipping_cost_review_cap_cents', 'shipping_cost_auto_accept_enabled', 'shipping_cost_auto_accept_rules',
 ]);
 
 /** Changing these needs a stated reason; every change is audited either way. */
@@ -93,7 +93,7 @@ export const REASON_REQUIRED = new Set(['publication_enabled', 'carrier_fee_prio
   'shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store', 'shipping_cost_report_source_verified',
   'lively_root_cost_source', 'catalog_overlay_base_rev',
   'vendor_first_paid_shipping_dates', 'mcg_free_shipping_threshold', 'shipping_coverage_aging_days', 'provisional_publication_enabled',
-  'shipping_cost_review_cap_cents', 'shipping_cost_auto_accept_enabled']);
+  'shipping_cost_review_cap_cents', 'shipping_cost_auto_accept_enabled', 'shipping_cost_auto_accept_rules']);
 
 /** Changing one of these clears shipping_cost_report_source_verified (reconciliation must be repeated). */
 export const CLEARS_SHIPPING_VERIFICATION = new Set(['shipping_report_currency', 'shipping_report_timezone', 'shipping_report_store']);
@@ -123,9 +123,14 @@ export function validateSetting(key, value) {
   }
   if (key === 'mcg_free_shipping_threshold' && !(typeof value === 'number' && value > 0 && value < 10000)) return 'mcg_free_shipping_threshold must be a positive dollar amount';
   if (key === 'shipping_coverage_aging_days' && !(Number.isInteger(value) && value >= 1 && value <= 90)) return 'shipping_coverage_aging_days must be a whole number of days, 1–90';
-  if (key === 'provisional_publication_enabled' && value !== false) return 'provisional_publication_enabled stays false in C3 (publication controls are enabled in a later, separately approved commit)';
+  // Provisional publication (approved separately, 2026-10-05): may be switched on with a reason (REASON_REQUIRED).
+  // It only lets an unverified Shipping Cost Report source and open order coverage publish as labelled
+  // provisional; every other gate check, the Carrier Fee lock and both go-live locks still apply.
+  if (key === 'provisional_publication_enabled' && typeof value !== 'boolean') return 'provisional_publication_enabled must be true or false';
   if (key === 'lively_root_cost_source' && !['manual_list', 'sheet'].includes(value)) return "lively_root_cost_source must be 'manual_list' or 'sheet'";
   if (key === 'catalog_overlay_base_rev' && !(value === null || (typeof value === 'string' && /^cat_[0-9a-f]{16}$/.test(value)))) return 'catalog_overlay_base_rev must be null or a catalog rev (cat_ + 16 hex)';
+  // Owner decision 2026-10-05: 'flag_and_accept' = accept a report that passes the automated checks and flag unusual values (see collectScr.js).
+  if (key === 'shipping_cost_auto_accept_rules' && !(value === null || value === 'flag_and_accept')) return "shipping_cost_auto_accept_rules must be null or 'flag_and_accept'";
   // Owner decision 2026-09-29: per-row Shipping Cost review threshold, in cents ($1 – $10,000). Above it a row is held for review, never discarded.
   if (key === 'shipping_cost_review_cap_cents' && !(Number.isInteger(value) && value >= 100 && value <= 1_000_000)) return 'shipping_cost_review_cap_cents must be whole cents between 100 and 1000000';
   if (key === 'insurance_treatment' && value !== 'awaiting_confirmation') return 'insurance_treatment is locked at awaiting_confirmation until the Insurance Cost non-duplication test is complete';

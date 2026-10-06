@@ -28,8 +28,12 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { detectAuthState, settleAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
 import { readWindowsCredential } from './credentials.mjs';
+import { writeRunRecord, safeError } from './redact.mjs';
 import { lastCompletedWeek, weekFromStart, render, localPaths, assertNoSecretsInConfig, purgeOlderThan, resolveDelivery, browserLaunchOptions } from './lib.mjs';
 import { uploadToWorker, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
+
+export { safeError };
+export { writeRunRecord };
 import { prepareExport, reportWindow, KINDS, DEFAULT_KIND, assertKindEnabled } from './kinds.mjs';
 
 function argv() {
@@ -114,7 +118,7 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
   const manifest = { runId, kind, weekStart: week.weekStart, weekEnd: week.weekEnd, startedAt: new Date().toISOString(), status: 'running' };
   const finish = (status, exitCode, extra = {}) => {
     Object.assign(manifest, { status, exitCode, finishedAt: new Date().toISOString(), ...extra });
-    fs.writeFileSync(path.join(paths.runs, `${runId}.json`), JSON.stringify(manifest, null, 2));
+    writeRunRecord(path.join(paths.runs, `${runId}.json`), manifest);
     return { status, exitCode, manifest, paths };
   };
 
@@ -160,10 +164,10 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
     }
     Object.assign(manifest, facts, { delivery });
     const pending = { config, prep, outName, file, manifest, paths, finish };
-    if (deferUpload) { manifest.status = 'prepared'; fs.writeFileSync(path.join(paths.runs, `${runId}.json`), JSON.stringify(manifest, null, 2)); return { status: 'prepared', exitCode: null, manifest, pending }; }
+    if (deferUpload) { manifest.status = 'prepared'; writeRunRecord(path.join(paths.runs, `${runId}.json`), manifest); return { status: 'prepared', exitCode: null, manifest, pending }; }
     return finishShipStationUpload(pending);
   } catch (e) {
-    return finish('export_failed', EXIT.EXPORT_FAILED, { error: e.message.replace(/https?:\/\/\S+/g, '<url>').slice(0, 300) });
+    return finish('export_failed', EXIT.EXPORT_FAILED, { error: safeError(e) });
   } finally {
     await context.close();
   }
@@ -193,5 +197,5 @@ async function main() {
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  main().catch(e => { console.error(e.message); process.exitCode = EXIT.CONFIG; });
+  main().catch(e => { console.error(safeError(e)); process.exitCode = EXIT.CONFIG; });
 }

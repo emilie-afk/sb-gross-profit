@@ -110,7 +110,8 @@ export async function uploadShippingCostReport(c, payload) {
   const v = await c.call('POST', '/v1/collect/scr/versions', { json: { sourceId: src.sourceId, requestedFrom: from, requestedTo: to, exportedAt,
     days: days.map(d => (owned.get(d.date) === d.hash ? [d.date, null, d.hash] : [d.date, d.groups])) } });
   return { sourceId: src.sourceId, sourceStatus: src.status, versionId: v.versionId, status: v.status, reviewReasons: v.reviewReasons || [],
-           counts: v.counts || {}, heldDates: v.heldDates || [], affectedWeeks: v.affectedWeeks || [] };
+           counts: v.counts || {}, heldDates: v.heldDates || [], affectedWeeks: v.affectedWeeks || [],
+           ...(v.automatic ? { automatic: true, flags: v.flags || [], changedDates: v.changedDates || [], omittedDates: v.omittedDates || [], dates: v.dates || {}, ...(v.invalidReasons ? { invalidReasons: v.invalidReasons } : {}) } : {}) };
 }
 
 /** payload = the existing sanitized Shopify rolling-export upload body. Returns the weeks whose orders changed. */
@@ -238,6 +239,23 @@ export function weeksToCompute({ closedWeek, windowFrom, touched = [] }) {
 
 
 /**
+ * Publication refusals that are intentional holds: the Worker refused by policy or configuration
+ * (a switch off, a week not eligible, a gate that fails on the week's data). Retrying within the
+ * hour cannot change them, so they do not make the run partial. Every other refusal or failure
+ * (network, Worker error, verification not finished, a comparison or report basis that moved, a
+ * concurrent change) is retryable: the run reports `partial`, the Windows task does not mark the
+ * week done, and its next attempt offers the week again.
+ */
+export const PUBLICATION_HOLDS = Object.freeze(['publication_disabled', 'publication_not_allowed_in_environment', 'carrier_fee_priority_unlocked',
+  'store_timezone_unconfirmed', 'store_timezone_changed', 'costs_not_period_accurate', 'gate_failed', 'shipping_source_unverified',
+  'publish_route_unavailable', 'no_snapshot']);
+/** Holds that apply to every week alike: the remaining weeks are not offered. */
+const GLOBAL_HOLDS = new Set(['publication_disabled', 'publication_not_allowed_in_environment', 'carrier_fee_priority_unlocked',
+  'store_timezone_unconfirmed', 'publish_route_unavailable']);
+export const publicationOutcome = p => (p.published ? (p.alreadyPublished ? 'already_published' : 'published')
+  : PUBLICATION_HOLDS.includes(p.reason) ? 'held' : 'retry');
+
+/**
  * Wiring for run.mjs: an upload function the two collectors call in place of the
  * csv_text routes, and the compute step the orchestrator runs after them.
  * Returns codes and counts only.
@@ -251,7 +269,8 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
         const r = await uploadShippingCostReport(c, payload);
         for (const w of r.affectedWeeks) seen.touched.add(w);
         return { ok: true, httpStatus: 200, attempts: 1, status: r.status, versionId: r.versionId, sourceStatus: r.sourceStatus,
-                 reviewReasons: r.reviewReasons, heldDates: r.heldDates.length, sanitizedSha256: payload.sanitizedSha256 || null };
+                 reviewReasons: r.reviewReasons, heldDates: r.heldDates.length, sanitizedSha256: payload.sanitizedSha256 || null,
+                 ...(r.automatic ? { flags: r.flags, changedDates: r.changedDates.length, ...(r.invalidReasons ? { invalidReasons: r.invalidReasons } : {}) } : {}) };
       }
       if (path === '/v1/ingest/shopify') {
         const r = await uploadShopifyOrders(c, payload, { bodies: seen.bodies });
@@ -279,16 +298,43 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
     const byId = new Map(verification.map(v => [v.snapshotId, v.status]));
     const weeksOut = results.map(r => ({ weekStart: r.weekStart, status: r.status, ...(r.code ? { code: r.code } : {}), ...(r.revision ? { revision: r.revision } : {}),
                                           ...(byId.has(r.snapshotId) ? { verification: byId.get(r.snapshotId) } : {}) }));
+    // Automatic publication (owner decision 2026-10-05), oldest week first: the Worker publishes a week's
+    // newest verified revision only when every control allows it, and answers with the reason otherwise.
+    // A week whose draft was computed before the prior week was published is recomputed, verified and
+    // offered again (its stored comparison must be with the published prior week).
+    const publication = [];
+    for (const r of weeksOut) {
+      if (!(r.status === 'unchanged' || (r.status === 'computed' && r.verification === 'verified'))) continue;
+      let p = await c.call('POST', `/v1/collect/weeks/${r.weekStart}/publish`, { json: {} }).catch(e => ({ published: false, reason: e?.status === 404 ? 'publish_route_unavailable' : e?.code || 'publish_failed' }));
+      if (!p.published && p.reason === 'comparison_stale') {
+        const again = await computeAndUploadWeek(c, r.weekStart, cache).catch(() => null);
+        if (again?.status === 'computed' && verifyUrl && triggerSecret) {
+          const [v] = await requestVerification({ verifyUrl, triggerSecret, snapshots: [again], client: c, fetchImpl, ...(verifyWaitMs !== undefined ? { waitMs: verifyWaitMs } : {}), ...(sleep ? { sleep } : {}) });
+          r.revision = again.revision; r.status = 'computed'; r.verification = v?.status || 'verification_pending';
+          if (r.verification === 'verified') p = await c.call('POST', `/v1/collect/weeks/${r.weekStart}/publish`, { json: {} }).catch(e => ({ published: false, reason: e?.status === 404 ? 'publish_route_unavailable' : e?.code || 'publish_failed' }));
+        }
+      }
+      const outcome = publicationOutcome({ ...p, reason: p.reason || 'publish_failed' });
+      publication.push({ weekStart: r.weekStart, published: p.published === true, outcome, ...(p.alreadyPublished ? { alreadyPublished: true } : {}),
+                         ...(p.published ? {} : { reason: p.reason || 'publish_failed' }) });
+      // Switched off for every week: stop asking.
+      if (!p.published && GLOBAL_HOLDS.has(p.reason)) break;
+    }
     const closed = weeksOut.find(r => r.weekStart === closedWeek);
-    const good = weeksOut.every(r => r.status === 'unchanged' || (r.status === 'computed' && r.verification === 'verified'));
-    return { status: good ? 'ok' : 'partial', closedWeek: closed || null, weeks: weeksOut, requests: c.stats.requests, retries: c.stats.retries };
+    // A week before the reporting start is not a failure: it is not reported.
+    const good = weeksOut.every(r => r.status === 'unchanged' || r.code === 'before_reporting_start' || (r.status === 'computed' && r.verification === 'verified'));
+    // A retryable publication failure keeps the run partial, so the week is retried; intentional holds do not.
+    const publishRetry = publication.filter(p => p.outcome === 'retry').length;
+    return { status: good && !publishRetry ? 'ok' : 'partial', closedWeek: closed || null, weeks: weeksOut, publication,
+             ...(publishRetry ? { publicationRetry: publishRetry } : {}), requests: c.stats.requests, retries: c.stats.retries };
   }
   /** The orchestrator's week plan on this path: what the Worker already holds for the closed week. */
   async function weekPlan() {
     const s = await c.call('GET', `/v1/collect/weeks/${closedWeek}/status`);
     const pending = new Set((s.pending || []).map(p => p.code));
     const shopify = pending.has('shopify_export_pending') ? 'missing' : 'ok';
-    const report = ['shipping_report_missing', 'shipping_report_partial'].some(k => pending.has(k)) ? 'missing' : 'ok';
+    // A report that failed the automated checks is re-exported on the next attempt, like a missing one.
+    const report = ['shipping_report_missing', 'shipping_report_partial', 'shipping_report_invalid'].some(k => pending.has(k)) ? 'missing' : 'ok';
     return { weekStart: closedWeek, collected: { shopify, shopify_updates: shopify, shipping_cost_report: report }, status: s.state };
   }
   return { uploadImpl, compute, weekPlan, client: c };

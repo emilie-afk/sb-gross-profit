@@ -20,10 +20,11 @@ import { ingestShopify, ingestShipStation, ingestHpd, ingestCatalog } from './in
 import { ingestShippingCostReport, listVersions, getVersion, acceptVersion, rejectVersion, rollbackActivation, getSegments, getEffectiveSummary } from './shippingCost.js';
 import { listWeeks, getSnapshot, listOrders, getOrder, listIssues, scenarioInput, history, compare } from './read.js';
 import { createAndCompute, recompute, revise, restateCosts, listRestatements, weekPlan, getReadiness, createCatalogRefresh, getCatalogRefresh,
-         reviseTouchedWeeks, catalogPushes, getRunDetail, publish, settings, backfill, shipstationFieldComparison, storage } from './admin.js';
+         reviseTouchedWeeks, catalogPushes, getRunDetail, publish, settings, backfill, shipstationFieldComparison, storage, acceptWeekPinnedCatalog } from './admin.js';
 import { adminCatalogFetch, adminCatalogBase } from './catalogFetch.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
 import { scheduledTick, automationStatus, acceptCycleCatalogReuse, adminCycleStatus } from './orchestrate.js';
+import { publishLatestVerified } from './compute.js';
 import { environmentGuard, bindEnvironment, isSafeRead } from './environment.js';
 import { requireOneOf } from './auth.js';
 import { openSource, putSegment, sealSource, getSourceMeta, getSegment } from './collectSources.js';
@@ -94,6 +95,7 @@ async function route(request, env) {
     if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/results$`))) && m === 'POST') return openResults(request, env, g[1]);
     if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/parts\/(orderindex|sections|orders:\d{1,4}|lines:\d{1,4}|scenario:\d{1,4})$/)) && m === 'PUT') return putResultPart(request, env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/finalize$/)) && m === 'POST') return finalizeResults(request, env, g[1]);
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/publish$`))) && m === 'POST') return json(await publishLatestVerified(env, g[1]));
     throw new ApiError(404, 'not_found', 'No such route');
   }
 
@@ -126,6 +128,7 @@ async function route(request, env) {
     if ((g = p.match(/^\/v1\/admin\/cycles\/(\d{4}-\d{2}-\d{2})$/)) && m === 'GET') return adminCycleStatus(env, g[1]);
     if ((g = p.match(/^\/v1\/admin\/cycles\/(\d{4}-\d{2}-\d{2})\/accept-catalog-reuse$/)) && m === 'POST') return acceptCycleCatalogReuse(request, env, g[1]);
     if ((g = p.match(/^\/v1\/admin\/catalog-refresh\/([\w-]+)$/)) && m === 'GET') return getCatalogRefresh(env, g[1]);
+    if ((g = p.match(/^\/v1\/admin\/weeks\/(\d{4}-\d{2}-\d{2})\/accept-pinned-catalog$/)) && m === 'POST') return acceptWeekPinnedCatalog(request, env, g[1]);
     if (p === '/v1/admin/publish' && m === 'POST') return publish(request, env);
     if (p === '/v1/admin/settings' && (m === 'GET' || m === 'POST')) return settings(request, env);
     if (p === '/v1/admin/backfill' && m === 'POST') return backfill(request, env);
