@@ -377,11 +377,17 @@ const COMPARE_ROWS = [
   ['Operating profit',         'operatingProfit'],
 ];
 
+// Expense lines: a decrease is favourable, so their change is never red for being negative (the minus sign
+// stays); an increase is the unfavourable direction and is shown in red.
+const EXPENSE_KEYS = new Set(['scenarioDiscount', 'cogs', 'shipExpense', 'adExpense', 'labor']);
 function renderCompare(res) {
   const rows = COMPARE_ROWS.map(([label, key]) => {
     const cur = res.current[key], sc = res.scenario[key], ch = sc - cur;
+    const chCell = EXPENSE_KEYS.has(key)
+      ? `<td class="num" data-sign="neutral"${ch > 0.005 ? ' style="color:var(--gp-neg)"' : ''}>${money(ch)}</td>`
+      : `<td class="num"${neg(ch)}>${money(ch)}</td>`;
     return `<tr><td>${label}</td><td class="num"${neg(cur)}>${money(cur)}</td>
-      <td class="num"${neg(sc)}>${money(sc)}</td><td class="num"${neg(ch)}>${money(ch)}</td></tr>`;
+      <td class="num"${neg(sc)}>${money(sc)}</td>${chCell}</tr>`;
   }).join('');
   const cm = res.current.operatingMargin, sm = res.scenario.operatingMargin;
   const marginRow = `<tr><td>Operating margin</td><td class="num"${neg(cm)}>${pct(cm)}</td>

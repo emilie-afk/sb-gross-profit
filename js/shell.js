@@ -330,3 +330,21 @@ export function renderReports(lines, s, openReport) {
       b.addEventListener('click', () => openReport(b.dataset.report)));
   }
 }
+
+// ─── Negative values ──────────────────────────────────────────────────────────
+
+/** A cell or figure whose whole text is a negative amount or percentage ("-$12.30", "−4.1%", "~-$3.00"). */
+const NEG_TEXT = /^~?[-−]\s?(\$\s?)?[\d,]+(\.\d+)?\s?%?$/;
+export const isNegativeText = t => NEG_TEXT.test(String(t ?? '').trim());
+/**
+ * Mark negative amounts and percentages red (class is-neg); the minus sign stays, so colour is never the
+ * only cue. Leaf elements only. A value where a negative change is favourable (a lower expense) opts out
+ * with data-sign="neutral" on the element or a parent.
+ */
+export function markNegatives(root) {
+  if (!root?.querySelectorAll) return;
+  for (const el of root.querySelectorAll('td, th, .value, .s1, .s2, .fig, .b, .a, span, div, strong')) {
+    if (el.children.length) continue;
+    el.classList.toggle('is-neg', isNegativeText(el.textContent) && !el.closest('[data-sign="neutral"]'));
+  }
+}

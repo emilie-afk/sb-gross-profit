@@ -10,6 +10,7 @@
  * Every value is escaped; money is shown as stored.
  */
 import * as api from './workerClient.js';
+import { monthsOf, periodPlan, monthLabel, fmtRange, daysBetween } from './storedReport.js';
 
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = n => (typeof n === 'number' && Number.isFinite(n)) ? (n < 0 ? '−$' : '$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
@@ -62,15 +63,43 @@ export function renderWeekList(weeks) {
   if (!list.length) return `<p class="meta">No weekly reports are visible yet. Computed and verified weeks stay hidden until their publication is approved; manual uploads remain available below.</p>`;
   const rows = list.map(w => {
     const r = (w.revisions || [])[0] || {};
-    return `<tr><td><button class="logout-btn" onclick="weeklyReports.openWeek('${esc(w.weekStart)}')">${esc(w.weekStart)}</button></td>
+    return `<tr><td><button class="logout-btn" onclick="weeklyReports.openReport('week', '${esc(w.weekStart)}')" title="Open the full report">${esc(w.weekStart)}</button></td>
       <td>${esc(STATUS_LABEL[r.status] || r.status || '—')}</td><td>${esc(PROFIT_LABEL[r.profitabilityStatus] || r.profitabilityStatus || '—')}</td>
       <td style="text-align:right">${money(r.operatingRevenue)}</td><td style="text-align:right">${money(r.operatingGpAfterShipping)}</td><td style="text-align:right">${pct(r.operatingGpMargin)}</td>
       <td style="text-align:right">${esc(shortCoverage(r.shippingCoverage))}</td><td style="text-align:right">${pct(r.costCoverageByRevenue)}</td>
       <td>${esc(verificationText(r.verification))}${r.partialWeek ? ` · partial week (${esc(r.partialWeek.from)}–${esc(r.partialWeek.to)})` : ''}</td></tr>`;
   }).join('');
-  return `<table class="gp-auto-weeks" style="width:100%;border-collapse:collapse;font-size:.85rem">
+  return `<div style="overflow-x:auto"><table class="gp-auto-weeks" style="width:100%;border-collapse:collapse;font-size:.85rem">
     <thead><tr><th style="text-align:left">Week (Mon–Sun, LA)</th><th style="text-align:left">Status</th><th style="text-align:left">Profitability</th><th style="text-align:right">Operating revenue</th><th style="text-align:right">GP after shipping</th><th style="text-align:right">Margin</th><th style="text-align:right">Shipping cost coverage</th><th style="text-align:right">Product cost coverage</th><th style="text-align:left">Verification</th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+/**
+ * Calendar months (Los Angeles) that published weeks touch, newest first, with the days published
+ * weeks cover. Amounts are shown in the opened report (they are summed from the month's own orders).
+ */
+export function renderMonthList(weeks) {
+  const list = Array.isArray(weeks) ? weeks : [];
+  const months = monthsOf(list);
+  if (!months.length) return '<p class="meta">No monthly reports yet: a month appears once a published week covers part of it.</p>';
+  const rows = months.map(m => {
+    const plan = periodPlan('month', m, list);
+    const days = daysBetween(plan.period.from, plan.period.to);
+    const covered = plan.weeks.reduce((n, w) => n + daysBetween(w.days.from, w.days.to), 0);
+    const gaps = plan.gaps.map(g => `${fmtRange(g)} (${g.reason === 'before_reporting' ? 'before reporting starts' : 'not published'})`).join('; ');
+    return `<tr><td><button class="logout-btn" onclick="weeklyReports.openReport('month', '${esc(m)}')" title="Open the full report">${esc(monthLabel(m))}</button></td>
+      <td>${esc(plan.weeks.map(w => `${fmtRange(w.days)} (r${w.published.revision})`).join(', '))}</td>
+      <td style="text-align:right">${covered} of ${days}${covered < days ? ' · partial' : ''}</td><td>${esc(gaps || '—')}</td></tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto"><table class="gp-auto-months" style="width:100%;border-collapse:collapse;font-size:.85rem">
+    <thead><tr><th style="text-align:left">Month (LA time)</th><th style="text-align:left">Published weeks (days in the month, revision)</th><th style="text-align:right">Days covered</th><th style="text-align:left">Not included</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <p class="meta">A month counts the orders dated inside it: weeks crossing the month boundary are split, and margins are recomputed from the month's amounts.</p>`;
+}
+
+export function renderSelector(mode) {
+  const b = (m, label) => `<button type="button" aria-pressed="${mode === m}" onclick="weeklyReports.setMode('${m}')">${label}</button>`;
+  return `<div class="gp-seg" role="group" aria-label="Report period" style="margin-bottom:10px">${b('week', 'Weekly')}${b('month', 'Monthly')}</div>`;
 }
 
 function breakdownTable(title, rows) {
@@ -161,14 +190,22 @@ export function failureMessage(e) {
 }
 
 /** Controller: renders into `root` (and the orders container inside it). `client` defaults to workerClient. */
-export function createWeeklyReports(root, client = api) {
-  let orders = [];
+export function createWeeklyReports(root, client = api, { onOpen = null } = {}) {
+  let orders = [], weekList = null, mode = 'week';
   const show = html => { root.innerHTML = html; };
   const fail = e => show(`<p class="meta">${esc(failureMessage(e))}</p>`);
+  const list = () => show(renderSelector(mode) + (mode === 'month' ? renderMonthList(weekList) : renderWeekList(weekList)));
   const ctl = {
     async load() {
-      try { show(renderWeekList((await client.weeks()).weeks)); } catch (e) { fail(e); }
+      try { weekList = (await client.weeks()).weeks || []; list(); } catch (e) { fail(e); }
     },
+    setMode(m) { mode = m === 'month' ? 'month' : 'week'; if (weekList) list(); },
+    /** Open the full report (the CSV report's screens, fed by stored results) for a week or an LA calendar month. */
+    async openReport(kind, key) {
+      if (onOpen) return onOpen(kind, key, weekList || []);
+      if (kind === 'week') return ctl.openWeek(key);
+    },
+    get weekList() { return weekList; },
     async openWeek(week) {
       if (!WEEK_RE.test(week)) return;
       try {

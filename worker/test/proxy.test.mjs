@@ -167,6 +167,10 @@ test('one sign-in: past the site-password gate, the proxy reads published weeks 
   const draft = await get(`/snapshot/${WEEK}?includeDrafts=1`, withGate);
   assert.deepEqual([draft.status, (await draft.json()).error], [404, 'not_published']);
   assert.equal((await get(`/weeks/${WEEK}/status`, withGate)).status, 200);
+  // The report's stored parts pass the proxy for readers too (published only: this week is a draft).
+  const part = await get(`/snapshot/${WEEK}/report-part/0`, withGate);
+  assert.deepEqual([part.status, (await part.json()).error], [404, 'not_published']);
+  assert.equal((await get(`/snapshot/${WEEK}/report-part/x`, withGate)).status, 404);
 
   // Not past the gate (no cookie, a wrong one, an old site password's): nothing is attached, the Worker refuses.
   for (const headers of [{}, { cookie: '__gp_session=forged' }, { cookie: `__gp_session=${nodeCrypto.createHash('sha256').update('old-password').digest('hex')}` },

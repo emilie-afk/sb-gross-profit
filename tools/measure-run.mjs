@@ -197,6 +197,25 @@ await measure('dashboard_visit', async () => {
   if (first) await get(`/v1/snapshot/${w}/orders/${encodeURIComponent(first)}`);
   return { login: login.status, weeks: weeks.length };
 });
+// Opening an automatic report (the CSV report's screens from stored results): every week of one calendar
+// month — the snapshot header, each bounded order part and the week's status — as the dashboard loads it.
+await measure('monthly_report_open', async () => {
+  const login = await call('POST', '/v1/auth/login', { password: PASSWORD }, 'none', { Origin: 'https://sb-profit.netlify.app' });
+  const cookie = (login.headers.get('set-cookie') || '').split(';')[0];
+  const get = p => call('GET', p, undefined, 'none', { Cookie: cookie });
+  const weeks = (await get('/v1/weeks')).json?.weeks || [];
+  const month = (weeks[0]?.weekStart || '').slice(0, 7);
+  const inMonth = weeks.filter(w => w.weekStart.slice(0, 7) === month || new Date(Date.parse(w.weekStart) + 6 * 864e5).toISOString().slice(0, 7) === month);
+  let requests = 2, parts = 0;
+  for (const w of inMonth) {
+    const head = (await get(`/v1/snapshot/${w.weekStart}`)).json;
+    const first = (await get(`/v1/snapshot/${w.weekStart}/report-part/0?snapshot=${head.snapshotId}`)).json;
+    for (let k = 1; k < first.parts; k++) await get(`/v1/snapshot/${w.weekStart}/report-part/${k}?snapshot=${head.snapshotId}`);
+    await get(`/v1/weeks/${w.weekStart}/status`);
+    requests += 2 + first.parts; parts += first.parts;
+  }
+  return { month, weeks: inMonth.length, parts, requests };
+});
 // The meter's own upsert (not in its sums): its rows read / written as D1 reports them, first insert and update.
 const up = sql => db.prepare(`INSERT INTO d1_usage (day, scope, rows_read, rows_written, requests) VALUES ('2000-01-01', 'probe', 1, 1, 1)
   ON CONFLICT(day, scope) DO UPDATE SET rows_read = rows_read + excluded.rows_read, rows_written = rows_written + excluded.rows_written, requests = requests + 1`).run();

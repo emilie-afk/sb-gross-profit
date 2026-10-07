@@ -10,6 +10,7 @@ import { ApiError, json, jsonText, intParam, WEEK_RE } from './http.js';
 import { totalsFromRow } from './compute.js';
 import { gunzipCapped, blobBytes } from './gz.js';
 import { scenarioLines, indexRow, ORDERS_PER_PART } from '../../shared/resultParts.js';
+import { normalizeSku } from '../../shared/vendorCosts.js';
 
 export const ORDER_PAGE_MAX = 100;
 
@@ -337,4 +338,67 @@ export async function compare(request, env, reader) {
   return json({ definition: 'operating', from: { ...header(sa, reader), totals: ta }, to: { ...header(sb, reader), totals: tb }, delta,
     comparable: sa.engine_version === sb.engine_version, provisional,
     note: provisional ? 'Provisional comparison: at least one week has incomplete cost or shipping coverage.' : null });
+}
+
+/**
+ * GET /v1/snapshot/:week/report-part/:k[?snapshot=<id>] — the stored order and line rows of part k
+ * of the week's readable snapshot (sessions and the dashboard reader: the latest PUBLISHED revision),
+ * for the dashboard's report view (the CSV report's screens, fed by stored results, and the monthly
+ * view). Bounded: one part is at most ORDERS_PER_PART orders and their lines. With ?snapshot= the
+ * caller pins the revision it started from; if the week's readable revision has changed since,
+ * 409 snapshot_changed (a report never mixes revisions of one week).
+ * Collector-computed weeks: the parts' stored text is returned as is (nothing parsed or gunzipped
+ * when the parts have text). Reads: the snapshot row, the week's part names (primary-key range) and
+ * two part rows. Body: { snapshotId, weekStart, revision, part, parts, o: { orders }, l: { lines } },
+ * rows exactly as stored (snake_case columns).
+ */
+export async function reportPart(request, env, reader, weekStart, k) {
+  const url = new URL(request.url);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader);
+  const pin = url.searchParams.get('snapshot');
+  if (pin && pin !== s.snapshot_id) throw new ApiError(409, 'snapshot_changed', 'The week has a newer readable revision; reload the report');
+  const head = (n) => `{"snapshotId":${JSON.stringify(s.snapshot_id)},"weekStart":${JSON.stringify(s.week_start)},"revision":${Number(s.revision)},"part":${k},"parts":${n}`;
+  if (s.storage === 'chunked') {
+    const [names, rows] = await env.DB.batch([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND part >= 'orders:' AND part < 'orders;'").bind(s.snapshot_id),
+      env.DB.prepare('SELECT part, body_text, CASE WHEN body_text IS NULL THEN body END AS body FROM snapshot_blob WHERE snapshot_id = ?1 AND part IN (?2, ?3, ?4)')
+        .bind(s.snapshot_id, `orders:${k}`, `lines:${k}`, k === 0 ? 'sections' : `lines:${k}`),
+    ]);
+    const n = names.results?.[0]?.n || 0;
+    if (k >= n) throw new ApiError(404, 'part_unknown', `This snapshot has ${n} order parts`);
+    const byName = new Map((rows.results || []).map(r => [r.part, r]));
+    const text = async name => {
+      const r = byName.get(name);
+      if (!r) throw new ApiError(500, 'snapshot_part_missing', 'A stored part of this snapshot is missing');
+      return r.body_text ?? await gunzipCapped(blobBytes(r.body), PART_CAP);
+    };
+    // Part 0 also carries the week's SKU → vendor names (from the stored SKU breakdown), for lines
+    // stored without a vendor key, so a period's vendor breakdown matches the week's.
+    const vendors = k === 0 ? skuVendors(JSON.parse(byName.get('sections')?.body_text ?? await text('sections')).breakdowns) : null;
+    return jsonText(`${head(n)},"o":${await text(`orders:${k}`)},"l":${await text(`lines:${k}`)}${vendors ? `,"skuVendors":${JSON.stringify(vendors)}` : ''}}`);
+  }
+  // Worker-computed weeks (rows): the same grouping by order name, ORDERS_PER_PART at a time.
+  const n = Math.ceil(((await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshot_order WHERE snapshot_id = ?1').bind(s.snapshot_id).first())?.n || 0) / ORDERS_PER_PART);
+  if (k >= n) throw new ApiError(404, 'part_unknown', `This snapshot has ${n} order parts`);
+  const orders = (await env.DB.prepare('SELECT * FROM snapshot_order WHERE snapshot_id = ?1 ORDER BY order_name LIMIT ?2 OFFSET ?3')
+    .bind(s.snapshot_id, ORDERS_PER_PART, k * ORDERS_PER_PART).all()).results || [];
+  const lines = orders.length ? (await env.DB.prepare('SELECT * FROM snapshot_line WHERE snapshot_id = ?1 AND order_name IN (SELECT value FROM json_each(?2)) ORDER BY order_name, line_index')
+    .bind(s.snapshot_id, JSON.stringify(orders.map(o => o.order_name))).all()).results || [] : [];
+  for (const o of orders) delete o.snapshot_id;
+  for (const l of lines) delete l.snapshot_id;
+  const vendors = k === 0 ? skuVendors((await env.DB.prepare("SELECT dimension, detail FROM snapshot_breakdown WHERE snapshot_id = ?1 AND dimension = 'sku'").bind(s.snapshot_id).all()).results || []) : null;
+  return jsonText(`${head(n)},"o":${JSON.stringify({ orders })},"l":${JSON.stringify({ lines })}${vendors ? `,"skuVendors":${JSON.stringify(vendors)}` : ''}}`);
+}
+
+/** SKU breakdown rows → { normalized SKU: vendor } (the vendor each SKU was reported under; a SKU under two vendors is left out). */
+function skuVendors(breakdowns) {
+  const m = new Map();
+  for (const b of breakdowns || []) {
+    if (b.dimension !== 'sku') continue;
+    const d = P(b.detail, null);
+    if (!d?.sku) continue;
+    const k = normalizeSku(d.sku), prev = m.get(k);
+    m.set(k, prev === undefined || prev === d.vendor ? d.vendor : null);
+  }
+  return Object.fromEntries([...m].filter(([, v]) => v));
 }

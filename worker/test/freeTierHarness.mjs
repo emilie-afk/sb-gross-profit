@@ -29,10 +29,11 @@ export const ok = async (p, what) => { const r = await p; assert.ok(r.status < 3
 export const changes = env => env.DB.db.prepare('SELECT total_changes() AS n').get().n;
 
 export const LAST_WEEK = '2020-03-09';                              // DST starts 2020-03-08 (in week 2020-03-02)
-export function dataset({ n = 360, lastWeek = LAST_WEEK, prefix = '7', scr: scrOpts = {} } = {}) {
+export function dataset({ n = 360, lastWeek = LAST_WEEK, prefix = '7', scr: scrOpts = {}, rowsHook = null } = {}) {
   const week = { weekStart: lastWeek, weekEnd: addDays(lastWeek, 6) }, win = rollingWindow(week);
   const days = (Date.parse(win.to) - Date.parse(win.from)) / 864e5 + 1;
   const { rows, meta } = shopifyRows({ n, from: win.from, days, prefix });
+  if (rowsHook) rowsHook(rows, meta);                                  // a test's own edits to the export rows
   const prep = prepareShopifyExport(toCsvText(rows, Object.keys(rows[0])), { week, exportedAt: `${addDays(win.to, 1)}T09:00:00Z` });
   assert.ok(!prep.refused, JSON.stringify(prep));
   const s = sanitizeShippingCostReport(scrRows(meta, { lastDay: win.to, ...scrOpts }));

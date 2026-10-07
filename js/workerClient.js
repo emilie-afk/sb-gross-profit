@@ -41,3 +41,9 @@ export const order = (weekStart, orderName, o) => workerApi(`/snapshot/${weekSta
 export const weekStatus = (weekStart, o) => workerApi(`/weeks/${weekStart}/status`, o);
 /** C7: the weekly automation status (codes and timestamps only). */
 export const automationStatus = (weekStart, o) => workerApi(`/automation/status${weekStart ? `?weekStart=${encodeURIComponent(weekStart)}` : ''}`, o);
+/**
+ * Part k of a week's stored results (≤ 40 orders and their lines, rows as stored), for the report view.
+ * `snapshotId` pins the revision the report started from (409 snapshot_changed if it moved).
+ */
+export const reportPart = (weekStart, k, snapshotId, o) =>
+  workerApi(`/snapshot/${weekStart}/report-part/${Number(k) || 0}${snapshotId ? `?snapshot=${encodeURIComponent(snapshotId)}` : ''}`, o);

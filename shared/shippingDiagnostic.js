@@ -25,7 +25,7 @@ import { normalizeOrderNumber } from './calculator.js';
 import { selectShipmentExpense, DEFAULT_EXPENSE_POLICY } from './adapters/shipstation.js';
 import { r2 } from './normalized.js';
 
-const HPD_CATEGORIES = new Set(['Pure HP Dropship', 'Mixed (17381 + HP Dropship)', 'Mixed (HP + Free Ship)']);
+export const HPD_CATEGORIES = new Set(['Pure HP Dropship', 'Mixed (17381 + HP Dropship)', 'Mixed (HP + Free Ship)']);
 
 /** True unless Shopify says, for every line, that nothing ships. Unknown counts as shippable. */
 export function orderRequiresShipping(order) {

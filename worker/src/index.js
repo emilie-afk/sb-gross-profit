@@ -18,7 +18,7 @@ import { openCatalogUpload, putCatalogChunk, sealCatalogUpload } from './catalog
 import { requireSecret, requireReader, login, logout, sessionInfo } from './auth.js';
 import { ingestShopify, ingestShipStation, ingestHpd, ingestCatalog } from './ingest.js';
 import { ingestShippingCostReport, listVersions, getVersion, acceptVersion, rejectVersion, rollbackActivation, getSegments, getEffectiveSummary } from './shippingCost.js';
-import { listWeeks, getSnapshot, listOrders, getOrder, listIssues, scenarioInput, history, compare } from './read.js';
+import { listWeeks, getSnapshot, listOrders, getOrder, listIssues, scenarioInput, history, compare, reportPart } from './read.js';
 import { createAndCompute, recompute, revise, restateCosts, listRestatements, weekPlan, getReadiness, createCatalogRefresh, getCatalogRefresh,
          reviseTouchedWeeks, catalogPushes, getRunDetail, publish, settings, backfill, shipstationFieldComparison, storage, acceptWeekPinnedCatalog } from './admin.js';
 import { adminCatalogFetch, adminCatalogBase } from './catalogFetch.js';
@@ -171,6 +171,7 @@ async function route(request, env) {
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/orders\/([^/]+)$/))) return getOrder(request, env, await requireReader(request, env), g[1], decodeURIComponent(g[2]));
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/issues$/))) return listIssues(request, env, await requireReader(request, env), g[1]);
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/scenario-input$/))) return scenarioInput(request, env, await requireReader(request, env), g[1]);
+    if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/report-part\/(\d{1,4})$/))) return reportPart(request, env, await requireReader(request, env), g[1], Number(g[2]));
   }
 
   throw new ApiError(404, 'not_found', 'No such route');

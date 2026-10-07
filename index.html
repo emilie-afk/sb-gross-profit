@@ -50,6 +50,63 @@ button{cursor:pointer;font-family:inherit}
 
 .main{padding:24px;max-width:1400px;margin:0 auto}
 
+
+/* ─── Welcome screen (navy/emerald, as the site sign-in) ──────────── */
+#welcome-screen{
+  --wl-bg:#0f172a; --wl-bg2:#111c33; --wl-card:#16223b; --wl-line:#2a3a57; --wl-text:#f1f5f9; --wl-muted:#9fb0c8;
+  --wl-sub:#9fb4d8; --wl-em:#10b981; --wl-em2:#34d399; --wl-em-ink:#04261b;
+  min-height:100vh;display:flex;flex-direction:column;color:var(--wl-text);
+  background:radial-gradient(1200px 600px at 50% -10%, var(--wl-bg2), var(--wl-bg));
+  font-family:var(--gp-sans, 'Libre Franklin', system-ui, sans-serif);
+}
+.wl-head{display:flex;align-items:center;justify-content:space-between;padding:18px 32px;border-bottom:1px solid var(--wl-line)}
+.wl-brand{display:flex;align-items:center;gap:12px;font-weight:700;font-size:1.25rem;color:var(--wl-text);padding-right:24px;border-right:1px solid var(--wl-line)}
+.wl-brand svg{width:34px;height:38px;color:var(--wl-em2)}
+.wl-account{display:flex;align-items:center;gap:8px;background:transparent;border:1px solid var(--wl-line);color:var(--wl-text);
+  border-radius:999px;padding:6px 14px 6px 6px;font-size:.85rem}
+.wl-account .av{width:30px;height:30px;border-radius:50%;background:#24324d;display:grid;place-items:center}
+.wl-account .av svg{width:16px;height:16px}
+.wl-account:hover,.wl-account:focus-visible{border-color:var(--wl-em2)}
+.wl-main{flex:1;display:flex;flex-direction:column;align-items:center;padding:72px 24px 32px;gap:12px}
+.wl-main h1{font-size:clamp(2rem,4.6vw,3.4rem);font-weight:800;letter-spacing:-.02em;text-align:center;outline:none}
+.wl-main .wl-sub{font-size:clamp(1rem,1.8vw,1.35rem);color:var(--wl-sub);text-align:center;margin-bottom:36px}
+.wl-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px;width:100%;max-width:1240px}
+.wl-card{background:var(--wl-card);border:1px solid var(--wl-line);border-radius:14px;padding:28px 26px;display:flex;flex-direction:column;
+  align-items:center;text-align:center;gap:10px;transition:border-color .15s, box-shadow .15s}
+.wl-card:hover,.wl-card:focus-within{border-color:var(--wl-em2);box-shadow:0 0 0 1px var(--wl-em2), 0 10px 30px rgba(16,185,129,.12)}
+.wl-card.primary{border-color:var(--wl-em);background:linear-gradient(180deg,#123236,#16223b)}
+.wl-ic{width:76px;height:76px;border-radius:50%;background:#22324e;display:grid;place-items:center;margin-bottom:8px}
+.wl-card.primary .wl-ic{background:#1d4a45}
+.wl-ic svg{width:38px;height:38px;color:var(--wl-text)}
+.wl-card h2{font-size:1.45rem;font-weight:700}
+.wl-card p{color:var(--wl-muted);font-size:1rem;margin-bottom:12px}
+.wl-btn{width:100%;padding:14px 18px;border-radius:9px;font-size:1rem;font-weight:600;border:1px solid #64748b;background:#1e2a42;color:var(--wl-text)}
+.wl-btn:hover{border-color:var(--wl-em2)}
+.wl-btn.primary{background:var(--wl-em);border-color:var(--wl-em);color:#fff}
+.wl-btn.primary:hover{background:var(--wl-em2);color:var(--wl-em-ink)}
+.wl-btn:focus-visible,.wl-account:focus-visible,.wl-back:focus-visible{outline:3px solid var(--wl-em2);outline-offset:3px}
+.wl-note{grid-column:1 / span 2;text-align:center;color:var(--wl-muted);font-size:.95rem;margin-top:-6px}
+.wl-foot{text-align:center;color:var(--wl-muted);font-size:.95rem;padding:28px 16px 36px}
+@media (max-width:860px){
+  .wl-grid{grid-template-columns:1fr;max-width:520px}
+  .wl-note{grid-column:1;order:2}
+  .wl-grid .wl-card:nth-child(3){order:3}
+  .wl-main{padding-top:40px}
+  .wl-head{padding:14px 16px}
+  .wl-brand{border-right:0;font-size:1.1rem}
+  .wl-account .lbl{display:none}
+}
+/* The saved-report list and the upload card share the old upload screen, one at a time. */
+.wl-back{display:inline-flex;align-items:center;gap:6px;background:transparent;border:1px solid var(--border);color:var(--text);
+  border-radius:8px;padding:8px 14px;font-size:.85rem;font-weight:600;align-self:flex-start}
+.wl-back:hover{border-color:var(--accent);color:var(--accent)}
+.upload-card.wide{max-width:1100px}
+.screen-bar{width:100%;max-width:1100px;display:flex;align-items:center;gap:12px}
+/* Headings that receive focus on navigation (for screen readers) show no ring; buttons keep theirs. */
+#saved-title:focus,#upload-title:focus,#welcome-title:focus{outline:none}
+#stored-badge{white-space:nowrap}
+@media (max-width:860px){ #stored-badge{font-size:11px;white-space:normal;max-width:140px} }
+
 /* ─── Upload screen ─────────────────────────────────────────────── */
 #upload-screen{
   display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -233,6 +290,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 .proj-input.needs-price:focus{border-color:var(--accent);background:var(--surface2)}
 
 /* Misc */
+/* Negative amounts and percentages: red, and the minus sign stays (colour is never the only cue). */
+.is-neg, td.is-neg, .value.is-neg{color:var(--gp-neg)!important}
 .missing-warn{
   background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);
   border-radius:6px;padding:10px 14px;font-size:.8rem;color:var(--red);margin-bottom:16px;
@@ -244,16 +303,52 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
 <div id="app">
 
-  <!-- Upload screen -->
-  <div id="upload-screen">
-    <!-- Automated weekly reports: read from the production Worker; nothing is uploaded. -->
-    <div class="upload-card" id="auto-reports-card">
-      <h2>Automated weekly reports</h2>
-      <p>Weeks collected, computed and independently verified by the weekly automation. Read-only; manual uploads below remain the fallback.</p>
+  <!-- Welcome: three choices, no figures; report data loads only when a report list is opened -->
+  <div id="welcome-screen">
+    <header class="wl-head">
+      <div class="wl-brand"><svg viewBox="0 0 32 36" fill="currentColor" aria-hidden="true"><path d="M15 35V19c0-5-3.6-9.4-9.7-10.4C4.6 15 9 19.2 15 19.4z" opacity=".95"/><path d="M17 19.6V35h-2V20c0-8.4 4.8-14.5 13.6-15.4C28.4 13.3 23.6 19 17 19.6z"/><rect x="11" y="33.2" width="10" height="2.4" rx="1.2"/></svg><span>Succulents Box</span></div>
+      <button type="button" class="wl-account" onclick="logout()" aria-label="Sign out of the dashboard">
+        <span class="av"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7z"/></svg></span><span class="lbl">Sign out</span></button>
+    </header>
+    <main class="wl-main">
+      <h1 id="welcome-title" tabindex="-1">Profit Dashboard</h1>
+      <p class="wl-sub">Choose how you want to view your reports.</p>
+      <div class="wl-grid">
+        <section class="wl-card primary" aria-labelledby="wl-weekly">
+          <div class="wl-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg></div>
+          <h2 id="wl-weekly">Weekly reports</h2>
+          <p>Open saved reports by week.</p>
+          <button type="button" class="wl-btn primary" onclick="openSaved('week')">View weekly reports</button>
+        </section>
+        <section class="wl-card" aria-labelledby="wl-monthly">
+          <div class="wl-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/><path d="M7.5 13.5h1M11.5 13.5h1M15.5 13.5h1M7.5 17h1M11.5 17h1M15.5 17h1" stroke-width="2.2"/></svg></div>
+          <h2 id="wl-monthly">Monthly reports</h2>
+          <p>See saved results by calendar month.</p>
+          <button type="button" class="wl-btn" onclick="openSaved('month')">View monthly reports</button>
+        </section>
+        <section class="wl-card" aria-labelledby="wl-files">
+          <div class="wl-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8z"/><path d="M14 3v5h5M12 18v-6M9.5 14.5 12 12l2.5 2.5"/></svg></div>
+          <h2 id="wl-files">Calculate from files</h2>
+          <p>Upload CSV files for a separate report.</p>
+          <button type="button" class="wl-btn" onclick="openUpload()">Upload files</button>
+        </section>
+        <p class="wl-note">Saved reports update automatically. No upload needed.</p>
+      </div>
+    </main>
+    <footer class="wl-foot">Weekly reporting runs every Monday.</footer>
+  </div>
+
+  <!-- Saved reports (weekly / monthly lists) and the CSV upload, one at a time -->
+  <div id="upload-screen" style="display:none">
+    <div class="screen-bar"><button type="button" class="wl-back" onclick="showHome()">← Home</button></div>
+    <!-- Saved reports: read from the production Worker; nothing is uploaded. -->
+    <div class="upload-card wide" id="auto-reports-card">
+      <h2 id="saved-title" tabindex="-1">Saved reports</h2>
+      <p>Weeks collected, computed and independently verified by the weekly automation, by week or by calendar month (Los Angeles time). Saved reports update automatically; no upload needed.</p>
       <div id="auto-reports"><p class="meta">Loading…</p></div>
     </div>
-    <div class="upload-card">
-      <h2>Upload your exports</h2>
+    <div class="upload-card" id="upload-card">
+      <h2 id="upload-title" tabindex="-1">Upload your exports</h2>
       <p>Files are processed entirely in your browser — nothing is uploaded to any server.</p>
       <div class="upload-row">
 
@@ -344,12 +439,13 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <button class="gp-nav-item" data-screen="shipping" onclick="gotoScreen('shipping')"><span class="gp-nav-glyph" aria-hidden="true">▥</span><span class="gp-nav-label">Shipping</span></button>
         <button class="gp-nav-item" data-screen="orders" onclick="gotoScreen('orders')"><span class="gp-nav-glyph" aria-hidden="true">☰</span><span class="gp-nav-label">Order detail</span><span class="gp-nav-badge" id="nav-badge-orders" hidden></span></button>
         <button class="gp-nav-item" data-screen="reports" onclick="gotoScreen('reports')"><span class="gp-nav-glyph" aria-hidden="true">▦</span><span class="gp-nav-label">Reports</span></button>
-        <button class="gp-nav-item" data-screen="scenarios" onclick="gotoScreen('scenarios')"><span class="gp-nav-glyph" aria-hidden="true">◈</span><span class="gp-nav-label">Scenarios</span></button>
+        <button class="gp-nav-item" id="nav-scenarios" data-screen="scenarios" onclick="gotoScreen('scenarios')"><span class="gp-nav-glyph" aria-hidden="true">◈</span><span class="gp-nav-label">Scenarios</span></button>
       </nav>
       <div class="gp-rail-foot">
         <div class="gp-theme-row"><span>Appearance</span>
           <button class="gp-theme-toggle" id="theme-toggle" onclick="toggleTheme()">Light</button></div>
-        <button class="gp-btn gp-btn-ghost" onclick="newFiles()" style="justify-content:flex-start"><span aria-hidden="true">↑</span><span>Upload new files</span></button>
+        <button class="gp-btn gp-btn-ghost" onclick="showHome()" style="justify-content:flex-start"><span aria-hidden="true">⌂</span><span>Home</span></button>
+        <button class="gp-btn gp-btn-ghost" onclick="newFiles()" style="justify-content:flex-start"><span aria-hidden="true" id="new-files-glyph">↑</span><span id="new-files-label">Upload new files</span></button>
         <button class="gp-btn gp-btn-ghost" onclick="logout()" style="justify-content:flex-start"><span aria-hidden="true">→</span><span>Sign out</span></button>
       </div>
     </aside>
@@ -360,6 +456,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <div class="sub" id="screen-sub">Where profit is coming from, and what needs fixing</div>
         </div>
         <div class="gp-header-actions">
+          <span class="chip" id="stored-badge" hidden></span>
           <div class="gp-period">
             <label for="filter-date-from">Period</label>
             <input type="date" id="filter-date-from" onchange="filterTable()" aria-label="Period from">
@@ -395,22 +492,22 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
           <div class="gp-kpi-row">
             <div class="gp-kpi">
-              <div class="label">Gross profit</div>
+              <div class="label" id="c-gp-label">Gross profit</div>
               <div class="value" id="c-gp">&mdash;</div>
               <div class="s1" id="c-gpm">&mdash;</div>
-              <div class="s2">Revenue less COGS and shipping</div>
+              <div class="s2" id="c-gp-s2">Revenue less COGS and shipping</div>
             </div>
             <div class="gp-kpi">
-              <div class="label">Total revenue</div>
+              <div class="label" id="c-revenue-label">Total revenue</div>
               <div class="value" id="c-revenue">&mdash;</div>
               <div class="s1" id="c-revenue-sub">&mdash;</div>
-              <div class="s2">Incl. shipping &amp; taxes</div>
+              <div class="s2" id="c-revenue-s2">Incl. shipping &amp; taxes</div>
             </div>
             <div class="gp-kpi">
-              <div class="label">Total COGS</div>
+              <div class="label" id="c-cogs-label">Total COGS</div>
               <div class="value" id="c-cogs">&mdash;</div>
               <div class="s1" id="c-cogs-sub">&mdash;</div>
-              <div class="s2">Product cost only</div>
+              <div class="s2" id="c-cogs-s2">Product cost only</div>
             </div>
             <div class="gp-kpi">
               <div class="label">Shipping net</div>
@@ -445,6 +542,8 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
               </div>
             </div>
           </div>
+
+          <div class="gp-card" id="refunds-card" hidden></div>
         </section>
 
         <!-- ══ Channels & vendors ══ -->
@@ -452,6 +551,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
 
 
     <div id="channel-breakdown" style="margin-bottom:24px"></div>
+    <div id="vendor-breakdown" style="margin-bottom:24px"></div>
 
     <!-- Shipping analysis -->
     <div class="section-title">Shipping Analysis</div>
@@ -492,6 +592,15 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
                   <option value="noship">No ship cost</option>
                   <option value="influencer">Influencer samples</option>
                 </select>
+              </div>
+              <div class="gp-filter-row">
+                <span class="t3" style="font-size:12px">Orders</span>
+                <div class="gp-seg" role="group" aria-label="Refund filter" id="refund-filter">
+                  <button data-refund="all" aria-pressed="true" onclick="setRefundFilter('all')">All orders</button>
+                  <button data-refund="refunded" aria-pressed="false" onclick="setRefundFilter('refunded')">Refunded orders</button>
+                  <button data-refund="none" aria-pressed="false" onclick="setRefundFilter('none')">Orders without refunds</button>
+                </div>
+                <span class="meta" id="refund-filter-note"></span>
               </div>
               <div class="gp-filter-row">
                 <span class="t3" style="font-size:12px">Quick filters</span>
@@ -600,6 +709,27 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <button id="btn-next-ord" onclick="changeOrderPage(1)">Next →</button>
     </div>
     </div><!-- /view-order -->
+
+    <!-- Refunded orders view (All orders / Refunded orders filter): refunds as already in the figures -->
+    <div id="view-refunds" style="display:none">
+    <div class="table-wrap">
+      <table id="refund-table">
+        <thead><tr>
+          <th>Order</th><th>Order date</th><th>Channel</th><th>Vendor</th><th>Refund</th>
+          <th class="num" id="refund-amount-col">Refund amount</th><th class="num">Net revenue after refunds</th>
+          <th class="num">Known product cost</th><th class="num">Shipping paid</th><th class="num">GP</th>
+          <th id="refund-date-col" hidden>Refund date</th><th id="refund-reason-col" hidden>Reason</th>
+        </tr></thead>
+        <tbody id="refund-table-body"></tbody>
+        <tfoot id="refund-tfoot"></tfoot>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev-ref" onclick="changeRefundPage(-1)">← Prev</button>
+      <span class="page-info" id="page-info-ref"></span>
+      <button id="btn-next-ref" onclick="changeRefundPage(1)">Next →</button>
+    </div>
+    </div><!-- /view-refunds -->
 
     <!-- Subscription view -->
     <div id="view-sub" style="display:none">
@@ -989,7 +1119,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
               <button class="gp-pick" data-model="itemcount" onclick="selectModel('itemcount')"
                       aria-pressed="false">
                 <span class="n">Item count free shipping</span><span class="d">Free ship by items per order</span></button>
-              <button class="gp-pick" data-model="aps" onclick="selectModel('aps')"
+              <button class="gp-pick" id="pick-aps" data-model="aps" onclick="selectModel('aps')"
                       aria-pressed="false">
                 <span class="n">Air Plant Shop multi-item</span><span class="d">Discount the 2nd+ item surcharge</span></button>
               <button class="gp-pick" data-model="discount" onclick="selectModel('discount')"
@@ -998,6 +1128,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             </div>
             <div class="gp-card" id="model-panes">
             <div class="gp-scen-model" data-model="price">
+    <p class="gp-note stored-only" hidden style="margin-bottom:12px">Automatic report: sales, revenue and known costs come from the saved results. A SKU with no known-cost sale in this period is looked up in the site's current cost tables (not the week's pinned catalog); a SKU with no cost anywhere stays without a cost.</p>
     <!-- Controls -->
     <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:20px">
       <input class="search-input" id="proj-search" placeholder="Search SKU or product name…"
@@ -1257,6 +1388,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div>
             </div>
             <div class="gp-scen-model" data-model="aps" hidden>
+    <p class="gp-note stored-only" hidden style="margin-bottom:12px;color:var(--gp-warn)">Not available in automatic reports: this model needs each order's ShipStation cost for the Air Plant Shop items alone (from the ShipStation shipments export with line items). The saved weekly results keep only the order's whole shipping cost, so APS shipping cannot be separated. Use Calculate from files with that export.</p>
 
     <!-- ── APS Shipping Surcharge Projection ───────────────────────────── -->
     <div style="margin-top:36px;padding-top:28px;border-top:1px solid var(--border)">
@@ -1339,12 +1471,15 @@ import { toCsvText } from './shared/adapters/shopifyCsv.js';
 import { unmatchedShippingOrders, exportPeriodOf, shippingCostBridge, filterUnmatched, unmatchedCsv, UNMATCHED_REASON, EXCLUDED_PENDING_MATCH } from './js/unmatchedShipping.js';
 import { catalogRevOf } from './shared/catalog.js';
 import { initScenarioView, renderScenarioView } from './js/scenarioUI.js';
-import { automationStatus } from './js/workerClient.js';
-import { createWeeklyReports } from './js/weeklyReports.js';
+import { automationStatus, snapshot as apiSnapshot, reportPart as apiReportPart, weekStatus as apiWeekStatus } from './js/workerClient.js';
+import { createWeeklyReports, reportFlagsText, failureMessage as reportFailure } from './js/weeklyReports.js';
+import * as SR from './js/storedReport.js';
+import { refundIndex, refundSummary, matchesRefundFilter, REFUND_FILTERS } from './js/refunds.js';
+import { mcgVolumeOrders, hasPackTable, projectionUnitCost, projectionTotals } from './js/scenarioModels.js';
 import { renderAutomationStatus, automationStatusError } from './js/automationStatus.js';
 import { SCREENS, initTheme, toggleTheme, initRouter, showScreen, currentScreen,
          buildAlerts, renderAlerts, renderStoreBars, renderChannelDonut,
-         renderShipping as renderShippingScreen, renderReports } from './js/shell.js';
+         renderShipping as renderShippingScreen, renderReports, markNegatives } from './js/shell.js';
 
 window.toggleTheme = toggleTheme;
 window.gotoScreen  = (id) => { showScreen(id); if (id === 'reports') window.loadAutomationStatus(); };
@@ -1356,8 +1491,273 @@ window.loadAutomationStatus = async () => {
   catch (e) { el.textContent = automationStatusError(e); }
 };
 // Automated weekly reports (read-only, same-origin Worker proxy).
-{ const el = document.getElementById('auto-reports'); if (el) { window.weeklyReports = createWeeklyReports(el); window.weeklyReports.load(); } }
+// Created now, loaded only when someone opens the weekly or monthly list (the welcome screen fetches nothing).
+{ const el = document.getElementById('auto-reports'); if (el) window.weeklyReports = createWeeklyReports(el, undefined, { onOpen: (k, key, list) => openStoredReport(k, key, list) }); }
+
+// ─── Welcome screen and navigation: Home → Weekly / Monthly lists → report; Home → Upload → CSV report ──
+const SCREEN_IDS = ['welcome-screen', 'upload-screen', 'dashboard'];
+function showOnly(id, display = '') {
+  for (const s of SCREEN_IDS) { const el = document.getElementById(s); if (el) el.style.display = s === id ? (display || (s === 'dashboard' ? 'grid' : 'flex')) : 'none'; }
+  window.scrollTo(0, 0);
+}
+const focusEl = id => setTimeout(() => document.getElementById(id)?.focus({ preventScroll: true }), 0);
+window.showHome = () => {
+  if (storedState) { storedState = null; setStoredChrome(null); }
+  showOnly('welcome-screen'); focusEl('welcome-title');
+};
+window.openSaved = (mode) => {
+  document.getElementById('auto-reports-card').style.display = '';
+  document.getElementById('upload-card').style.display = 'none';
+  showOnly('upload-screen');
+  if (window.weeklyReports) { window.weeklyReports.setMode(mode); window.weeklyReports.load(); }
+  focusEl('saved-title');
+};
+window.openUpload = () => {
+  document.getElementById('auto-reports-card').style.display = 'none';
+  document.getElementById('upload-card').style.display = '';
+  showOnly('upload-screen'); focusEl('upload-title');
+};
 initTheme();
+
+// ─── Automatic reports: the same screens, fed by stored results (no upload) ──────────────────────
+// A week, or a calendar month in Los Angeles time, is loaded from the Worker's stored results (the
+// latest published revision of each week, bounded parts) and rendered by the CSV report's own screens.
+// Totals are the stored, verified amounts summed (js/storedReport.js); nothing is recomputed.
+let storedState = null;          // { kind, key, plan, agg, disc, weeks } while an automatic report is open
+let refundIdx = new Map(), refundFilter = 'all', refundKnownInSource = true;
+const DEFAULT_LABELS = {
+  'c-gp-label': 'Gross profit', 'c-gp-s2': 'Revenue less COGS and shipping', 'c-revenue-label': 'Total revenue',
+  'c-revenue-s2': 'Incl. shipping & taxes', 'c-cogs-label': 'Total COGS', 'c-cogs-s2': 'Product cost only',
+};
+function setStoredChrome(st) {
+  const on = !!st;
+  for (const [id, t] of Object.entries(DEFAULT_LABELS)) { const el = document.getElementById(id); if (el) el.textContent = t; }
+  const badge = document.getElementById('stored-badge');
+  if (badge) { badge.hidden = !on; badge.textContent = on ? `Automatic report · ${st.disc.status}` : ''; }
+  const nf = document.getElementById('new-files-label'), ng = document.getElementById('new-files-glyph');
+  if (nf) nf.textContent = on ? 'Back to reports' : 'Upload new files';
+  if (ng) ng.textContent = on ? '←' : '↑';
+  // Scenarios run on the saved lines too (six of seven models; Air Plant Shop needs a per-shipment input not saved).
+  document.querySelectorAll('.stored-only').forEach(el => { el.hidden = !on; });
+  const aps = document.getElementById('pick-aps');
+  if (aps) { aps.disabled = on; aps.title = on ? 'Needs the ShipStation line-item shipping export; not in saved results' : ''; aps.style.opacity = on ? '.55' : ''; }
+  if (on && document.querySelector('.gp-pick[data-model="aps"][aria-pressed="true"]')) window.selectModel?.('price');
+  const c3 = document.getElementById('c3-disclosure');
+  if (c3 && !on) { c3.querySelector('h3').textContent = 'Provisional result'; c3.style.borderColor = '';
+    const body = document.getElementById('c3-disclosure-body'); if (body) body.style.cssText = 'padding:12px 18px;font-size:13px;line-height:1.6'; }
+  document.getElementById('ship-cost-bridge')?.toggleAttribute('hidden', on || !c3Preview);
+  document.getElementById('unmatched-shipping')?.toggleAttribute('hidden', on || !c3Preview);
+}
+
+const GAP_TEXT = { gate_failed: 'held by the publication checks', compute_pending: 'not computed yet', verification_pending: 'verification pending',
+  verification_mismatch: 'verification found a difference', shipping_report_partial: 'shipping cost report incomplete', week_open: 'week not finished',
+  shopify_export_pending: 'orders not collected yet' };
+
+async function openStoredReport(kind, key, weekList) {
+  showLoading(kind === 'month' ? `Loading ${SR.monthLabel(key)}…` : `Loading the week of ${key}…`);
+  try {
+    const plan = SR.periodPlan(kind, key, weekList);
+    if (!plan.weeks.length) throw Object.assign(new Error('No published week covers this period.'), { status: 0 });
+    // Why each missing week is missing (codes only), and each included week's report flags.
+    await Promise.all(plan.gaps.filter(g => g.reason === 'not_published').map(async g => {
+      try { const st = await apiWeekStatus(g.weekStart); const code = (st.pending || []).map(p => p.code || p)[0]; if (code) g.detail = GAP_TEXT[code] || String(code).replace(/_/g, ' '); } catch { /* reason unknown: stays generic */ }
+    }));
+    const client = { snapshot: w => apiSnapshot(w), reportPart: (w, k, id) => apiReportPart(w, k, id) };
+    const data = await SR.loadPeriod(client, plan);
+    const statuses = await Promise.all(data.weeks.map(w => apiWeekStatus(w.weekStart).catch(() => null)));
+    const agg = SR.aggregate(data.weeks, plan.period);
+    const inPeriod = o => o.business_date >= plan.period.from && o.business_date <= plan.period.to && o.business_date >= SR.PUBLICATION_EARLIEST;
+    const lines = data.weeks.flatMap(w => {
+      const orders = w.orders.filter(inPeriod), names = new Set(orders.map(o => o.order_name));
+      return SR.storedLines(orders, w.lines.filter(l => names.has(l.order_name)), w.skuVendors,
+        { refundsNotPerOrder: w.head?.revenueBridge?.components?.refundsBeyondProductRevenue || 0 });
+    });
+    const weekInfo = data.weeks.map((w, i) => ({ weekStart: w.weekStart, revision: w.revision, verification: w.head?.verification?.status,
+      catalog: w.head?.catalog, partialWeek: w.head?.totals?.labels?.partialWeek || null, flagsText: reportFlagsText(statuses[i]) }));
+    const disc = SR.disclosures({ plan, totals: agg.totals, weekInfo });
+    storedState = { kind, key, plan, agg, disc, weeks: data.weeks, weekInfo };
+    refundKnownInSource = true;
+    allLines = lines;
+    // Inputs only a CSV upload provides are cleared, never carried over from an earlier upload in this tab.
+    apsShipCosts = new Map(); hpdData = null; c3Preview = null;
+    // Scenarios: the engine's cost tables (the site's data files, no upload) for the price projection's
+    // resolver and the MCG pack table for the volume-discount rule.
+    const [mcgT, prodT, hpSupp, sbT, hpByNameT, aliasT, vcT, viT, packT] = await Promise.all(['mcg_total', 'product_costs', 'hp_supplement', 'sb_costs',
+      'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index', 'mcg_pack'].map(n => loadSiteTable(`${n}.json`, { orNull: n === 'mcg_pack' })));
+    const mcgExtraT = await fetchMcgExtraCosts().catch(() => ({}));
+    _projMcgCosts = mcgT; _projProductCosts = prodT; _projAdditionalCosts = { ...hpSupp, ...sbT }; _projHpByName = hpByNameT; _projSkuAlias = aliasT;
+    _costTables = { mcgCosts: mcgT, productCosts: prodT, additionalCosts: { ...hpSupp, ...sbT }, hpByName: hpByNameT, skuAlias: aliasT, mcgExtra: mcgExtraT,
+                    vendorCosts: Object.keys(vcT).length ? vcT : null, vendorIndex: Object.keys(viT).length ? viT : null, mcgPack: packT };
+    initScenarioView(document.getElementById('view-scenario'), () => allLines);
+    showReportShell(kind === 'month' ? `${SR.monthLabel(key)} (Los Angeles time)` : `Week of ${key} (Mon–Sun, Los Angeles time)`, plan.period);
+  } catch (e) {
+    const el = document.getElementById('auto-reports');
+    if (el) el.insertAdjacentHTML('afterbegin', `<p class="error-msg" role="alert">${esc(e.status === 0 ? e.message : (e.status === 409 ? 'A week got a newer revision while loading. Open the report again.' : reportFailure(e)))}</p>`);
+    console.error(e);
+  }
+  hideLoading();
+}
+
+/** A cost table the build writes (data/*.json); {} when absent (null with orNull, so "missing" is visible). */
+async function loadSiteTable(name, { orNull = false } = {}) {
+  try { const r = await fetch('./data/' + name); return r.ok ? await r.json() : (orNull ? null : {}); } catch { return orNull ? null : {}; }
+}
+
+/** Render the dashboard shell for the current allLines (CSV or automatic) and switch to it. */
+function showReportShell(title, period) {
+  setStoredChrome(storedState);
+  refundIdx = refundIndex(allLines, { refundKnown: refundKnownInSource });
+  refundFilter = 'all'; syncRefundButtons();
+  renderDashboard(allLines);
+  if (storedState) renderStoredDisclosure(storedState); else renderC3Disclosure(c3Preview);
+  renderRefundsCard();
+  showOnly('dashboard');
+  showScreen(currentScreen(), false);
+  document.getElementById('topbar-sub').textContent = storedState
+    ? `${title} · ${new Set(allLines.map(l => l.orderNum)).size.toLocaleString()} orders · ${allLines.length.toLocaleString()} line items`
+    : `${allLines.length.toLocaleString()} line items · ${getDateRange(allLines)}`;
+  const dates = allLines.map(l => l.date).filter(Boolean).sort();
+  document.getElementById('filter-date-from').value = period?.from || dates[0] || '';
+  document.getElementById('filter-date-to').value = period?.to || dates[dates.length - 1] || '';
+  filterTable();
+}
+
+/** The "Provisional result" card, for an automatic report: what the figures cover and what they do not. */
+function renderStoredDisclosure(st) {
+  const card = document.getElementById('c3-disclosure');
+  if (!card) return;
+  card.hidden = false;
+  card.querySelector('h3').textContent = st.disc.provisional ? 'Provisional result' : 'Result';
+  document.getElementById('c3-disclosure-meta').textContent =
+    `Automatic report · ${st.disc.status} · ${st.disc.covered} of ${st.disc.periodDays} days · latest published revision of each week`;
+  const tone = t => t === 'neg' ? 'var(--gp-neg)' : t === 'warn' ? 'var(--gp-warn)' : 'inherit';
+  document.getElementById('c3-disclosure-body').style.cssText = 'padding:12px 18px;font-size:13px;line-height:1.6;display:flex;flex-direction:column;gap:6px';
+  document.getElementById('c3-disclosure-body').innerHTML =
+    `<div><strong>${esc(st.disc.headline)}.</strong> Computed weekly from the collected sources, independently verified and published; nothing was uploaded here. ${st.kind === 'month' ? 'Monthly totals count the orders dated in the month; margins are recomputed from the month’s amounts.' : ''}</div>`
+    + st.disc.items.map(i => `<div style="color:${tone(i.tone)}">${esc(i.text)}</div>`).join('');
+  card.style.borderColor = st.disc.provisional ? 'var(--gp-warn)' : '';
+}
+
+// ─── Refunds: filter, Refunded orders view and analysis (CSV and automatic reports alike) ─────────
+function syncRefundButtons() {
+  document.querySelectorAll('[data-refund]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.refund === refundFilter)));
+}
+window.setRefundFilter = f => {
+  refundFilter = REFUND_FILTERS[f] ? f : 'all';
+  syncRefundButtons();
+  if (refundFilter === 'refunded' && tableView !== 'order') { tableView = 'order'; document.getElementById('seg-sku').setAttribute('aria-pressed', 'false'); document.getElementById('seg-order').setAttribute('aria-pressed', 'true'); }
+  applyQuick();
+};
+function refundFilterNote() {
+  const s = refundSummary(refundIdx, allLines);
+  const bits = [];
+  if (refundFilter !== 'all') bits.push(`Filtered: ${REFUND_FILTERS[refundFilter].toLowerCase()} — counts and subtotals below cover the filtered orders only; the report's totals are unchanged`);
+  if (s.unknown) bits.push(`${s.unknown} order${s.unknown === 1 ? '' : 's'} with unknown refund status ${refundFilter === 'none' ? 'are excluded here' : 'are not classified'}`);
+  if (!refundKnownInSource) bits.push('the Shopify export has no Refunded Amount column, so refund status is unknown');
+  return bits.join(' · ');
+}
+let refundRows = [], refundPage = 1;
+const REFUND_PAGE = 100;
+window.changeRefundPage = dir => { refundPage = Math.max(1, Math.min(Math.ceil(refundRows.length / REFUND_PAGE) || 1, refundPage + dir)); renderRefundPage(); };
+const refundExpanded = new Set();
+window.toggleRefundExpand = n => { refundExpanded.has(n) ? refundExpanded.delete(n) : refundExpanded.add(n); renderRefundPage(); };
+function renderRefundView() {
+  const names = new Set(filteredLines.map(l => l.orderNum));
+  refundRows = [...refundIdx.values()].filter(o => names.has(o.orderNum) && matchesRefundFilter(o.status, 'refunded'))
+    .sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.refund - a.refund);
+  refundPage = 1; renderRefundPage();
+}
+function renderRefundPage() {
+  const page = refundRows.slice((refundPage - 1) * REFUND_PAGE, refundPage * REFUND_PAGE);
+  const showDate = refundRows.some(o => o.refundDate), showReason = refundRows.some(o => o.refundReason);
+  document.getElementById('refund-date-col').hidden = !showDate;
+  document.getElementById('refund-amount-col').textContent = storedState ? 'Allocated refund' : 'Refund amount';
+  document.getElementById('refund-reason-col').hidden = !showReason;
+  const byOrder = new Map(); for (const li of filteredLines) (byOrder.get(li.orderNum) || byOrder.set(li.orderNum, []).get(li.orderNum)).push(li);
+  const cols = 10 + (showDate ? 1 : 0) + (showReason ? 1 : 0);
+  document.getElementById('refund-table-body').innerHTML = page.map(o => {
+    const open = refundExpanded.has(o.orderNum), lines = byOrder.get(o.orderNum) || [];
+    const detail = open ? `<tr class="lm-detail-row"><td colspan="${cols}" style="padding:8px 12px!important"><table class="detail-subtable">
+      <thead><tr><th>SKU</th><th>Product</th><th>Vendor</th><th class="num" style="text-align:right">Qty</th><th class="num" style="text-align:right">Refund share</th>
+      <th class="num" style="text-align:right">Revenue after refund</th><th class="num" style="text-align:right">COGS</th><th class="num" style="text-align:right">GP $</th><th>Cost source</th></tr></thead>
+      <tbody>${lines.map(li => `<tr><td style="font-size:.75rem">${esc(li.sku)}</td><td style="font-size:.75rem">${esc(li.product)}</td><td style="font-size:.75rem">${esc(li.vendor || li.store || '')}</td>
+        <td class="num" style="text-align:right">${li.qty}</td><td class="num" style="text-align:right">${fmt(li.refundAllocated || 0)}</td>
+        <td class="num" style="text-align:right">${fmt(li.lineRevenue)}</td><td class="num ${li.costSource === 'COST MISSING' ? 'missing' : ''}" style="text-align:right">${li.costSource === 'COST MISSING' ? 'missing' : fmt(li.lineCogs)}</td>
+        <td class="num" style="text-align:right">${li.lineGp === null ? '—' : fmt(li.lineGp)}</td><td style="font-size:.72rem;color:var(--muted)">${esc(li.costSource || '')}</td></tr>`).join('')}</tbody></table></td></tr>` : '';
+    return `<tr class="lm-order-row${open ? ' open' : ''}" onclick="toggleRefundExpand('${esc(o.orderNum).replace(/'/g, "\\'")}')">
+      <td>${esc(o.orderNum)}</td><td>${esc(o.date || '')}</td><td>${esc(o.channel)}</td><td>${esc(o.vendors.join(', '))}</td>
+      <td>${o.status === 'full' ? 'Full' : 'Partial'}</td><td class="num">${fmt(o.refund)}</td><td class="num">${fmt(o.netRevenue)}</td>
+      <td class="num ${o.missingCostLines ? 'missing' : ''}">${o.missingCostLines ? '~' : ''}${fmt(o.knownCogs)}</td><td class="num">${o.shipPaid === null ? '—' : fmt(o.shipPaid)}</td>
+      <td class="num">${fmt(o.gp)}</td>${showDate ? `<td>${esc(o.refundDate || '—')}</td>` : ''}${showReason ? `<td>${esc(o.refundReason || '—')}</td>` : ''}</tr>${detail}`;
+  }).join('') || `<tr><td colspan="${cols}" class="t3">No refunded orders in this selection.</td></tr>`;
+  const sum = f => Math.round(refundRows.reduce((s, o) => s + Math.round((o[f] || 0) * 100), 0)) / 100;
+  document.getElementById('refund-tfoot').innerHTML = refundRows.length ? `<tr class="totals-row"><td colspan="5">Filtered subtotal — ${refundRows.length.toLocaleString()} refunded order${refundRows.length === 1 ? '' : 's'}${storedState ? ' (allocated refunds; refunds not allocated to an order are in the Refunds card)' : ''}</td>
+    <td class="num">${fmt(sum('refund'))}</td><td class="num">${fmt(sum('netRevenue'))}</td><td class="num">${fmt(sum('knownCogs'))}</td><td class="num">${fmt(sum('shipPaid'))}</td><td class="num">${fmt(sum('gp'))}</td>${showDate ? '<td></td>' : ''}${showReason ? '<td></td>' : ''}</tr>` : '';
+  const max = Math.ceil(refundRows.length / REFUND_PAGE) || 1;
+  document.getElementById('page-info-ref').textContent = `${refundRows.length} refunded orders · page ${refundPage}/${max}`;
+  document.getElementById('btn-prev-ref').disabled = refundPage <= 1;
+  document.getElementById('btn-next-ref').disabled = refundPage >= max;
+}
+
+/** Overview: refund analysis. Refunds are already in revenue and GP; this explains them, it subtracts nothing. */
+function renderRefundsCard() {
+  const el = document.getElementById('refunds-card');
+  if (!el) return;
+  const s = refundSummary(refundIdx, allLines, { notPerOrder: storedState ? storedState.agg.refunds : null });
+  const allocated = s.basis === 'allocated';
+  el.hidden = false;
+  const tbl = (title, rows, keyLabel) => `<div style="flex:1;min-width:280px"><div class="overline" style="margin-bottom:6px">${esc(title)}</div>
+    <table class="gp-table"><thead><tr><th>${esc(keyLabel)}</th><th class="num">Orders</th><th class="num">Refunded</th><th class="num">Share</th></tr></thead>
+    <tbody>${rows.map(r => `<tr><td>${esc(r.key)}</td><td class="num">${r.orders}</td><td class="num">${fmt(r.amount)}</td><td class="num">${r.share === null ? '—' : r.share.toFixed(1) + '%'}</td></tr>`).join('')
+      || '<tr><td colspan="4" class="t3">No refunds</td></tr>'}</tbody></table></div>`.replace(/<td class="num">null<\/td>/g, '<td class="num">—</td>');
+  const notes = [];
+  if (!refundKnownInSource) notes.push('The Shopify export has no Refunded Amount column: refund status is unknown for every order.');
+  if (s.unknown) notes.push(`${s.unknown} order${s.unknown === 1 ? '' : 's'} with no product revenue cannot be shown to be without a refund (a refund beyond product revenue in that week is not stored per order); they are not counted as refunded or as without refunds.`);
+  if (allocated) notes.push('Automatic reports store each order\'s refund as its line shares (product and Route), so per-order amounts are allocated refunds. A refund beyond an order\'s lines (shipping, other) is kept per week, not per order: it is added once as "Not allocated to an order" and not spread over orders, channels or vendors.');
+  for (const b of s.boundaryNotAssigned) notes.push(`Week of ${b.weekStart} crosses this ${storedState.kind}'s boundary: its ${fmt(b.amount)} refunded beyond order lines is not assigned to this ${storedState.kind} or the next (the order dates are not stored), so the total below leaves it out.`);
+  if (!s.hasDates || !s.hasReasons) notes.push(`Refund ${!s.hasDates && !s.hasReasons ? 'dates and reasons are' : !s.hasDates ? 'dates are' : 'reasons are'} not in the source data, so they are not shown.`);
+  el.innerHTML = `<div class="gp-card-head"><h3>Refunds</h3><span class="meta">${s.refundedOrders.toLocaleString()} of ${s.orders.toLocaleString()} orders · already included in revenue and GP</span>
+      <div class="right"><button class="gp-btn gp-btn-sm" onclick="gotoScreen('orders');setRefundFilter('refunded')">Refunded orders</button></div></div>
+    <div class="gp-card-body" style="display:flex;flex-direction:column;gap:14px">
+      <div class="gp-kpi-row">
+        <div class="gp-kpi gp-kpi-sm"><div class="label">Refunded orders</div><div class="value">${s.refundedOrders.toLocaleString()}</div>
+          <div class="s1">${s.refundedPct === null ? '—' : s.refundedPct.toFixed(1) + '%'} of orders</div><div class="s2">${s.fullRefunds} full · ${s.partialRefunds} partial${s.unknown ? ` · ${s.unknown} unknown` : ''}</div></div>
+        <div class="gp-kpi gp-kpi-sm"><div class="label">${allocated ? (s.complete ? 'Total refunded' : 'Refunded (excl. boundary weeks)') : 'Total refunded'}</div><div class="value">${fmt(s.totalRefunded)}</div>
+          <div class="s1">${allocated ? `${fmt(s.allocatedRefunded)} allocated to orders + ${fmt(s.notAllocatedToOrders)} not allocated to an order` : 'Already deducted from net revenue'}</div>
+          <div class="s2">${allocated && !s.complete ? `${fmt(s.boundaryNotAssigned.reduce((a, b) => a + b.amount, 0))} in boundary weeks not assigned` : 'Already in net revenue; not subtracted again'}</div></div>
+        <div class="gp-kpi gp-kpi-sm"><div class="label">Costs kept on refunded orders</div><div class="value">${fmt(s.retainedProductCost + s.retainedShippingCost)}</div>
+          <div class="s1">${fmt(s.retainedProductCost)} product · ${fmt(s.retainedShippingCost)} shipping</div><div class="s2">${s.missingCostLinesOnRefunded ? `${s.missingCostLinesOnRefunded} lines without cost not included` : 'Stay in GP'}</div></div>
+        <div class="gp-kpi gp-kpi-sm"><div class="label">GP of refunded orders</div><div class="value">${fmt(s.gpOfRefundedOrders)}</div>
+          <div class="s1">Net revenue ${fmt(s.netRevenueOfRefundedOrders)}</div><div class="s2">After their refunds and kept costs</div></div>
+      </div>
+      <p class="gp-note">How refunds affect the figures: net revenue is after refunds, so the ${fmt(s.totalRefunded)} refunded is already out of revenue and GP.${allocated ? ' Per-order amounts below and in Refunded orders are allocated refunds (line shares).' : ''} The product cost and shipping already paid on refunded orders stay as costs (${fmt(s.retainedProductCost)} product, ${fmt(s.retainedShippingCost)} shipping), so a refunded order usually lowers GP by more than its refund. Nothing is subtracted twice.</p>
+      <div style="display:flex;gap:24px;flex-wrap:wrap">${tbl('Refunds by channel', s.byChannel, 'Channel')}${tbl('Refunds by vendor', s.byVendor, 'Vendor')}</div>
+      ${notes.length ? `<div class="t3" style="font-size:12px;display:flex;flex-direction:column;gap:4px">${notes.map(n => `<div>${esc(n)}</div>`).join('')}</div>` : ''}
+    </div>`;
+}
+
+/** Vendor table (automatic reports carry the stored vendor breakdown; known-cost basis). */
+function renderVendorBreakdown() {
+  const el = document.getElementById('vendor-breakdown');
+  if (!el) return;
+  if (!storedState) { el.innerHTML = ''; return; }
+  const rows = storedState.agg.breakdowns.vendor;
+  el.innerHTML = `<div class="gp-card"><div class="gp-card-head"><h3>Vendor performance</h3><span class="meta">${rows.length} vendors · product lines · known-cost basis</span></div>
+    <div class="gp-table-wrap"><table class="gp-table" style="min-width:760px"><thead><tr><th>Vendor</th><th class="num">Units</th><th class="num">Known-cost revenue</th>
+      <th class="num">Known product cost</th><th class="num">Known-cost GP</th><th class="num">GP %</th><th class="num">Revenue without cost</th></tr></thead>
+    <tbody>${rows.map(r => `<tr><td style="font-weight:600">${esc(r.key)}</td><td class="num">${r.units.toLocaleString()}</td><td class="num">${fmt(r.knownCostRevenue)}</td>
+      <td class="num">${fmt(r.knownCogs)}</td><td class="num">${fmt(r.knownCostGp)}</td><td class="num">${r.knownCostMargin === null ? '—' : r.knownCostMargin.toFixed(1) + '%'}</td>
+      <td class="num">${r.missingCostRevenue ? fmt(r.missingCostRevenue) : '—'}</td></tr>`).join('')}</tbody></table></div>
+    <div class="gp-card-body" style="border-top:1px solid var(--gp-border)"><p class="gp-note">GP here is known-cost product GP: only lines with a known cost. Revenue without a cost is shown separately. The headline operating GP does include that revenue with no cost deducted, so it can be overstated until the costs are added.</p></div></div>`;
+}
+
+// ─── Negative amounts and percentages in red, everywhere (the minus sign stays) ────────────────────
+// js/shell.js markNegatives: leaf elements whose whole text is a negative amount or percentage.
+let _negQueued = false;
+new MutationObserver(() => {
+  if (_negQueued) return; _negQueued = true;
+  requestAnimationFrame(() => { _negQueued = false; markNegatives(document.getElementById('app')); });
+}).observe(document.getElementById('app'), { childList: true, subtree: true, characterData: true });
 
 // ─── MCG Extra Costs — proxied via server-side edge function ──────
 // Sheet URL lives in MCG_EXTRA_SHEET_URL env var (Netlify dashboard only).
@@ -1399,6 +1799,9 @@ const PAGE_SIZE = 100;
 let projRows = [];
 let projNextId = 1;
 // Cost tables stored at calc time for 0-sales SKU lookup
+// Every cost table the engine resolves costs with (CSV run or the site's data files for saved reports):
+// the Scenarios models use the engine's own resolver and volume-discount rule over these.
+let _costTables = {};
 let _projMcgCosts = {}, _projProductCosts = {}, _projAdditionalCosts = {};
 let _projHpByName = {}, _projSkuAlias = {};
 
@@ -1862,6 +2265,8 @@ window.runCalc = async () => {
     _projAdditionalCosts = { ...additionalCosts };
     _projHpByName      = hpByName;
     _projSkuAlias      = skuAlias;
+    _costTables = { mcgCosts, productCosts, additionalCosts: { ...additionalCosts }, hpByName, skuAlias, mcgExtra, vendorCosts, vendorIndex,
+                    mcgPack: missingData.includes('mcg_pack.json') ? null : mcgPack };
 
     setLoadingMsg('Parsing orders…');
     const orderTexts = ordersFiles.length
@@ -1897,34 +2302,23 @@ window.runCalc = async () => {
 
     setLoadingMsg('Calculating gross profit…');
     await new Promise(r => setTimeout(r, 20));
+    storedState = null;
+    // Refund status is known only when the export carries Shopify's Refunded Amount column.
+    refundKnownInSource = orderRows.length > 0 && Object.keys(orderRows[0]).some(k => /^refunded amount$/i.test(k.trim()));
     allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias, hpdData, mcgExtra, vendorCosts, vendorIndex, { mcgPackCosts: mcgPack });
     c3Preview = await buildC3Preview({ orderRows, lines: allLines, reportPreview, hasShipFile: !!shipText,
       catalog: { tables: { mcg_total: mcgCosts, product_costs: productCosts, sku_weights: skuWeights, sb_costs: sbCosts, hp_supplement: hpSupp,
                            hp_by_name: hpByName, sku_alias: skuAlias, vendor_costs: vendorCosts, vendor_index: vendorIndex, mcg_pack: mcgPack }, mcgExtra } });
-    renderDashboard(allLines);
-    renderC3Disclosure(c3Preview);
     _unmatchedState = { search: '', reason: '', sortKey: 'shipDate', sortDir: 'asc', open: new Set() };
+    initScenarioView(document.getElementById('view-scenario'), () => allLines);
+    showReportShell(null, null);
     renderShippingCostBridge(c3Preview);
     renderUnmatchedShipping(c3Preview);
-    initScenarioView(document.getElementById('view-scenario'), () => allLines);
-
-    document.getElementById('upload-screen').style.display = 'none';
-    document.getElementById('dashboard').style.display = 'grid';
-    showScreen(currentScreen(), false);
     if (missingData.length) {
       const warn = document.getElementById('missing-warn');
       warn.style.display = '';
       warn.textContent = `Cost tables not loaded: ${missingData.join(', ')}. `
         + 'Costs from those sources are missing — re-run the build if this is unexpected.';
-    }
-    const dateRange = getDateRange(allLines);
-    document.getElementById('topbar-sub').textContent =
-      `${allLines.length.toLocaleString()} line items · ${dateRange}`;
-    // Pre-fill date pickers with actual data range
-    const dates = allLines.map(l => l.date).filter(Boolean).sort();
-    if (dates.length) {
-      document.getElementById('filter-date-from').value = dates[0];
-      document.getElementById('filter-date-to').value   = dates[dates.length - 1];
     }
   } catch(e) {
     errEl.textContent = 'Error: ' + e.message;
@@ -2087,24 +2481,38 @@ function getDateRange(lines) {
 
 // ─── Render dashboard ─────────────────────────────────────────────
 function renderDashboard(lines) {
-  const s = summarize(lines);
+  // Automatic reports: the stored, verified amounts summed for the period (same shape as summarize()).
+  const st = storedState;
+  const s = st ? st.agg.summary : summarize(lines);
   _lastSummary = s;
 
   const shipNet = s.totalShipCollected - s.totalShipPaid;
   const orders  = new Set(lines.map(l => l.orderNum)).size;
+  if (st) {
+    const set = (id, t) => { const el = document.getElementById(id); if (el) el.textContent = t; };
+    set('c-gp-label', st.disc.headline);
+    set('c-gp-s2', 'Operating revenue less known product cost and shipping; can be overstated while costs are missing');
+    set('c-revenue-label', 'Operating revenue');
+    set('c-revenue-s2', 'After refunds and discounts; excl. taxes and Route');
+    set('c-cogs-label', 'Known product cost');
+    set('c-cogs-s2', 'Known costs only; missing costs are not deducted');
+  }
 
   // ── KPIs. Gross profit leads: it is the point of the app. ──
   const gpEl = document.getElementById('c-gp');
   gpEl.textContent = fmt(s.totalGp);
   gpEl.style.color = s.totalGp >= 0 ? 'var(--gp-pos)' : 'var(--gp-neg)';
-  document.getElementById('c-gpm').textContent = `${s.gpPct.toFixed(1)}% GP margin`;
+  document.getElementById('c-gpm').textContent = st
+    ? `${st.agg.totals.operatingGpMargin === null ? '—' : st.agg.totals.operatingGpMargin.toFixed(1) + '%'} margin${st.kind === 'month' ? ' (from the month’s amounts)' : ''}`
+    : `${s.gpPct.toFixed(1)}% GP margin`;
 
   document.getElementById('c-revenue').textContent     = fmt(s.totalRevenue);
   document.getElementById('c-revenue-sub').textContent = `${orders.toLocaleString()} orders`;
 
   document.getElementById('c-cogs').textContent = fmt(s.totalCogs);
   document.getElementById('c-cogs-sub').textContent = s.missingCost > 0
-    ? `${s.missingCost.toLocaleString()} line items incomplete` : 'All sold SKUs costed';
+    ? (st ? `${s.missingCost.toLocaleString()} line items without cost (${fmt(st.agg.totals.missingCostRevenue)} revenue)` : `${s.missingCost.toLocaleString()} line items incomplete`)
+    : 'All sold SKUs costed';
 
   const netEl = document.getElementById('c-ship-net');
   netEl.textContent = fmt(shipNet);
@@ -2113,27 +2521,45 @@ function renderDashboard(lines) {
   document.getElementById('c-ship-paid').textContent      = `Paid ${fmt(s.totalShipPaid)}`;
 
   // Missing cost is no longer a KPI — it became the first alert.
+  { const warn = document.getElementById('missing-warn'); warn.style.display = 'none';
+    const badge = document.getElementById('nav-badge-orders'); badge.hidden = true; }
   if (s.missingCost > 0) {
     const warn = document.getElementById('missing-warn');
     warn.style.display = '';
-    warn.textContent = `${s.missingCost} line items have missing cost data (highlighted below). `
+    warn.textContent = st
+      ? `${s.missingCost} line items have no product cost (highlighted below). Operating GP includes their revenue but deducts no cost for them, so it can be overstated until the costs are added to the Products Master (the next weekly run picks them up).`
+      : `${s.missingCost} line items have missing cost data (highlighted below). `
       + 'Add SKU costs to products_export or mcg_total to fix.';
     const badge = document.getElementById('nav-badge-orders');
     badge.hidden = false; badge.textContent = s.missingCost;
   }
 
-  renderAlerts(buildAlerts(lines, s));
+  renderAlerts(st ? storedAlerts(lines, s, st) : buildAlerts(lines, s));
   renderStoreBars(s.byStore);
   renderChannelDonut(s.byChannel);
   renderShippingScreen(s);
   renderReports(lines, s, openReport);
+  if (st) { const b = document.querySelector('[data-report="subpl"]'); if (b) { b.disabled = true; b.textContent = 'CSV upload only'; b.title = 'Needs the subscription delivery detail of a CSV upload; it is not stored with the weekly results.'; } }
   renderChannelBreakdown(s, Object.values(s.byChannel).reduce((a, v) => a + v.revenue, 0));
+  renderVendorBreakdown();
   buildFilters(lines);
   renderQuickChips();
   filterTable();
 }
 
 let _lastSummary = null;
+
+/** Alerts for an automatic report: the CSV report's alerts, worded for stored results, plus coverage. */
+function storedAlerts(lines, s, st) {
+  const out = buildAlerts(lines, s).map(a => a.kicker === 'Missing cost data'
+    ? { ...a, body: 'Operating GP includes the revenue of these lines but deducts no cost for them, so it can be overstated. Add the costs in the Products Master; the next weekly run picks them up.' } : a);
+  const t = st.agg.totals, need = t.ordersRequiringShipStationRate, have = t.ordersWithValidShipStationRate;
+  if (need && have / need < 0.95) out.push({ kicker: 'Shipping cost coverage', tone: 'var(--gp-neg)', value: `${(have / need * 100).toFixed(1)}%`,
+    body: `${need - have} of ${need} orders have no ShipStation cost yet; their shipping is not in GP, so GP after shipping is overstated.`, action: 'Open shipping', onClick: "gotoScreen('shipping')" });
+  if (!st.disc.complete) out.push({ kicker: `Partial ${st.kind}`, tone: 'var(--gp-warn)', value: `${st.disc.covered} of ${st.disc.periodDays} days`,
+    body: 'Some days have no published weekly report; the figures cover the published days only.', action: 'See coverage', onClick: "document.getElementById('c3-disclosure').scrollIntoView({behavior:'smooth'})" });
+  return out;
+}
 
 /** Alert CTA: land on the channel table with that channel filtered. */
 window.inspectChannel = (name) => {
@@ -2177,7 +2603,8 @@ function renderChannelBreakdown(s, totChRev) {
 
   let body = '';
   for (const [ch, cv] of channels) {
-    const gpPctV = cv.revenue > 0 ? cv.gp / cv.revenue * 100 : 0;
+    // Automatic reports: known-cost margin (revenue without a cost is not in GP).
+    const gpPctV = cv.margin !== undefined ? (cv.margin ?? 0) : (cv.revenue > 0 ? cv.gp / cv.revenue * 100 : 0);
     const stores = Object.entries((s.byChannelStore || {})[ch] || {})
       .map(([name, v]) => ({ name, ...v }));
     const byRev = [...stores].sort((a, b) => b.revenue - a.revenue)[0];
@@ -2203,7 +2630,8 @@ function renderChannelBreakdown(s, totChRev) {
   }
 
   const totGp = channels.reduce((a, [, v]) => a + v.gp, 0);
-  const totPct = totChRev > 0 ? totGp / totChRev * 100 : 0;
+  const knownRev = channels.reduce((a, [, v]) => a + (v.knownRevenue ?? v.revenue), 0);
+  const totPct = storedState ? (knownRev > 0 ? totGp / knownRev * 100 : 0) : (totChRev > 0 ? totGp / totChRev * 100 : 0);
 
   wrap.innerHTML = `
     <div class="gp-card">
@@ -2228,6 +2656,7 @@ function renderChannelBreakdown(s, totChRev) {
         <p class="gp-note"><strong>Subscription renewals (prepaid)</strong> holds the delivery legs of
         subscriptions charged in full on the order that started them: fulfilment cost with no revenue of
         their own, so that row shows a loss by design. Their unit economics are in Reports.</p>
+        ${storedState ? '<p class="gp-note">Automatic report: gross profit and GP % here are known-cost product GP (product lines with a known cost). Revenue without a cost is in the Revenue column but not in this GP. The headline operating GP includes that revenue with no cost deducted, so it can be overstated.' : ''}
       </div>
     </div>`;
 }
@@ -2276,6 +2705,7 @@ window.filterTable = () => {
     if (dateFrom && li.date && li.date < dateFrom) return false;
     if (dateTo   && li.date && li.date > dateTo)   return false;
     if (q && !`${li.orderNum} ${li.sku} ${li.product} ${li.store}`.toLowerCase().includes(q)) return false;
+    if (refundFilter !== 'all' && !matchesRefundFilter(refundIdx.get(li.orderNum)?.status, refundFilter)) return false;
     return true;
   });
 
@@ -2290,10 +2720,13 @@ window.filterTable = () => {
 
   currentPage = 1;
   const miss = filteredLines.filter(l => l.costSource === 'COST MISSING').length;
+  const nOrders = new Set(filteredLines.map(l => l.orderNum)).size;
   document.getElementById('row-count').textContent =
-    `${filteredLines.length.toLocaleString()} rows` + (miss ? ` · ${miss} missing cost` : '');
+    `${filteredLines.length.toLocaleString()} rows · ${nOrders.toLocaleString()} orders` + (miss ? ` · ${miss} missing cost` : '')
+    + (refundFilter !== 'all' ? ` · filtered: ${REFUND_FILTERS[refundFilter].toLowerCase()}` : '');
+  const rn = document.getElementById('refund-filter-note'); if (rn) rn.textContent = refundFilterNote();
   renderPage();
-  const pane = QUICK_VIEW[quickFilter] || tableView;
+  const pane = currentPane();
   if (pane === 'order')      renderOrderView();
   if (pane === 'sub')        renderSubView();
   if (pane === 'lowmargin')  renderLowMarginView();
@@ -2301,6 +2734,7 @@ window.filterTable = () => {
   if (pane === 'giftcard')   renderGiftCardView();
   if (pane === 'influencer') renderInfluencerView();
   if (pane === 'freeship')   renderFreeShipView();
+  if (pane === 'refunds')    renderRefundView();
   // HPD and APS read their own uploads, not filteredLines — no re-render on filter change
 };
 
@@ -2384,7 +2818,7 @@ function updateSkuTotals() {
   const gpPct    = t.lineRevenue ? Math.round(t.lineGp    / t.lineRevenue * 1000) / 10 : null;
   const netGpPct = (!hasMissNetGp && t.lineRevenue) ? Math.round(t.lineNetGp / t.lineRevenue * 1000) / 10 : null;
   document.getElementById('sku-tfoot').innerHTML = `<tr class="totals-row">
-    <td colspan="6">Total (${rows.length.toLocaleString()} rows)</td>
+    <td colspan="6">${refundFilter !== 'all' ? `Filtered subtotal — ${REFUND_FILTERS[refundFilter].toLowerCase()} (${rows.length.toLocaleString()} rows)` : `Total (${rows.length.toLocaleString()} rows)`}</td>
     <td class="num">${t.qty}</td>
     <td class="num">${fmt(t.lineRevenue)}</td>
     <td class="num ${hasMissCogs?'missing':''}">${hasMissCogs?'~':''}${fmt(t.lineCogs)}</td>
@@ -2406,7 +2840,7 @@ function updateOrderTotals(rows, tfootId) {
   const gpPct    = t.revenue ? Math.round(t.gp    / t.revenue * 1000) / 10 : null;
   const netGpPct = (!hasMissNetGp && t.revenue) ? Math.round(t.netGp / t.revenue * 1000) / 10 : null;
   document.getElementById(tfootId).innerHTML = `<tr class="totals-row">
-    <td colspan="4">Total (${rows.length.toLocaleString()} orders)</td>
+    <td colspan="4">${refundFilter !== 'all' ? `Filtered subtotal — ${REFUND_FILTERS[refundFilter].toLowerCase()} (${rows.length.toLocaleString()} orders)` : `Total (${rows.length.toLocaleString()} orders)`}</td>
     <td class="num">${t.lineCount}</td>
     <td class="num">${fmt(t.revenue)}</td>
     <td class="num ${hasMissCogs?'missing':''}">${hasMissCogs?'~':''}${fmt(t.cogs)}</td>
@@ -2456,8 +2890,8 @@ function deltaClass(v) { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg
 
 // ─── New files / clear dates ──────────────────────────────────────
 window.newFiles = () => {
-  document.getElementById('dashboard').style.display = 'none';
-  document.getElementById('upload-screen').style.display = '';
+  if (storedState) { const mode = storedState.kind; storedState = null; setStoredChrome(null); window.openSaved(mode); return; }   // back to the list; CSV selections stay
+  window.openUpload();
   // Reset file inputs and saved selections
   ordersFiles = []; shipFile = null; costsFile = null; hpdFile = null;
   savedOrdersTexts = null; savedShipText = null; savedCostsText = null; savedHpdText = null;
@@ -2630,14 +3064,18 @@ const QUICK_VIEW = { lowmargin: 'lowmargin', lowsku: 'lowsku', giftcard: 'giftca
                      sub: 'sub', influencer: 'influencer', freeship: 'freeship',
                      hpd: 'hpd', aps: 'aps' };
 const ALL_PANES = ['sku','order','sub','subpl','lowmargin','giftcard','influencer',
-                   'freeship','hpd','aps','lowsku'];
+                   'freeship','hpd','aps','lowsku','refunds'];
+// The Refunded orders filter shows the refund table where the order table would be.
+const currentPane = () => { const p = QUICK_VIEW[quickFilter] || tableView; return p === 'order' && refundFilter === 'refunded' ? 'refunds' : p; };
+// Panes that need inputs automatic reports do not store (subscription delivery detail, HPD log, mapping export).
+const CSV_ONLY = new Set(['sub', 'hpd', 'aps']);
 
 let tableView = 'sku', quickFilter = 'all';
 
 function renderQuickChips() {
   const el = document.getElementById('quick-chips');
   if (!el) return;
-  el.innerHTML = QUICK.map(([id, label]) =>
+  el.innerHTML = QUICK.filter(([id]) => !(storedState && CSV_ONLY.has(id))).map(([id, label]) =>
     `<button class="gp-chip" data-quick="${id}" aria-pressed="${id === quickFilter}">${label}</button>`).join('');
   el.querySelectorAll('[data-quick]').forEach(b =>
     b.addEventListener('click', () => setQuick(b.dataset.quick)));
@@ -2667,7 +3105,8 @@ window.setQuick = (id) => {
 function applyQuick() {
   const costSel = document.getElementById('filter-cost');
   if (costSel) costSel.value = quickFilter === 'missing' ? 'missing' : '';
-  const pane = QUICK_VIEW[quickFilter] || tableView;
+  if (storedState && CSV_ONLY.has(quickFilter)) quickFilter = 'all';
+  const pane = currentPane();
   showPane(pane);
   filterTable();
   if (pane === 'order')      renderOrderView();
@@ -2714,7 +3153,7 @@ function computeOrderRows(lines) {
       map.set(li.orderNum, {
         orderNum: li.orderNum, date: li.date, source: li.source || '',
         orderCat: li.orderCat || '', lineCount: 0,
-        revenue: 0, cogs: 0, netGp: 0, netGpHasNull: false,
+        revenue: 0, knownRevenue: 0, cogs: 0, netGp: 0, netGpHasNull: false,
         shipCollected: li.shipCollected, shipPaid: li.shipPaid, shipDelta: li.shipDelta,
         shipNote: li.shipNote || '',
         missingCost: false, hasShip: li.shipDelta !== null,
@@ -2724,7 +3163,7 @@ function computeOrderRows(lines) {
     const o = map.get(li.orderNum);
     o.lineCount++;
     o.revenue = Math.round((o.revenue + (li.lineRevenue || 0)) * 100) / 100;
-    if (li.lineCogs !== null) o.cogs = Math.round((o.cogs + li.lineCogs) * 100) / 100;
+    if (li.lineCogs !== null) { o.cogs = Math.round((o.cogs + li.lineCogs) * 100) / 100; o.knownRevenue = Math.round((o.knownRevenue + (li.lineRevenue || 0)) * 100) / 100; }
     else o.missingCost = true;
     if (li.lineNetGp !== null) o.netGp = Math.round((o.netGp + li.lineNetGp) * 100) / 100;
     else o.netGpHasNull = true;
@@ -2733,8 +3172,10 @@ function computeOrderRows(lines) {
     if ((li.subMonths || 1) > o.maxSubMonths) o.maxSubMonths = li.subMonths;
   }
   for (const o of map.values()) {
-    o.gp      = Math.round((o.revenue - o.cogs) * 100) / 100;
-    o.gpPct   = o.revenue ? Math.round(o.gp / o.revenue * 1000) / 10 : null;
+    // Automatic reports: known-cost GP (a line without a cost adds no profit).
+    const base = storedState ? o.knownRevenue : o.revenue;
+    o.gp      = Math.round((base - o.cogs) * 100) / 100;
+    o.gpPct   = base ? Math.round(o.gp / base * 1000) / 10 : null;
     o.netGpPct = (!o.netGpHasNull && o.revenue) ? Math.round(o.netGp / o.revenue * 1000) / 10 : null;
     if (o.netGpHasNull) o.netGp = null;
   }
@@ -2907,6 +3348,7 @@ window.sortSubPL = key => {
 };
 
 function renderSubPLView() {
+  if (storedState) { const v = document.getElementById('view-subpl'); if (v) v.style.display = 'none'; return; }
   const subLines = filteredLines.filter(l => /^(SUB|GSUB)/i.test(l.sku || ''));
 
   // One row per subscription TYPE — per-delivery unit economics
@@ -4468,19 +4910,15 @@ window.calcMcgVolumeDiscount = function() {
     return '8+';
   }
 
-  // ── Build per-order MCG stats from actual data ──
-  const orderMap = new Map();
-  for (const li of allLines) {
-    if (!(li.store || '').includes('Succulents Box')) continue;
-    if (!orderMap.has(li.orderNum)) {
-      orderMap.set(li.orderNum, { mcgQty: 0, revenue: 0, netGp: 0, _null: false });
-    }
-    const o = orderMap.get(li.orderNum);
-    o.mcgQty  += li.qty || 1;
-    o.revenue += li.lineRevenue || 0;
-    if (li.lineNetGp !== null) o.netGp += li.lineNetGp; else o._null = true;
+  // ── Per order: plants eligible for the MCG volume discount, by the engine's rule (js/scenarioModels.js).
+  //    Packs and random/Mystery plants (MCG pack sheet SKUs) are never eligible; an order with none is in no tier.
+  const packTable = _costTables.mcgPack;
+  if (!hasPackTable(packTable)) {
+    resultEl.innerHTML = '<p style="color:var(--yellow)">The MCG pack table (mcg_pack.json) is not loaded, so packs and random/Mystery plants cannot be told apart from individual plants. No savings are projected; re-run the build if this is unexpected.</p>';
+    return;
   }
-
+  const vol = mcgVolumeOrders(allLines, packTable);
+  const orderMap = new Map([...vol.orders].map(([k, o]) => [k, { mcgQty: o.plants, revenue: o.revenue, netGp: o.netGp, _null: o.netGpIncomplete }]));
   // Compute per-tier averages from actual data
   const buckets = { '1': [], '2–3': [], '4–7': [], '8+': [] };
   for (const o of orderMap.values()) buckets[tierKey(o.mcgQty)].push(o);
@@ -4587,7 +5025,8 @@ window.calcMcgVolumeDiscount = function() {
   const dCur  = curGpNew  !== null && totGpPct !== null ? curGpNew  - totGpPct : null;
   const dProj = projGpNew !== null && totGpPct !== null ? projGpNew - totGpPct : null;
 
-  html = `<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px">
+  html = `<p class="gp-note" style="margin-bottom:12px">Eligible plants only: packs and random/Mystery plants on the MCG pack sheet get no volume discount (their sheet cost is final)${vol.excluded.units ? ` — ${vol.excluded.units} such unit${vol.excluded.units === 1 ? '' : 's'} in ${vol.excluded.orders} order${vol.excluded.orders === 1 ? '' : 's'} excluded` : ''}. Pots, wholesale, subscriptions and rack SKUs are excluded as in the engine.</p>
+  <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:20px">
     <div class="card">
       <div class="label">Baseline GP% (all orders)</div>
       <div class="value">${totGpPct !== null ? totGpPct.toFixed(1)+'%' : '—'}</div>
@@ -5254,34 +5693,11 @@ window.calcApsProjection = function() {
 
 // ─── Projection View ─────────────────────────────────────────────
 
-function projLookupCost(sku, product) {
-  const k = (sku || '').trim().toUpperCase();
-  if (!k) return null;
-  // Gift cards have $0 COGS
-  if (/^GC\d/i.test(k)) return 0;
-  // MCG Total sheet (exact SKU match)
-  if (_projMcgCosts[k]       !== undefined) return _projMcgCosts[k];
-  // Pot SKU suffix variant (e.g. EEZZ7650.WH → try EEZZ7650)
-  if (k.includes('.')) {
-    const base = k.split('.')[0];
-    if (_projMcgCosts[base] !== undefined) return _projMcgCosts[base];
-  }
-  // Product costs (exact SKU)
-  if (_projProductCosts[k]   !== undefined) return _projProductCosts[k];
-  // Additional/manual costs
-  if (_projAdditionalCosts[k] !== undefined) return _projAdditionalCosts[k];
-  // SKU alias lookup
-  if (_projSkuAlias && _projSkuAlias[k] && _projSkuAlias[k] !== k)
-    return projLookupCost(_projSkuAlias[k], product);
-  // HP by product name (for numeric variant-ID SKUs)
-  if (_projHpByName && product && /^\d+$/.test(k)) {
-    const norm = (product || '').toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim();
-    if (_projHpByName[norm] !== undefined) return _projHpByName[norm];
-    for (const [hk, hv] of Object.entries(_projHpByName)) {
-      if (norm.startsWith(hk)) return hv;
-    }
-  }
-  return null;
+/** Unit cost for a projection row: known-cost sales first, else the engine's resolver over every table
+ *  (MCG pack sheet included). null = unknown; it stays unknown (never $0). */
+function projUnitCost(lines, sku, product) {
+  const vendor = (lines || []).map(l => l.vendor).find(Boolean) || '';
+  return projectionUnitCost(lines, sku, product, vendor, _costTables).cost;
 }
 
 window.addProjFromData = function() {
@@ -5308,10 +5724,7 @@ window.addProjFromData = function() {
     const totalQty = grp.lines.reduce((s, l) => s + (l.qty || 0), 0);
     const totalRev = grp.lines.reduce((s, l) => s + (l.lineRevenue || 0), 0);
     // Cost per unit: avg from known-cost lines, else look up from cost tables
-    const costLines = grp.lines.filter(l => l.lineCogs !== null && l.qty > 0);
-    const costPerUnit = costLines.length
-      ? Math.round(costLines.reduce((s,l)=>s+l.lineCogs,0) / costLines.reduce((s,l)=>s+l.qty,0) * 100) / 100
-      : (projLookupCost(grp.sku, grp.product) ?? 0);
+    const costPerUnit = projUnitCost(grp.lines, grp.sku, grp.product);
     const avgSellPrice = totalQty > 0 ? Math.round(totalRev / totalQty * 100) / 100 : 0;
     // Store/type label
     const types = [...new Set(grp.lines.map(l => l.store || ''))].filter(Boolean).join(', ');
@@ -5333,7 +5746,7 @@ window.addProjFromData = function() {
 
 window.addProjManual = function() {
   const raw = (document.getElementById('proj-search').value || '').trim().toUpperCase();
-  const cost = projLookupCost(raw, '') ?? 0;
+  const cost = projUnitCost([], raw, '');
   projRows.push({
     id: projNextId++,
     sku: raw,
@@ -5357,7 +5770,7 @@ window.updateProjField = function(id, field, val) {
   const row = projRows.find(r => r.id === id);
   if (!row) return;
   const n = parseFloat(val);
-  row[field] = isNaN(n) ? 0 : n;
+  row[field] = isNaN(n) ? (field === 'costPerUnit' ? null : 0) : n;   // an empty cost is unknown, not $0
   refreshProjComputed();
 };
 
@@ -5411,7 +5824,8 @@ function renderProjView() {
                oninput="updateProjField(${r.id},'sellPrice',this.value)">
       </td>
       <td class="num">
-        <input class="proj-input" type="number" min="0" step="0.01" value="${r.costPerUnit}"
+        <input class="proj-input${r.costPerUnit === null ? ' needs-price' : ''}" type="number" min="0" step="0.01"
+               value="${r.costPerUnit === null ? '' : r.costPerUnit}" placeholder="unknown" title="${r.costPerUnit === null ? 'Cost unknown: enter it to include this SKU in GP' : ''}"
                oninput="updateProjField(${r.id},'costPerUnit',this.value)">
       </td>
       <td class="num" id="proj-rev-${r.id}">—</td>
@@ -5430,46 +5844,33 @@ function renderProjView() {
 
 // Updates only the computed read-only cells + summary cards + footer (preserves input focus)
 function refreshProjComputed() {
-  let tRev = 0, tCogs = 0, tQty = 0;
-
+  // Unknown costs stay unknown (js/scenarioModels.js projectionTotals): a row without a cost has revenue but
+  // no cost and no GP; GP and GP % are known-cost and marked incomplete when any cost is unknown.
+  const T = projectionTotals(projRows, allLines);
+  const byId = new Map(T.rows.map(x => [x.id, x]));
+  let tQty = 0;
   for (const r of projRows) {
-    const rev  = Math.round(r.qty * r.sellPrice  * 100) / 100;
-    const cogs = Math.round(r.qty * r.costPerUnit * 100) / 100;
-    const gp   = Math.round((rev - cogs) * 100) / 100;
-    const gpPct = rev > 0 ? Math.round(gp / rev * 1000) / 10 : null;
-    tRev += rev; tCogs += cogs; tQty += r.qty;
-
+    const x = byId.get(r.id); tQty += r.qty;
     const revEl    = document.getElementById(`proj-rev-${r.id}`);
     const cogsEl   = document.getElementById(`proj-cogs-${r.id}`);
     const gpEl     = document.getElementById(`proj-gp-${r.id}`);
     const pctEl    = document.getElementById(`proj-pct-${r.id}`);
     const priceEl  = document.getElementById(`proj-price-${r.id}`);
-    if (revEl)   revEl.textContent  = fmt(rev);
-    if (cogsEl)  cogsEl.textContent = fmt(cogs);
-    if (gpEl)    { gpEl.textContent = fmt(gp);  gpEl.className  = `num ${gpClass(gp)}`; }
-    if (pctEl)   { pctEl.textContent = gpPct !== null ? gpPct.toFixed(1)+'%' : '—';
-                   pctEl.className  = `num ${gpClass(gpPct)}`; }
+    if (revEl)   revEl.textContent  = fmt(x.rev);
+    if (cogsEl)  { cogsEl.textContent = x.cogs === null ? 'unknown' : fmt(x.cogs); cogsEl.classList.toggle('missing', x.cogs === null); }
+    if (gpEl)    { gpEl.textContent = x.gp === null ? '—' : fmt(x.gp);  gpEl.className  = `num ${x.gp === null ? '' : gpClass(x.gp)}`; }
+    if (pctEl)   { pctEl.textContent = x.gpPct !== null ? x.gpPct.toFixed(1)+'%' : '—';
+                   pctEl.className  = `num ${gpClass(x.gpPct)}`; }
     // Yellow highlight on sell price when still 0 — clears as soon as user types a value
     if (priceEl)  priceEl.classList.toggle('needs-price', r.sellPrice === 0);
   }
-
-  tRev  = Math.round(tRev  * 100) / 100;
-  tCogs = Math.round(tCogs * 100) / 100;
-  const tGp    = Math.round((tRev - tCogs) * 100) / 100;
-  const tGpPct = tRev > 0 ? Math.round(tGp / tRev * 1000) / 10 : null;
-
-  // ── Current baseline from allLines ──
-  const curRev  = Math.round(allLines.reduce((s,l) => s + (l.lineRevenue || 0), 0) * 100) / 100;
-  const curCogs = Math.round(allLines.reduce((s,l) => s + (l.lineCogs    || 0), 0) * 100) / 100;
-  const curGp   = Math.round((curRev - curCogs) * 100) / 100;
-  const curGpPct = curRev > 0 ? Math.round(curGp / curRev * 1000) / 10 : null;
+  const P = T.proj, B = T.base, C = T.com;
+  const tRev = P.rev, tCogs = P.cogs, tGp = P.gp, tGpPct = P.gpPct;
+  const curRev = B.rev, curGp = B.gp, curGpPct = B.gpPct;
   const hasBaseline = allLines.length > 0;
-
-  // ── Combined ──
-  const comRev  = Math.round((curRev  + tRev)  * 100) / 100;
-  const comCogs = Math.round((curCogs + tCogs) * 100) / 100;
-  const comGp   = Math.round((comRev - comCogs) * 100) / 100;
-  const comGpPct = comRev > 0 ? Math.round(comGp / comRev * 1000) / 10 : null;
+  const comRev = C.rev, comGp = C.gp, comGpPct = C.gpPct;
+  const inc = (x, what) => !x.incomplete ? '' : `<div class="sub" style="font-size:.68rem;margin-top:4px;color:var(--yellow)">Incomplete: ${
+    x.revWithoutCost > 0 ? `${fmt(x.revWithoutCost)} of revenue ${what} has no known cost (not in GP)` : `${what.replace(/^in /, '')} ${x.unknownRows === 1 ? 'has' : 'have'} no known cost yet (enter it to include it in GP)`}</div>`;
 
   // GP% delta (combined vs current)
   const gpPctDelta = (comGpPct !== null && curGpPct !== null)
@@ -5497,8 +5898,9 @@ function refreshProjComputed() {
               <div class="value" style="font-size:1.1rem">${fmt(curRev)}</div>
             </div>
             <div class="card" style="flex:1;min-width:120px">
-              <div class="label">GP $</div>
+              <div class="label">GP $${B.incomplete ? ' (known costs)' : ''}</div>
               <div class="value" style="font-size:1.1rem ${gpClass(curGp)?'color:var(--green)':''}">${fmt(curGp)}</div>
+              ${inc(B, 'in the report')}
             </div>
             <div class="card" style="flex:1;min-width:100px">
               <div class="label">GP%</div>
@@ -5520,9 +5922,10 @@ function refreshProjComputed() {
               <div class="value" style="font-size:1.1rem;color:var(--accent2)">${fmt(tRev)}</div>
             </div>
             <div class="card" style="flex:1;min-width:120px;border-color:var(--accent2)">
-              <div class="label">+ GP $</div>
+              <div class="label">+ GP $${P.incomplete ? ' (known costs)' : ''}</div>
               <div class="value" style="font-size:1.1rem;color:var(--accent2)">${fmt(tGp)}</div>
               <div class="sub">${tGpPct !== null ? tGpPct.toFixed(1)+'% margin' : ''}</div>
+              ${inc(P, `in ${P.unknownRows} projected SKU${P.unknownRows === 1 ? '' : 's'}`)}
             </div>
             <div class="card" style="flex:1;min-width:100px;border-color:var(--accent2)">
               <div class="label">+ COGS</div>
@@ -5547,8 +5950,9 @@ function refreshProjComputed() {
               </div>
             </div>
             <div class="card accent" style="flex:1;min-width:120px">
-              <div class="label">GP $</div>
+              <div class="label">GP $${C.incomplete ? ' (known costs)' : ''}</div>
               <div class="value" style="font-size:1.1rem">${fmt(comGp)}</div>
+              ${inc(C, 'in total')}
             </div>
             <div class="card accent" style="flex:1;min-width:100px">
               <div class="label">GP%</div>
@@ -5572,8 +5976,9 @@ function refreshProjComputed() {
         <div class="value" style="font-size:1.3rem">${fmt(tCogs)}</div>
       </div>
       <div class="card accent">
-        <div class="label">Projected GP $</div>
+        <div class="label">Projected GP $${P.incomplete ? ' (known costs)' : ''}</div>
         <div class="value" style="font-size:1.3rem">${fmt(tGp)}</div>
+        ${inc(P, `in ${P.unknownRows} projected SKU${P.unknownRows === 1 ? '' : 's'}`)}
       </div>
       <div class="card ${gpCardCls}">
         <div class="label">Projected GP%</div>
@@ -5586,8 +5991,8 @@ function refreshProjComputed() {
     <td class="num">${tQty.toLocaleString()}</td>
     <td></td><td></td>
     <td class="num">${fmt(tRev)}</td>
-    <td class="num">${fmt(tCogs)}</td>
-    <td class="num ${gpClass(tGp)}">${fmt(tGp)}</td>
+    <td class="num">${P.incomplete ? '~' : ''}${fmt(tCogs)}</td>
+    <td class="num ${gpClass(tGp)}" title="${P.incomplete ? 'Known-cost GP: rows with an unknown cost are not in GP' : ''}">${P.incomplete ? '~' : ''}${fmt(tGp)}</td>
     <td class="num ${gpClass(tGpPct)}">${tGpPct !== null ? tGpPct.toFixed(1)+'%' : '—'}</td>
     <td></td>
   </tr>`;
@@ -5681,10 +6086,7 @@ window.handleProjCsvImport = async function(input) {
       for (const [, grp] of bySkuMap) {
         const totalQty = grp.lines.reduce((s,l) => s + (l.qty || 0), 0);
         const totalRev = grp.lines.reduce((s,l) => s + (l.lineRevenue || 0), 0);
-        const costLines = grp.lines.filter(l => l.lineCogs !== null && l.qty > 0);
-        const costPerUnit = costLines.length
-          ? Math.round(costLines.reduce((s,l)=>s+l.lineCogs,0) / costLines.reduce((s,l)=>s+l.qty,0) * 100) / 100
-          : (projLookupCost(grp.sku, grp.product) ?? 0);
+        const costPerUnit = projUnitCost(grp.lines, grp.sku, grp.product);
         const avgSellPrice = !isNaN(csvPrice) ? csvPrice
           : (totalQty > 0 ? Math.round(totalRev / totalQty * 100) / 100 : 0);
         const types = [...new Set(grp.lines.map(l => l.store || ''))].filter(Boolean).join(', ');
@@ -5696,7 +6098,7 @@ window.handleProjCsvImport = async function(input) {
       }
     } else {
       // No match — add as manual row, cost from tables
-      const cost      = projLookupCost(item.sku, item.name) ?? 0;
+      const cost      = projUnitCost([], item.sku, item.name);
       const sellPrice = !isNaN(csvPrice) ? csvPrice : 0;
       projRows.push({
         id: projNextId++,
