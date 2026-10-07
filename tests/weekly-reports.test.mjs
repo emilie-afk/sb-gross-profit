@@ -4,7 +4,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderWeekList, renderWeek, renderOrders, renderLines, renderSignIn, isProvisional, createWeeklyReports, shippingCoverageText, reportFlagsText } from '../js/weeklyReports.js';
+import { renderWeekList, renderWeek, renderOrders, renderLines, isProvisional, createWeeklyReports, shippingCoverageText, reportFlagsText } from '../js/weeklyReports.js';
 import * as client from '../js/workerClient.js';
 
 const week = {
@@ -47,22 +47,19 @@ const fakeRoot = () => {
 };
 const err = status => Object.assign(new Error('x'), { status });
 
-test('weekly reports: signed out → sign-in form; signed in → weeks; a week opens with orders and expandable lines', async () => {
+test('weekly reports: no second password — weeks load directly; a week opens with orders and expandable lines', async () => {
   const calls = [];
-  let signedIn = false;
   const c = {
-    weeks: async () => { calls.push('weeks'); if (!signedIn) throw err(401); return { weeks: [{ weekStart: '2026-09-21', revisions: [{ status: 'published' }] }] }; },
-    login: async pw => { calls.push('login'); if (pw !== 'right') throw err(401); signedIn = true; },
+    weeks: async () => { calls.push('weeks'); return { weeks: [{ weekStart: '2026-09-21', revisions: [{ status: 'published' }] }] }; },
+    login: async () => { calls.push('login'); throw new Error('the dashboard never signs in to the Worker'); },
     snapshot: async w => { calls.push(`snapshot ${w}`); return week; },
     orders: async (w, o) => { calls.push(`orders ${w} ${o.offset}`); return { orders: [{ orderName: '#1001' }], page: { total: 1 } }; },
     order: async (w, n) => { calls.push(`order ${n}`); return { lines: [{ sku: 'MG-1' }] }; },
   };
   const root = fakeRoot(), ui = createWeeklyReports(root, c);
+  assert.equal(ui.signIn, undefined, 'no sign-in step');
   await ui.load();
-  assert.ok(root.innerHTML.includes('type="password"'));
-  await ui.signIn('wrong');
-  assert.ok(root.innerHTML.includes('That password was not accepted.'));
-  await ui.signIn('right');
+  assert.ok(!root.innerHTML.includes('type="password"'));
   assert.ok(root.innerHTML.includes('2026-09-21'));
   await ui.openWeek('2026-09-21');
   assert.ok(root.innerHTML.includes('Provisional operating GP after shipping'));
@@ -71,8 +68,14 @@ test('weekly reports: signed out → sign-in form; signed in → weeks; a week o
   assert.equal(root._lines.hidden, false);
   assert.ok(root._lines.firstElementChild.innerHTML.includes('MG-1'));
   await ui.openWeek('not-a-week');
-  assert.deepEqual(calls, ['weeks', 'login', 'login', 'weeks', 'snapshot 2026-09-21', 'orders 2026-09-21 0', 'order #1001']);
-  assert.ok(renderSignIn('<x>').includes('&lt;x&gt;'));
+  assert.deepEqual(calls, ['weeks', 'snapshot 2026-09-21', 'orders 2026-09-21 0', 'order #1001']);
+});
+
+test('weekly reports: a refused read (401) says access is not set up and never shows a password form', async () => {
+  const root = fakeRoot(), ui = createWeeklyReports(root, { weeks: async () => { throw err(401); } });
+  await ui.load();
+  assert.ok(!root.innerHTML.includes('type="password"') && !/password was not accepted/i.test(root.innerHTML));
+  assert.ok(root.innerHTML.includes('access to the weekly reports is not set up yet'));
 });
 
 test('weekly reports: the client only builds dashboard routes and caps a page at 100 orders', async () => {

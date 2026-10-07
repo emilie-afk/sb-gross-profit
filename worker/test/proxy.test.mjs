@@ -10,7 +10,8 @@ import worker from '../src/index.js';
 import { signSession } from '../src/auth.js';
 import { createProxy } from '../../netlify/edge-functions/api-proxy.js';
 import { workerApi, login, logout, session } from '../../js/workerClient.js';
-import { PASSWORD, WEEK, makeEnv, loaded, admin } from './helpers.mjs';
+import { PASSWORD, WEEK, makeEnv, loaded, admin, call, rnd, sessionCookie } from './helpers.mjs';
+import nodeCrypto from 'node:crypto';
 
 const SITE = 'https://sb-profit.netlify.app';
 const WORKER = 'https://sb-gp-worker.example.workers.dev';
@@ -112,7 +113,7 @@ test('C7: the dashboard reads the weekly automation status through the proxy; cy
   await worker.scheduled({ scheduledTime: Date.parse('2026-09-21T08:30:00Z') }, env, null);
   const b = browser(env);
   await assert.rejects(automationStatus(WEEK, { fetchImpl: b.fetchImpl }), e => e.status === 401);
-  assert.match(automationStatusError({ status: 401 }), /Sign in/);
+  assert.match(automationStatusError({ status: 401 }), /access to the weekly automation status is not set up/);
   await login(PASSWORD, { fetchImpl: b.fetchImpl });
   const s = await automationStatus(WEEK, { fetchImpl: b.fetchImpl });
   assert.equal(s.cycle.status, 'waiting_for_sources');
@@ -144,4 +145,58 @@ test('C8: rate limiting through the proxy — and the documented shared-lockout 
   await env.DB.prepare("UPDATE auth_attempt SET attempt_at = '2000-01-01T00:00:00.000Z'").run();
   await login(PASSWORD, { fetchImpl: b.fetchImpl });
   assert.ok(b.jar.has('sb_session'));
+});
+
+test('one sign-in: past the site-password gate, the proxy reads published weeks without a second password', async () => {
+  const SITE_PW = `site-${rnd()}`, gate = nodeCrypto.createHash('sha256').update(SITE_PW).digest('hex');
+  const { env } = await loaded(5, { DASHBOARD_READER_SECRET: rnd() });
+  assert.equal((await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK })).status, 200);   // a draft exists; nothing is published
+  const record = [];
+  const proxy = createProxy({ workerOrigin: WORKER, readerSecret: env.DASHBOARD_READER_SECRET, sitePassword: SITE_PW,
+                              fetchImpl: async req => { record.push(req); return worker.fetch(req, env); } });
+  const get = (p, headers = {}) => proxy(new Request(`${SITE}/api/v1${p}`, { headers }));
+  const withGate = { cookie: `__gp_session=${gate}` };
+
+  // Past the gate: the dashboard reads with no Worker session, exactly what a signed-in session sees.
+  const r = await get('/weeks', withGate);
+  assert.equal(r.status, 200);
+  const viaSession = await call(env, 'GET', '/v1/weeks', { cookie: await sessionCookie(env) });
+  assert.deepEqual(await r.json(), viaSession.json, 'same answer as a Worker session');
+  assert.equal(record.at(-1).headers.get('x-dashboard-reader-secret'), env.DASHBOARD_READER_SECRET);
+  // Published only: drafts stay invisible, even when asked for.
+  const draft = await get(`/snapshot/${WEEK}?includeDrafts=1`, withGate);
+  assert.deepEqual([draft.status, (await draft.json()).error], [404, 'not_published']);
+  assert.equal((await get(`/weeks/${WEEK}/status`, withGate)).status, 200);
+
+  // Not past the gate (no cookie, a wrong one, an old site password's): nothing is attached, the Worker refuses.
+  for (const headers of [{}, { cookie: '__gp_session=forged' }, { cookie: `__gp_session=${nodeCrypto.createHash('sha256').update('old-password').digest('hex')}` },
+                         { 'x-dashboard-reader-secret': env.DASHBOARD_READER_SECRET }]) {               // a browser cannot send it either
+    const res = await get('/weeks', headers);
+    assert.equal(res.status, 401, JSON.stringify(Object.keys(headers)));
+    assert.ok(!record.at(-1).headers.has('x-dashboard-reader-secret'));
+  }
+  // Auth routes and writes never carry it; admin and ingest routes stay unreachable.
+  await proxy(new Request(`${SITE}/api/v1/auth/login`, { method: 'POST', headers: { ...withGate, origin: SITE }, body: JSON.stringify({ password: 'x' }) }));
+  assert.ok(!record.at(-1).headers.has('x-dashboard-reader-secret'));
+  assert.equal((await get('/admin/settings', withGate)).status, 404);
+  // Fail closed: no site password or no reader secret configured on the proxy → nothing attached.
+  for (const cfg of [{ readerSecret: env.DASHBOARD_READER_SECRET }, { sitePassword: SITE_PW }]) {
+    const p2 = createProxy({ workerOrigin: WORKER, ...cfg, fetchImpl: req => worker.fetch(req, env) });
+    assert.equal((await p2(new Request(`${SITE}/api/v1/weeks`, { headers: withGate }))).status, 401);
+  }
+});
+
+test('the dashboard reader secret at the Worker: published reads only, one credential, configured and distinct', async () => {
+  const { env } = await loaded(5, { DASHBOARD_READER_SECRET: rnd() });
+  const R = { 'X-Dashboard-Reader-Secret': env.DASHBOARD_READER_SECRET };
+  assert.equal((await call(env, 'GET', '/v1/weeks', { headers: R })).status, 200);
+  assert.deepEqual([(await call(env, 'GET', '/v1/weeks', { headers: { 'X-Dashboard-Reader-Secret': rnd() } })).json.error], ['reader_auth']);
+  assert.equal((await call(env, 'GET', '/v1/weeks', { headers: { ...R, 'X-Admin-Secret': env.ADMIN_SECRET } })).status, 401, 'one credential at a time');
+  for (const [m, p] of [['GET', '/v1/admin/settings'], ['POST', '/v1/admin/runs'], ['GET', '/v1/ingest/week-plan'], ['GET', '/v1/collect/budget']]) {
+    assert.equal((await call(env, m, p, { headers: R, body: m === 'POST' ? { weekStart: WEEK } : undefined })).status, 401, `${m} ${p}`);
+  }
+  const unset = { ...env }; delete unset.DASHBOARD_READER_SECRET;
+  assert.deepEqual([(await call(unset, 'GET', '/v1/weeks', { headers: R })).json.error], ['reader_not_configured']);
+  assert.equal((await call({ ...env, DASHBOARD_READER_SECRET: env.ADMIN_SECRET }, 'GET', '/v1/weeks', { headers: { 'X-Dashboard-Reader-Secret': env.ADMIN_SECRET } })).status, 500);
+  assert.equal((await call({ ...env, DASHBOARD_READER_SECRET: 'short' }, 'GET', '/v1/weeks', { headers: { 'X-Dashboard-Reader-Secret': 'short' } })).status, 500);
 });

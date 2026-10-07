@@ -50,12 +50,11 @@ test('D1 daily limit: sign-in answers 503 d1_daily_limit_reached, never "wrong p
 
 test('D1 daily limit: the dashboard says what happened, with the reset in Vietnam time', () => {
   const quota = { status: 503, code: 'd1_daily_limit_reached', detail: { resetAt: '2026-10-07T00:00:00.000Z' } };
-  assert.equal(failureMessage(quota, { signIn: true }),
-    'The reporting service has used its free daily database allowance. It is available again after Wed 7 Oct, 07:00 (Vietnam time). Your password was not checked.');
-  assert.match(failureMessage(quota), /available again after Wed 7 Oct, 07:00/);
-  assert.equal(failureMessage({ status: 401 }, { signIn: true }), 'That password was not accepted.');
-  assert.match(failureMessage({ status: 429, code: 'rate_limited' }, { signIn: true }), /Too many sign-in attempts/);
+  assert.equal(failureMessage(quota),
+    'The reporting service has used its free daily database allowance. It is available again after Wed 7 Oct, 07:00 (Vietnam time).');
+  assert.equal(failureMessage({ status: 401 }), "The dashboard's access to the weekly reports is not set up yet.");
+  assert.equal(failureMessage({ status: 503, code: 'reader_not_configured' }), "The dashboard's access to the weekly reports is not set up yet.");
   assert.equal(failureMessage({ status: 503, code: 'proxy_not_configured' }), 'The dashboard is not connected to the reporting service yet.');
-  assert.equal(failureMessage({ status: 500, code: 'internal_error' }, { signIn: true }), 'Sign-in is unavailable right now.');
+  assert.equal(failureMessage({ status: 500, code: 'internal_error' }), 'The weekly reports are unavailable right now.');
   assert.equal(failureMessage(null), 'The weekly reports are unavailable right now.');
 });

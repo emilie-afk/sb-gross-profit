@@ -84,6 +84,10 @@ const CLASSES = {
   // Free-tier path: the independent verifier (Netlify Function gp-verify). It may read
   // pinned inputs and stored results and write one verification report — nothing else.
   verify: { header: 'X-Verify-Secret', key: 'VERIFY_SECRET', code: 'verify_auth' },
+  // The dashboard's own same-origin proxy (netlify/edge-functions/api-proxy.js), for published reads
+  // only. The proxy attaches it only after checking the site-password cookie, so the site password is
+  // the one sign-in; a browser can never send it (the proxy forwards no X-* headers).
+  reader: { header: 'X-Dashboard-Reader-Secret', key: 'DASHBOARD_READER_SECRET', code: 'reader_auth' },
 };
 
 function assertVerifyConfigured(env) {
@@ -93,12 +97,20 @@ function assertVerifyConfigured(env) {
   if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY].includes(v)) throw new ApiError(500, 'misconfigured', 'VERIFY_SECRET must differ from every other secret');
 }
 
+function assertReaderConfigured(env) {
+  const v = env.DASHBOARD_READER_SECRET;
+  if (!v) throw new ApiError(503, 'reader_not_configured', 'DASHBOARD_READER_SECRET is not set on this Worker');
+  if (String(v).length < 32) throw new ApiError(500, 'misconfigured', 'DASHBOARD_READER_SECRET must be at least 32 characters');
+  if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET].includes(v)) throw new ApiError(500, 'misconfigured', 'DASHBOARD_READER_SECRET must differ from every other secret');
+}
+
 /** Throws unless the request carries the secret for exactly this credential class. */
 export function requireSecret(request, env, cls) {
   assertConfigured(env);
   const c = CLASSES[cls];
   if (!c) throw new Error(`unknown credential class ${cls}`);
   if (cls === 'verify') assertVerifyConfigured(env);
+  if (cls === 'reader') assertReaderConfigured(env);
   const got = request.headers.get(c.header) || '';
   if (!got || !timingSafeEqual(got, env[c.key])) throw new ApiError(401, c.code, `Missing or invalid ${c.header}`);
 }
@@ -166,9 +178,15 @@ export async function requireSession(request, env) {
   return payload;
 }
 
-/** Session OR admin secret. Admin callers may read drafts; sessions only published snapshots. */
+/**
+ * Session, dashboard reader secret OR admin secret. Admin callers may read drafts; sessions and the
+ * dashboard reader only published snapshots. Two credentials at once are refused.
+ */
 export async function requireReader(request, env) {
-  if (request.headers.get('X-Admin-Secret')) { requireSecret(request, env, 'admin'); return { admin: true }; }
+  const adminH = request.headers.get('X-Admin-Secret'), readerH = request.headers.get(CLASSES.reader.header);
+  if (adminH && readerH) throw new ApiError(401, 'credential_required', 'Send one credential');
+  if (adminH) { requireSecret(request, env, 'admin'); return { admin: true }; }
+  if (readerH) { requireSecret(request, env, 'reader'); return { admin: false, reader: true }; }
   await requireSession(request, env);
   return { admin: false };
 }

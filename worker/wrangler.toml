@@ -8,6 +8,8 @@
 #   DASHBOARD_PASSWORD_HASH  output of tools/hash-password.mjs (never the password)
 #   VERIFY_SECRET            Free-tier verifier (gp-verify) routes (>= 32 chars, different;
 #                            optional: without it /v1/verify/* answers 503)
+#   DASHBOARD_READER_SECRET  the dashboard proxy's published reads (>= 32 chars, different; the same
+#                            value is Netlify's SB_WORKER_READER_SECRET; without it reads need a session)
 # See DEPLOYMENT.md → "Weekly automation Worker" and "Free-tier weekly path".
 
 name = "sb-gp-worker"

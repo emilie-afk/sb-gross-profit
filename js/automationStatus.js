@@ -79,7 +79,7 @@ export function renderAutomationStatus(s) {
 }
 
 export function automationStatusError(e) {
-  if (e?.status === 401) return 'Sign in to the Worker session to see the weekly automation status.';
+  if (e?.status === 401) return "The dashboard's access to the weekly automation status is not set up yet.";
   if (e?.status === 503) return 'The dashboard is not connected to the Worker yet.';
   return 'The weekly automation status is unavailable right now.';
 }

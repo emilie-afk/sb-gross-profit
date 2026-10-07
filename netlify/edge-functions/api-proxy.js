@@ -15,8 +15,16 @@
  *     site-password cookie, any X-*-Secret header and client IP headers are dropped.
  *   - POST requests must carry this site's own Origin (CSRF defence in depth).
  *
- * Configuration: SB_WORKER_ORIGIN (e.g. https://sb-gp-worker.<account>.workers.dev)
- * in Netlify environment variables. Unset → 503, nothing is forwarded.
+ * One sign-in: the site password. For the dashboard's published reads (GET, not auth routes) the
+ * proxy attaches the Worker's dashboard reader secret, but only after checking the site-password
+ * cookie itself (the same cookie the password gate sets), so a misordered or missing gate can never
+ * open the reports. The reader sees published weeks only, exactly like a session; drafts, ingest and
+ * admin routes stay unreachable. Without SB_WORKER_READER_SECRET or SITE_PASSWORD nothing is attached
+ * and the Worker refuses the read (401).
+ *
+ * Configuration (Netlify environment variables): SB_WORKER_ORIGIN (e.g.
+ * https://sb-gp-worker.<account>.workers.dev; unset → 503, nothing is forwarded),
+ * SB_WORKER_READER_SECRET (= the Worker's DASHBOARD_READER_SECRET) and SITE_PASSWORD (the gate's).
  * Declared in netlify.toml AFTER the password gate, so the site password is
  * still required first.
  */
@@ -32,11 +40,32 @@ const ROUTES = [
 const FORWARD = ['content-type', 'accept', 'origin'];
 const RETURN = ['content-type', 'cache-control', 'x-content-type-options', 'referrer-policy'];
 const SESSION_COOKIE = 'sb_session';
+const SITE_COOKIE = '__gp_session';                       // set by the password gate (auth.js): sha256(SITE_PASSWORD)
+const READER_HEADER = 'x-dashboard-reader-secret';
+const AUTH_ROUTE = /^\/v1\/auth\//;
+
+async function sha256Hex(str) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+const cookieOf = (request, name) => (request.headers.get('cookie') || '').split(';').map(c => c.trim()).find(c => c.startsWith(`${name}=`)) || null;
+/** Constant-time string comparison. */
+function sameString(a, b) {
+  const x = new TextEncoder().encode(String(a)), y = new TextEncoder().encode(String(b));
+  let d = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return d === 0;
+}
+/** The request carries the password gate's cookie for the current site password. */
+async function passedSiteGate(request, sitePassword) {
+  const c = cookieOf(request, SITE_COOKIE);
+  return !!(sitePassword && c) && sameString(c.slice(SITE_COOKIE.length + 1), await sha256Hex(sitePassword));
+}
 
 const reply = (status, error, message) => new Response(JSON.stringify({ error, message }), {
   status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' } });
 
-export function createProxy({ workerOrigin, fetchImpl = fetch }) {
+export function createProxy({ workerOrigin, readerSecret, sitePassword, fetchImpl = fetch }) {
   return async function proxy(request) {
     if (!workerOrigin || !/^https:\/\/[^/]+$/.test(workerOrigin)) return reply(503, 'proxy_not_configured', 'SB_WORKER_ORIGIN is not set');
     const url = new URL(request.url);
@@ -46,8 +75,9 @@ export function createProxy({ workerOrigin, fetchImpl = fetch }) {
 
     const headers = new Headers();
     for (const h of FORWARD) if (request.headers.has(h)) headers.set(h, request.headers.get(h));
-    const session = (request.headers.get('cookie') || '').split(';').map(c => c.trim()).find(c => c.startsWith(`${SESSION_COOKIE}=`));
+    const session = cookieOf(request, SESSION_COOKIE);
     if (session) headers.set('cookie', session);
+    if (request.method === 'GET' && !AUTH_ROUTE.test(path) && readerSecret && await passedSiteGate(request, sitePassword)) headers.set(READER_HEADER, readerSecret);
 
     const upstream = await fetchImpl(new Request(`${workerOrigin}${path}${url.search}`, {
       method: request.method, headers, redirect: 'manual',
@@ -64,4 +94,4 @@ export function createProxy({ workerOrigin, fetchImpl = fetch }) {
 
 const env = name => globalThis.Netlify?.env?.get?.(name) ?? globalThis.Deno?.env?.get?.(name);
 
-export default async request => createProxy({ workerOrigin: env('SB_WORKER_ORIGIN') })(request);
+export default async request => createProxy({ workerOrigin: env('SB_WORKER_ORIGIN'), readerSecret: env('SB_WORKER_READER_SECRET'), sitePassword: env('SITE_PASSWORD') })(request);

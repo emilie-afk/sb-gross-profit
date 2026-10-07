@@ -1,9 +1,10 @@
 /**
  * weeklyReports.js — the automated weekly reports, read from the production Worker
  * ===============================================================================
- * Read-only. Reaches the Worker only through workerClient.js (same-origin /api/v1 proxy, the
- * dashboard session cookie). Lists the weeks a signed-in session may see — published (or, once
- * approved, provisionally published) weeks; unpublished drafts never reach a session — and opens a
+ * Read-only. Reaches the Worker only through workerClient.js (same-origin /api/v1 proxy). The site
+ * password is the only sign-in: the proxy reads published weeks for anyone past the password gate, so
+ * there is no second password here. Lists the published (or, once approved, provisionally published)
+ * weeks — unpublished drafts never reach the dashboard — and opens a
  * week: headline figures with their labels, channel and vendor tables, and the orders with
  * expandable line items. No upload, no recompute, no customer fields (the Worker serves none).
  * Every value is escaped; money is shown as stored.
@@ -54,15 +55,6 @@ export function reportFlagsText(status) {
   if ((sr.changedDates || []).length) parts.push(`Late cost corrections on ${sr.changedDates.join(', ')}.`);
   if ((sr.omittedDates || []).length) parts.push(`Accepted costs kept after a later report omitted them on ${sr.omittedDates.join(', ')}.`);
   return parts.join(' ') || null;
-}
-
-export function renderSignIn(message = '') {
-  return `<form class="gp-auto-signin" onsubmit="event.preventDefault();weeklyReports.signIn(this.password.value)">
-    <p class="meta">Sign in with the dashboard password to read the automated weekly reports. Nothing is uploaded.</p>
-    <input type="password" name="password" autocomplete="current-password" placeholder="Dashboard password" required style="padding:6px 8px;min-width:220px">
-    <button class="gp-btn" type="submit">Sign in</button>
-    ${message ? `<p class="error-msg" role="alert">${esc(message)}</p>` : ''}
-  </form>`;
 }
 
 export function renderWeekList(weeks) {
@@ -152,33 +144,30 @@ export function vietnamTime(iso) {
   return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Ho_Chi_Minh', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(d);
 }
 /**
- * What a failed call means for the reader. A service failure never reads as a wrong password:
- *   401 (sign-in only) → password not accepted; 429 → too many attempts;
- *   503 d1_daily_limit_reached → daily database allowance used up, with the reset in Vietnam time;
- *   503 proxy_not_configured → not connected; anything else → unavailable.
+ * What a failed call means for the reader. A service failure never reads as a sign-in problem:
+ *   401 / 503 reader_not_configured → the dashboard's access to the reporting service is not set up
+ *   (nothing for the reader to enter); 503 d1_daily_limit_reached → daily database allowance used up,
+ *   with the reset in Vietnam time; 503 proxy_not_configured → not connected; anything else → unavailable.
  */
-export function failureMessage(e, { signIn = false } = {}) {
-  if (signIn && e?.status === 401) return 'That password was not accepted.';
-  if (e?.status === 429) return 'Too many sign-in attempts from this connection. Please wait a few minutes and try again.';
+export const NOT_CONNECTED = 'The dashboard is not connected to the reporting service yet.';
+export function failureMessage(e) {
+  if (e?.status === 401 || (e?.status === 503 && e?.code === 'reader_not_configured')) return "The dashboard's access to the weekly reports is not set up yet.";
   if (e?.status === 503 && e?.code === 'd1_daily_limit_reached') {
     const at = vietnamTime(e?.detail?.resetAt);
-    return `The reporting service has used its free daily database allowance. It is available again after ${at ? `${at} (Vietnam time)` : '07:00 Vietnam time'}. Your password was not checked.`;
+    return `The reporting service has used its free daily database allowance. It is available again after ${at ? `${at} (Vietnam time)` : '07:00 Vietnam time'}.`;
   }
-  if (e?.status === 503 && e?.code === 'proxy_not_configured') return 'The dashboard is not connected to the reporting service yet.';
-  return signIn ? 'Sign-in is unavailable right now.' : 'The weekly reports are unavailable right now.';
+  if (e?.status === 503 && e?.code === 'proxy_not_configured') return NOT_CONNECTED;
+  return 'The weekly reports are unavailable right now.';
 }
 
 /** Controller: renders into `root` (and the orders container inside it). `client` defaults to workerClient. */
 export function createWeeklyReports(root, client = api) {
   let orders = [];
   const show = html => { root.innerHTML = html; };
-  const fail = e => show(e?.status === 401 ? renderSignIn() : `<p class="meta">${esc(failureMessage(e))}</p>`);
+  const fail = e => show(`<p class="meta">${esc(failureMessage(e))}</p>`);
   const ctl = {
     async load() {
       try { show(renderWeekList((await client.weeks()).weeks)); } catch (e) { fail(e); }
-    },
-    async signIn(password) {
-      try { await client.login(password); await ctl.load(); } catch (e) { show(renderSignIn(failureMessage(e, { signIn: true }))); }
     },
     async openWeek(week) {
       if (!WEEK_RE.test(week)) return;

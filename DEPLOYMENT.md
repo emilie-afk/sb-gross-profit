@@ -335,6 +335,7 @@ npx wrangler secret put INGEST_SECRET              # collector ingest routes
 npx wrangler secret put ADMIN_SECRET               # admin/compute routes (different value)
 npx wrangler secret put SESSION_SIGNING_KEY        # session HMAC key (different value)
 cd .. && node tools/hash-password.mjs | npx wrangler secret put DASHBOARD_PASSWORD_HASH --config worker/wrangler.toml
+npx wrangler secret put DASHBOARD_READER_SECRET --config worker/wrangler.toml   # dashboard proxy reads (different value; also Netlify's SB_WORKER_READER_SECRET)
 cd worker && npx wrangler deploy
 # C8, MANDATORY: bind the D1 database to this Worker's SB_ENVIRONMENT once (audited);
 # until then only the read-only allowlist is served (login included in the refusals):
@@ -429,6 +430,7 @@ https://sb-profit.netlify.app/api/v1/*  →  netlify/edge-functions/api-proxy.js
 - `netlify.toml` declares the proxy after the site-password gate.
 - Set the Netlify variable `SB_WORKER_ORIGIN` (`https://sb-gp-worker.<account>.workers.dev`). While it is unset, `/api/v1/*` answers 503.
 - The proxy forwards dashboard routes only: login, logout, session, and the published reads.
+- **One sign-in (the site password).** For the published reads the proxy attaches the Worker's dashboard reader secret, after checking the site-password cookie itself. Set `SB_WORKER_READER_SECRET` on `sb-profit` (= the Worker's `DASHBOARD_READER_SECRET`); the proxy also reads the gate's `SITE_PASSWORD`. The Weekly Reports section shows no second password. The reader sees published weeks only, like a session; the Worker's own login and its rate limit are unchanged. Without either variable nothing is attached and the reports say access is not set up.
 - It drops `X-*-Secret` headers, the site-password cookie and client IP headers.
 - It refuses cross-origin POSTs.
 - `js/workerClient.js` is the browser client. It calls `/api/v1/...` with `credentials: 'same-origin'`.
