@@ -145,17 +145,40 @@ export function renderLines(detail) {
       <td style="text-align:right">${money(l.knownCostGp)}</td><td>${esc(l.costSource)}</td></tr>`).join('')}</tbody></table>`;
 }
 
+/** "Wed 7 Oct, 07:00" in Vietnam time (Asia/Ho_Chi_Minh) from an ISO instant, or null. */
+export function vietnamTime(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return null;
+  return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Ho_Chi_Minh', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(d);
+}
+/**
+ * What a failed call means for the reader. A service failure never reads as a wrong password:
+ *   401 (sign-in only) → password not accepted; 429 → too many attempts;
+ *   503 d1_daily_limit_reached → daily database allowance used up, with the reset in Vietnam time;
+ *   503 proxy_not_configured → not connected; anything else → unavailable.
+ */
+export function failureMessage(e, { signIn = false } = {}) {
+  if (signIn && e?.status === 401) return 'That password was not accepted.';
+  if (e?.status === 429) return 'Too many sign-in attempts from this connection. Please wait a few minutes and try again.';
+  if (e?.status === 503 && e?.code === 'd1_daily_limit_reached') {
+    const at = vietnamTime(e?.detail?.resetAt);
+    return `The reporting service has used its free daily database allowance. It is available again after ${at ? `${at} (Vietnam time)` : '07:00 Vietnam time'}. Your password was not checked.`;
+  }
+  if (e?.status === 503 && e?.code === 'proxy_not_configured') return 'The dashboard is not connected to the reporting service yet.';
+  return signIn ? 'Sign-in is unavailable right now.' : 'The weekly reports are unavailable right now.';
+}
+
 /** Controller: renders into `root` (and the orders container inside it). `client` defaults to workerClient. */
 export function createWeeklyReports(root, client = api) {
   let orders = [];
   const show = html => { root.innerHTML = html; };
-  const fail = e => show(e?.status === 401 ? renderSignIn() : `<p class="meta">${esc(e?.status === 503 ? 'The dashboard is not connected to the reporting service yet.' : 'The weekly reports are unavailable right now.')}</p>`);
+  const fail = e => show(e?.status === 401 ? renderSignIn() : `<p class="meta">${esc(failureMessage(e))}</p>`);
   const ctl = {
     async load() {
       try { show(renderWeekList((await client.weeks()).weeks)); } catch (e) { fail(e); }
     },
     async signIn(password) {
-      try { await client.login(password); await ctl.load(); } catch (e) { show(renderSignIn(e?.status === 401 ? 'That password was not accepted.' : 'Sign-in is unavailable right now.')); }
+      try { await client.login(password); await ctl.load(); } catch (e) { show(renderSignIn(failureMessage(e, { signIn: true }))); }
     },
     async openWeek(week) {
       if (!WEEK_RE.test(week)) return;

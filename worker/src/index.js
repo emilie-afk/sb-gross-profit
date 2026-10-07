@@ -24,14 +24,16 @@ import { createAndCompute, recompute, revise, restateCosts, listRestatements, we
 import { adminCatalogFetch, adminCatalogBase } from './catalogFetch.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
 import { scheduledTick, automationStatus, acceptCycleCatalogReuse, adminCycleStatus } from './orchestrate.js';
-import { publishLatestVerified } from './compute.js';
+import { publishLatestVerified, publicationPending } from './compute.js';
+import { newMeter, meteredDb, recordUsage, backgroundScope, getBudget, backgroundDeferred } from './usage.js';
+import { workCheck } from './workCheck.js';
 import { environmentGuard, bindEnvironment, isSafeRead } from './environment.js';
 import { requireOneOf } from './auth.js';
 import { openSource, putSegment, sealSource, getSourceMeta, getSegment } from './collectSources.js';
 import { uploadScrVersion, getScrOwners, getScrDays, listScrVersions, getScrVersion, acceptScrVersion, rejectScrVersion, rollbackScrActivation } from './collectScr.js';
-import { ordersDiff, uploadOrders, getManifest, orderBodies, catalogPart, weekAux, pinAux, openResults, putResultPart, finalizeResults } from './collectWeeks.js';
+import { ordersDiff, uploadOrders, getManifest, orderBodies, catalogPart, weekAux, pinAux, openResults, putResultPart, finalizeResults, correctionsPending, createCostCorrection, listCostCorrections } from './collectWeeks.js';
 import { pendingVerifications, verifyInputs, verifyPart, postVerifyReport } from './verifyRoutes.js';
-import { getWeekStatus, verificationStatuses } from './weekStatus.js';
+import { getWeekStatus, verificationStatuses, postSignInEvent } from './weekStatus.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -73,7 +75,7 @@ async function route(request, env) {
   if (p.startsWith('/v1/collect/')) {
     const W = '(\\d{4}-\\d{2}-\\d{2})';
     // Read-only parts, shared with the verifier.
-    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/manifest$`))) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); return getManifest(env, g[1]); }
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/manifest$`))) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); await refuseWhenDeferred(env); return getManifest(env, g[1]); }
     if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/aux$`))) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); return weekAux(env, g[1]); }
     if (p === '/v1/collect/order-bodies' && m === 'POST') { requireOneOf(request, env, ['ingest', 'verify']); return orderBodies(request, env); }
     if (p === '/v1/collect/scr/days' && m === 'POST') { requireOneOf(request, env, ['ingest', 'verify']); return getScrDays(request, env); }
@@ -82,8 +84,14 @@ async function route(request, env) {
     if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/segments\/(\d+)$/)) && m === 'GET') { requireOneOf(request, env, ['ingest', 'verify']); return getSegment(env, g[1], g[2]); }
     // Writes (and the week's collection status): the collector only.
     requireSecret(request, env, 'ingest');
+    if (p === '/v1/collect/budget' && m === 'GET') return getBudget(env, env.DB);
+    if (p === '/v1/collect/work' && m === 'GET') return workCheck(request, env);
     if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/status$`))) && m === 'GET') return getWeekStatus(env, g[1]);
     if (p === '/v1/collect/verification' && m === 'GET') return verificationStatuses(request, env);
+    if (p === '/v1/collect/verification/pending' && m === 'GET') return pendingVerifications(env, request);
+    if (p === '/v1/collect/publication/pending' && m === 'GET') return publicationPending(env, request);
+    if (p === '/v1/collect/corrections/pending' && m === 'GET') return correctionsPending(env, request);
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/signin$`))) && m === 'POST') return postSignInEvent(request, env, g[1]);
     if (p === '/v1/collect/sources' && m === 'POST') return openSource(request, env);
     if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/segments\/(\d+)$/)) && m === 'PUT') return putSegment(request, env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/seal$/)) && m === 'POST') return sealSource(request, env, g[1]);
@@ -102,8 +110,8 @@ async function route(request, env) {
   // ── Independent verifier ──
   if (p.startsWith('/v1/verify/')) {
     requireSecret(request, env, 'verify');
-    if (p === '/v1/verify/pending' && m === 'GET') return pendingVerifications(env);
-    if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})$/)) && m === 'GET') return verifyInputs(env, g[1]);
+    if (p === '/v1/verify/pending' && m === 'GET') return pendingVerifications(env, request);
+    if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})$/)) && m === 'GET') { await refuseWhenDeferred(env); return verifyInputs(env, g[1]); }
     if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})\/parts\/(orderindex|sections|orders:\d{1,4}|lines:\d{1,4}|scenario:\d{1,4})$/)) && m === 'GET') return verifyPart(env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/verify\/snapshots\/(snp_[0-9a-f]{20})\/report$/)) && m === 'POST') return postVerifyReport(request, env, g[1]);
     throw new ApiError(404, 'not_found', 'No such route');
@@ -117,6 +125,8 @@ async function route(request, env) {
     if ((g = p.match(/^\/v1\/admin\/runs\/([\w-]+)\/compute$/)) && m === 'POST') return recompute(request, env, g[1]);
     if (p === '/v1/admin/revise' && m === 'POST') return revise(request, env);
     if (p === '/v1/admin/restate-costs' && m === 'POST') return restateCosts(request, env);
+    if (p === '/v1/admin/cost-corrections' && m === 'POST') return createCostCorrection(request, env);
+    if (p === '/v1/admin/cost-corrections' && m === 'GET') return listCostCorrections(env);
     if (p === '/v1/admin/restatements' && m === 'GET') return listRestatements(request, env);
     if (p === '/v1/admin/revise-touched' && m === 'POST') return reviseTouchedWeeks(request, env);
     if (p === '/v1/admin/week-plan' && m === 'GET') return weekPlan(request, env);
@@ -166,12 +176,28 @@ async function route(request, env) {
   throw new ApiError(404, 'not_found', 'No such route');
 }
 
+/**
+ * Background work (a week's compute, a verification) is refused while the day's D1 budget says defer,
+ * with a distinct 503 the collector treats as "resume after the reset", never as a failure to retry soon.
+ */
+async function refuseWhenDeferred(env) {
+  const d = await backgroundDeferred(env, env.DB);
+  if (d) throw new ApiError(503, 'background_deferred', 'Background work is deferred until the daily D1 allowance resets (00:00 UTC)', { resetAt: d.resetAt, reasons: d.reasons });
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return preflight(request, env);
+    // Every request's D1 use is metered (rows read / written, as D1 bills them) and added to the day's total.
+    const meter = newMeter(), scope = backgroundScope(new URL(request.url).pathname);
+    const metered = env.DB ? { ...env, DB: meteredDb(env.DB, meter) } : env;
     let response;
-    try { response = await route(request, env); }
+    try { response = await route(request, metered); }
     catch (e) { response = errorResponse(e); }
+    if (env.DB && (meter.read || meter.written)) {
+      const rec = recordUsage(env.DB, scope, meter).catch(() => {});
+      if (ctx?.waitUntil) ctx.waitUntil(rec); else await rec;
+    }
     return withCors(response, request, env);
   },
   /**

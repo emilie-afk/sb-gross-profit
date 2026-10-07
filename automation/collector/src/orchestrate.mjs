@@ -28,7 +28,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const LOCK_STALE_MS = 3 * 3600_000;
-export const EXIT = Object.freeze({ OK: 0, ALREADY_RUNNING: 5, NOT_DUE: 0, PARTIAL: 40 });
+/** SIGNIN_REQUIRED: everything else is done or partial, and Shopify still waits for a person to sign in (the task retries sooner). */
+/** DEFERRED: the day's D1 budget is used up; nothing more is attempted until after 00:00 UTC (never "done"). */
+export const EXIT = Object.freeze({ OK: 0, ALREADY_RUNNING: 5, NOT_DUE: 0, PARTIAL: 40, SIGNIN_REQUIRED: 41, DEFERRED: 42 });
+/** Shopify outcomes that only a person can resolve (two-step code, human check). */
+const SIGNIN_STATUSES = new Set(['needs_2fa', 'needs_human_captcha']);
 
 /** Exclusive lock file; a lock older than LOCK_STALE_MS (crashed run) is replaced. */
 export function acquireLock(file, { now = Date.now(), fsImpl = fs } = {}) {
@@ -60,7 +64,9 @@ export function saveState(file, state, fsImpl = fs) { fsImpl.mkdirSync(path.dirn
  * @param {{ weekStart, weekEnd, closed: boolean }} d.week          the last closed reporting week
  * @param {() => Promise<{ collected: object }|null>} d.weekPlan    Worker week plan (null when unreachable)
  * @param {{ collect: () => Promise<{status, exitCode, pending?}>, upload: (pending) => Promise<{status, exitCode}> }} d.shipstation
- * @param {{ run: ({ onWaiting }) => Promise<{status, exitCode}> }} d.shopify
+ * @param {{ run: ({ onWaiting, onSignInRequired, onSignedIn }) => Promise<{status, exitCode}> }} d.shopify
+ * @param {(status: 'needs_person'|'signed_in', detail?: object) => Promise<void>} [d.signInEvent]  tells the Worker (shown on the status)
+ * @param {() => Promise<{ state: 'ok'|'defer'|'unknown', resetAt?, reasons? }>} [d.budget]  the day's D1 budget (Free-tier path)
  * @param {string} d.lockFile
  * @param {string} d.stateFile
  */
@@ -82,6 +88,22 @@ export async function runWeeklyCollection(d) {
   const mine = state[d.week.weekStart] || {};
   const sources = {};
   try {
+    // Quota first: with the day's D1 budget used up, no browser opens and nothing is exported or computed.
+    // The work is not done; the next start after the reset (00:00 UTC = 07:00 ICT) resumes it.
+    if (d.budget) {
+      let b = null;
+      try { b = await d.budget(); } catch { b = null; }
+      if (b?.state === 'defer') {
+        log(`deferred: daily D1 budget used (${(b.reasons || []).join(', ') || 'quota'}); resumes after ${b.resetAt || '00:00 UTC'}`);
+        return { status: 'deferred', exitCode: EXIT.DEFERRED, sources: {}, resumeAfter: b.resetAt || null, reasons: b.reasons || [] };
+      }
+      // Fail closed: usage that cannot be measured never counts as "within budget". Nothing is exported or
+      // computed; the run is partial, so the task's bounded retries (and the next trigger) try again.
+      if (!b || b.state !== 'ok') {
+        log('budget unavailable: no background work started');
+        return { status: 'partial', exitCode: EXIT.PARTIAL, sources: {}, code: 'budget_unavailable' };
+      }
+    }
     let plan = null;
     try { plan = await d.weekPlan(); } catch { plan = null; }
     const workerSays = k => plan?.collected?.[k];
@@ -97,6 +119,7 @@ export async function runWeeklyCollection(d) {
       try { compute = await d.compute({ sources: { shipping_cost_report: 'ok', shopify: 'ok' } }); }
       catch (e) { compute = { status: 'failed', code: typeof e?.code === 'string' ? e.code.slice(0, 64) : 'compute_failed' }; }
       log(`compute: ${compute.status}`);
+      if (compute.status === 'deferred') return { status: 'deferred', exitCode: EXIT.DEFERRED, sources: { shipping_cost_report: 'ok', shopify: 'ok' }, compute, resumeAfter: compute.resumeAfter || null };
       return { status: compute.status === 'ok' ? 'already_collected' : 'partial', exitCode: compute.status === 'ok' ? EXIT.OK : EXIT.PARTIAL,
                sources: { shipping_cost_report: 'ok', shopify: 'ok' }, compute };
     }
@@ -117,11 +140,22 @@ export async function runWeeklyCollection(d) {
       return `shipstation ${u.status}`;
     };
 
-    // 2–4. Shopify (browser B); the ShipStation upload happens during the email wait
+    // 2–4. Shopify (browser B); the ShipStation upload happens during the email wait, or before a wait
+    // for a person to finish Shopify's sign-in (so that progress is kept whatever happens next).
+    let uploadedNow = !!pending, signInNeeded = false;
+    const signInEvent = async (status, detail) => { if (d.signInEvent) { try { await d.signInEvent(status, detail); } catch { /* status only */ } } };
     if (needShopify) {
       log('shopify: requesting export');
-      const m = await guarded(() => d.shopify.run({ onWaiting: uploadShipStation }));
+      const onSignInRequired = async ({ state, waitMinutes }) => {
+        log(`shopify: sign-in needs a person (${state === 'captcha' ? 'human check' : 'two-step code'}); waiting up to ${waitMinutes} min in the open Shopify window, then continuing`);
+        await uploadShipStation();
+        await signInEvent('needs_person', { authState: state, waitMinutes });
+      };
+      const onSignedIn = async () => { log('shopify: signed in; continuing the export'); await signInEvent('signed_in'); };
+      const m = await guarded(() => d.shopify.run({ onWaiting: uploadShipStation, onSignInRequired, onSignedIn }));
       sources.shopify = m.status === 'ok' ? 'ok' : `${m.status} (exit ${m.exitCode})`;
+      signInNeeded = SIGNIN_STATUSES.has(m.status);
+      if (signInNeeded) log('shopify: still waiting for a person to sign in; the next attempt opens the window again');
     } else sources.shopify = 'ok';
     if (pending) await uploadShipStation();                               // direct download or Shopify skipped
 
@@ -132,13 +166,19 @@ export async function runWeeklyCollection(d) {
     // 6. Free-tier path (optional): compute the week and every changed week on this PC, upload the
     //    results and request independent verification. Codes and counts only.
     let compute;
-    if (d.compute) {
+    // While Shopify waits for a person, a retry that brought nothing new skips the compute (the previous
+    // attempt computed what it could); it reads nothing more from D1 until the export arrives.
+    if (d.compute && signInNeeded && !uploadedNow) compute = { status: 'skipped', code: 'shopify_signin_required' };
+    else if (d.compute) {
       try { compute = await d.compute({ sources }); }
       catch (e) { compute = { status: 'failed', code: typeof e?.code === 'string' ? e.code.slice(0, 64) : 'compute_failed' }; }
       log(`compute: ${compute.status}`);
     }
     const computeOk = !compute || compute.status === 'ok';
-    return { status: allOk && computeOk ? 'ok' : 'partial', exitCode: allOk && computeOk ? EXIT.OK : EXIT.PARTIAL, sources, ...(compute ? { compute } : {}) };
+    // Deferral wins: retrying soon would only add load. Sources already received are kept (state above).
+    if (compute?.status === 'deferred') return { status: 'deferred', exitCode: EXIT.DEFERRED, sources, compute, resumeAfter: compute.resumeAfter || null };
+    const exitCode = allOk && computeOk ? EXIT.OK : signInNeeded ? EXIT.SIGNIN_REQUIRED : EXIT.PARTIAL;
+    return { status: exitCode === EXIT.OK ? 'ok' : signInNeeded ? 'signin_required' : 'partial', exitCode, sources, ...(compute ? { compute } : {}) };
   } finally {
     releaseLock(d.lockFile, d.fs);
   }

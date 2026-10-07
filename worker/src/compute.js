@@ -5,7 +5,7 @@
  * revision; nothing already written is ever updated except a published
  * revision's status, which becomes `superseded` when a later one is published.
  */
-import { ApiError } from './http.js';
+import { ApiError, json } from './http.js';
 import { newId, nowIso, getSettings, jsonInsert, atomic } from './db.js';
 import { loadOrdersForWeek, loadShipmentsForOrders, loadHpdForOrders, loadCatalog, latestAcceptedCatalogMeta, catalogMeta } from './store.js';
 import { createRun, createRunStatements, getRun, transition, ownsCycle, canTransition } from './runs.js';
@@ -594,9 +594,44 @@ const isGuardAbort = e => /NOT NULL constraint failed: write_guard/i.test(String
  * go-live switches, PUBLICATION_EARLIEST_WEEK, the report basis, newest revision, comparison).
  * A refusal is an answer, not an error: { published: false, reason }.
  */
+/**
+ * GET /v1/collect/publication/pending?after=&limit= (ingest): weeks with publication work left, oldest
+ * first, so a run resumes it whatever its window. A week is listed when its newest collector revision is
+ *   - a verified draft (not blocked) from PUBLICATION_EARLIEST_WEEK on, not yet published, or
+ *   - published while its stored comparison is no longer the prior week's published snapshot.
+ * Weeks before PUBLICATION_EARLIEST_WEEK, gate-blocked drafts and unverified drafts are not listed
+ * (holds, and the verification backlog). Codes only.
+ */
+export const PUBLICATION_PENDING_SQL = `SELECT s.week_start,
+      CASE WHEN s.status = 'published' THEN 'comparison_stale' ELSE 'unpublished_verified' END AS reason
+    FROM snapshot s
+    WHERE s.storage = 'chunked' AND s.week_start > ?1 AND s.week_start >= ?3
+      AND NOT EXISTS (SELECT 1 FROM snapshot n WHERE n.week_start = s.week_start AND n.revision > s.revision)
+      AND ((s.status = 'draft' AND EXISTS (SELECT 1 FROM verify_report v WHERE v.snapshot_id = s.snapshot_id AND v.status = 'verified'))
+        OR (s.status = 'published' AND COALESCE(s.comparison_snapshot_id, '') <>
+            COALESCE((SELECT p.snapshot_id FROM snapshot p WHERE p.week_start = date(s.week_start, '-7 days') AND p.status = 'published'), '')))
+    ORDER BY s.week_start LIMIT ?2`;
+export async function publicationPending(env, request) {
+  const q = new URL(request.url).searchParams;
+  const after = q.get('after') || '0000-00-00';
+  if (after !== '0000-00-00' && !/^\d{4}-\d{2}-\d{2}$/.test(after)) throw new ApiError(400, 'bad_query', 'after must be YYYY-MM-DD');
+  const limit = Math.min(50, Math.max(1, Number(q.get('limit')) || 50));
+  const earliest = /^\d{4}-\d{2}-\d{2}$/.test(env.PUBLICATION_EARLIEST_WEEK || '') ? env.PUBLICATION_EARLIEST_WEEK : '0000-00-00';
+  const rows = (await env.DB.prepare(PUBLICATION_PENDING_SQL).bind(after, limit + 1, earliest).all()).results || [];
+  const page = rows.slice(0, limit);
+  return json({ weeks: page.map(r => ({ weekStart: r.week_start, reason: r.reason })), next: rows.length > limit ? page[page.length - 1].week_start : null });
+}
+
 export async function publishLatestVerified(env, weekStart) {
-  const s = await env.DB.prepare("SELECT snapshot_id FROM snapshot WHERE week_start = ?1 AND storage = 'chunked' ORDER BY revision DESC LIMIT 1").bind(weekStart).first();
+  const s = await env.DB.prepare("SELECT snapshot_id, revision, status, comparison_snapshot_id FROM snapshot WHERE week_start = ?1 AND storage = 'chunked' ORDER BY revision DESC LIMIT 1").bind(weekStart).first();
   if (!s) return { weekStart, published: false, reason: 'no_snapshot' };
+  // A published week whose prior week has since published another revision compares with a superseded
+  // snapshot: it stays published (nothing is withdrawn) and is answered as stale, so the collector
+  // recomputes, verifies and publishes a new revision in the same run.
+  if (s.status === 'published') {
+    const prevPub = (await env.DB.prepare("SELECT snapshot_id FROM snapshot WHERE week_start = ?1 AND status = 'published'").bind(addDays(weekStart, -7)).first())?.snapshot_id || null;
+    if (prevPub !== (s.comparison_snapshot_id || null)) return { weekStart, snapshotId: s.snapshot_id, revision: s.revision, published: false, alreadyPublished: true, reason: 'comparison_stale' };
+  }
   try {
     const r = await publishSnapshot(env, s.snapshot_id, { cls: 'ingest_secret', label: 'collector:auto-publish' });
     return { ...r, weekStart, published: true };
@@ -699,6 +734,11 @@ export async function publishSnapshot(env, snapshotId, actor) {
         .bind(snapshotId, at, token),
       db.prepare("UPDATE reporting_run SET state = 'published', updated_at = ?2 WHERE run_id = ?1 AND state = 'validated'").bind(run.run_id, at),
       transitionInsert(db, run.run_id, 'validated', 'published', at, actor, null),
+      // The week's unchanged-week check (migration 0021) when it is for exactly this revision: publishing the
+      // newest revision does not change the week's inputs (the catalog it was computed on is the one the
+      // published revision anchors), so the check stays valid with the new published id. The next week's
+      // check (its comparison) is NOT carried over: that week must be recomputed.
+      db.prepare('UPDATE manifest_check SET published_id = ?2 WHERE week_start = ?1 AND snapshot_id = ?2').bind(snap.week_start, snapshotId),
     ]);
   } catch (e) {
     if (!isGuardAbort(e)) throw e;

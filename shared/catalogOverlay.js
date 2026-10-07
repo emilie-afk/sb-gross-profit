@@ -28,7 +28,7 @@ import { VENDOR_ORDER, VENDOR_ENV, LIVE_TO_GIVE, LIVELY_ROOT_MODES } from './cat
 /** The five live sources, by build.py environment name. */
 export const OVERLAY_SOURCES = Object.freeze(VENDOR_ORDER.map(v => VENDOR_ENV[v]));
 /** Tables a base may hold. Vendor tables never come from the base. */
-export const BASE_TABLES = Object.freeze(['mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement', 'hp_by_name', 'sku_alias']);
+export const BASE_TABLES = Object.freeze(['mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement', 'hp_by_name', 'sku_alias', 'mcg_pack']);
 const OVERLAY_TABLES = new Set(['vendor_costs', 'vendor_index']);
 
 /** Which build.py sources a base table stands in for (for the completeness disclosure). */
@@ -41,10 +41,11 @@ export const BASE_SOURCE_MAP = Object.freeze({
   hp_supplement: ['productExport'],
   hp_by_name:    ['productExport'],
   mcgExtra:      ['MCG_EXTRA_SHEET_URL'],
+  mcg_pack:      ['MCG_PACK_SHEET_URL'],
 });
 /** Every build.py source other than the five tabs. None is refreshed live in C6d. */
 export const UNRESOLVED_SOURCES = Object.freeze(['MCG_SHEET_URL', 'MCG_POTS_SHEET_URL', 'SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL',
-  'AS_SHEET_URL', 'HP_SHEET_URL', 'MCG_EXTRA_SHEET_URL', 'PRODUCT_COSTS_JSON1', 'PRODUCT_COSTS_JSON2', 'SKU_WEIGHTS_JSON', 'productExport']);
+  'AS_SHEET_URL', 'HP_SHEET_URL', 'MCG_EXTRA_SHEET_URL', 'MCG_PACK_SHEET_URL', 'PRODUCT_COSTS_JSON1', 'PRODUCT_COSTS_JSON2', 'SKU_WEIGHTS_JSON', 'productExport']);
 
 const count = t => (t && typeof t === 'object') ? Object.keys(t).length : 0;
 const clone = v => JSON.parse(JSON.stringify(v ?? {}));
@@ -68,6 +69,10 @@ export function validateBaseCatalog(base) {
     if (k === 'mcg_total' || k === 'product_costs' || k === 'sb_costs' || k === 'hp_supplement' || k === 'hp_by_name' || k === 'sku_weights') {
       const bad = Object.values(t).filter(v => !(typeof v === 'number' && Number.isFinite(v))).length;
       if (bad) reasons.push(`${k}: ${bad} entr${bad === 1 ? 'y is' : 'ies are'} not a finite number`);
+    }
+    if (k === 'mcg_pack') {                                         // a positive cost, or null (listed without a cost: missing)
+      const bad = Object.values(t).filter(v => !(v === null || (typeof v === 'number' && Number.isFinite(v) && v > 0))).length;
+      if (bad) reasons.push(`mcg_pack: ${bad} entr${bad === 1 ? 'y is' : 'ies are'} neither a positive cost nor null`);
     }
   }
   if (!count(tables.mcg_total)) reasons.push('mcg_total is empty or missing');

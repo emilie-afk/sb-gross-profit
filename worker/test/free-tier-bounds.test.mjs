@@ -89,6 +89,7 @@ test('bounded reads: order pages are at most 100; scenario input is paged by 40 
   const { stableStringify } = await import('../../shared/normalized.js');
   const { sha256Text } = await import('../src/gz.js');
   const { inputsHashOf } = await import('../src/collectWeeks.js');
+  await env.DB.prepare('DELETE FROM manifest_check').run();          // assemble the manifest (the unchanged-week shortcut is tested elsewhere)
   const m = await ft.c.call('GET', `/v1/collect/weeks/${week}/manifest`);
   assert.equal(m.manifestHash, await sha256Text(stableStringify(m.manifest)));
   const snap = await env.DB.prepare('SELECT manifest_hash FROM snapshot WHERE snapshot_id = ?1').bind(m.existing.snapshotId).first();
@@ -103,10 +104,12 @@ test('aux pin: the manifest is the same with or without it; unchanged pins write
   const strip = m => { const { asOf: _a, ...x } = m.manifest; return stableStringify(x); };
   const { stableStringify } = await import('../../shared/normalized.js');
   await env.DB.prepare('DELETE FROM aux_pin').run();
+  await env.DB.prepare('DELETE FROM manifest_check').run();
   const inline = await c.call('GET', `/v1/collect/weeks/${week}/manifest`);
   const p1 = await c.call('POST', `/v1/collect/weeks/${week}/aux-pin`, { json: {} });
   assert.equal(p1.pinned, 'pinned');
   // The manifest now takes the hashes from the pin and skips the shipment queries.
+  await env.DB.prepare('DELETE FROM manifest_check').run();          // assemble again (the unchanged-week shortcut is tested elsewhere)
   let shipQueries = 0; const orig = env.DB.prepare.bind(env.DB);
   env.DB.prepare = sql => { if (/FROM shipment\b|FROM hpd_order\b/.test(sql)) shipQueries++; return orig(sql); };
   const pinned = await c.call('GET', `/v1/collect/weeks/${week}/manifest`);

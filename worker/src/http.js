@@ -24,7 +24,31 @@ export function jsonText(text, status = 200, headers = {}) {
   return new Response(text, { status, headers: { ...SECURITY_HEADERS, ...headers } });
 }
 
-export function errorResponse(err, runId = null) {
+/**
+ * D1's Free-plan daily limit errors (documented text, enforced from 2026-09-01): every query fails
+ * until 00:00 UTC. → { limit: 'read' | 'write', resetAt } or null. Looks through wrapped causes.
+ */
+export const D1_LIMIT_RE = /exceeded D1's free tier daily row (read|write) limit/i;
+export function d1DailyLimit(err, now = new Date()) {
+  for (let e = err, i = 0; e && i < 5; e = e.cause, i++) {
+    const m = D1_LIMIT_RE.exec(String(e?.message || ''));
+    if (m) {
+      const reset = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+      return { limit: m[1].toLowerCase(), resetAt: reset.toISOString() };
+    }
+  }
+  return null;
+}
+
+export function errorResponse(err, runId = null, now = new Date()) {
+  // The account's D1 daily allowance is used up: a distinct, safe service-unavailable answer with the
+  // reset time (never a credential or routing error; no internal text).
+  const q = err instanceof ApiError ? null : d1DailyLimit(err, now);
+  if (q) {
+    const retry = Math.max(60, Math.ceil((Date.parse(q.resetAt) - now.getTime()) / 1000));
+    return json({ error: 'd1_daily_limit_reached', message: 'The reporting database has reached its daily allowance; it resets at 00:00 UTC', runId,
+                  detail: { limit: q.limit, resetAt: q.resetAt } }, 503, { 'Retry-After': String(retry) });
+  }
   if (err instanceof ApiError) {
     return json({ error: err.code, message: err.message, runId, ...(err.detail ? { detail: err.detail } : {}) }, err.status);
   }

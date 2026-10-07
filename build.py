@@ -17,6 +17,7 @@ Required Netlify env vars:
   SITE_PASSWORD         — dashboard login password
   MCG_SHEET_URL         — MCG Total sheet export URL (plant costs with extra cost)
   MCG_POTS_SHEET_URL    — MCG Pot costs sheet export URL (pot SKU → pot cost)
+  MCG_PACK_SHEET_URL    — MCG succulent-pack tab CSV export URL (SKU → Total Cost/pack)
   AS_SHEET_URL          — Air Plant Shop sheet export URL
   L2G_SHEET_URL                   — Live to Give tab CSV export URL
   LIVELY_GOOD_SHEET_URL           — Lively Good tab CSV export URL
@@ -145,6 +146,64 @@ if pots_url:
         print(f"  ✗ MCG Pot Costs sheet error: {e}")
 else:
     print("  ✗ MCG_POTS_SHEET_URL not set — pot bundle costs may be missing")
+
+
+# ── 1b. MCG pack sheet (SKU-level "Total Cost/pack"; corrected costs effective Aug 1, 2026) ──
+# Its own table, mcg_pack: SKU → Total Cost/pack. The selling price column is never read. A SKU the
+# sheet lists with a blank, non-numeric or $0 cost (e.g. a formula giving $0.00) is stored as None:
+# it stays a MISSING cost, never a zero-cost product. Two different costs for one SKU → None.
+# Volume discounts and fees are applied by the calculator exactly as before, never here.
+def parse_mcg_pack_rows(raw_rows):
+    header_idx = cost_idx = sku_idx = None
+    for i, row in enumerate(raw_rows[:10]):
+        low = [c.strip().lower() for c in row]
+        if 'total cost/pack' in low:
+            header_idx, cost_idx = i, low.index('total cost/pack')
+            break
+    if header_idx is None:
+        return None, {'error': 'no_total_cost_column'}
+    for row in raw_rows[:header_idx + 1]:
+        low = [c.strip().lower() for c in row]
+        if 'sku' in low:
+            sku_idx = low.index('sku')
+            break
+    if sku_idx is None:
+        return None, {'error': 'no_sku_column'}
+    costs, conflicts = {}, set()
+    for row in raw_rows[header_idx + 1:]:
+        sku = (row[sku_idx] if sku_idx < len(row) else '').strip().upper()
+        if not sku:
+            continue
+        cost = clean_money(row[cost_idx]) if cost_idx < len(row) else None
+        if cost is None or not (0 < cost < float('inf')):
+            cost = None
+        else:
+            cost = round(cost, 4)
+        if sku in costs and costs[sku] != cost:
+            conflicts.add(sku)
+        costs[sku] = cost
+    for sku in conflicts:
+        costs[sku] = None
+    priced = sum(1 for v in costs.values() if v is not None)
+    return costs, {'skus': len(costs), 'priced': priced, 'missing': len(costs) - priced, 'conflicting': len(conflicts)}
+
+mcg_pack = None
+pack_url = os.environ.get('MCG_PACK_SHEET_URL')
+if pack_url:
+    try:
+        with urllib.request.urlopen(pack_url, timeout=15) as r:
+            pack_text = r.read().decode('utf-8-sig')
+        mcg_pack, pack_stats = parse_mcg_pack_rows(list(csv.reader(io.StringIO(pack_text))))
+        if mcg_pack is None:
+            print(f"  ✗ MCG pack sheet: {pack_stats['error']} — not imported")
+        else:
+            print(f"  → MCG pack sheet: {pack_stats['skus']} SKUs, {pack_stats['priced']} with a cost, "
+                  f"{pack_stats['missing']} missing (blank or $0), {pack_stats['conflicting']} conflicting")
+    except Exception as e:
+        mcg_pack = None
+        print(f"  ✗ MCG pack sheet error: {e}")
+else:
+    print("  ✗ MCG_PACK_SHEET_URL not set — pack SKUs keep the earlier rules")
 
 
 # ── 1c. SKU Alias map (Succulent Box SKU ↔ Amazon alias) ─────────────────────
@@ -595,6 +654,8 @@ write_json('sku_weights.json',   sku_weights)
 write_json('sku_alias.json',     sku_alias)
 write_json('vendor_costs.json',  vendor_catalog)
 write_json('vendor_index.json',  vendor_index)
+if mcg_pack is not None:
+    write_json('mcg_pack.json',    mcg_pack)
 write_json('vendor_import_report.json', {
     'generatedAt': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
     'stats': vendor_stats,
@@ -709,7 +770,7 @@ def push_catalog():
         return
     tables = {}
     for name in ['mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement',
-                 'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index']:
+                 'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index', 'mcg_pack']:
         path = os.path.join(DATA_DIR, f'{name}.json')
         if os.path.exists(path):
             with open(path) as f:

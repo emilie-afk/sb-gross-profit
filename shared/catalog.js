@@ -7,9 +7,10 @@
  *   build.py (Netlify build, same sheets and parsing as the dashboard)
  *     └─ optional push step → POST /v1/ingest/catalog → validateCatalog() → cost_catalog row
  *
- * Tables (the twelve cost sources behind calculate()):
+ * Tables (the cost sources behind calculate()):
  *   mcg_total, product_costs, sku_weights, sb_costs, hp_supplement, hp_by_name,
- *   sku_alias, vendor_costs (five vendors), vendor_index, plus mcgExtra
+ *   sku_alias, vendor_costs (five vendors), vendor_index, mcg_pack (MCG pack sheet:
+ *   SKU → Total Cost/pack, null = listed without a cost), plus mcgExtra
  *   (MCG_EXTRA_SHEET_URL, served to the dashboard by the edge function) and
  *   optional manual overrides (the dashboard's uploaded additional-costs file).
  *
@@ -19,7 +20,7 @@ import { contentHash } from './normalized.js';
 
 export const CATALOG_TABLES = Object.freeze([
   'mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement',
-  'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index',
+  'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index', 'mcg_pack',
 ]);
 
 /** Tables that must be non-empty for a catalog to be accepted at all. */
@@ -127,6 +128,7 @@ export function engineArgsFromCatalog(catalog) {
     mcgExtra:        catalog?.mcgExtra || {},
     vendorCosts:     t.vendor_costs || null,
     vendorIndex:     t.vendor_index || null,
+    mcgPackCosts:    t.mcg_pack || null,
   };
 }
 

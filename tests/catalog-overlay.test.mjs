@@ -25,11 +25,11 @@ const base = () => ({
 
 test('C6d: the five tabs are the only live sources; everything else is disclosed as unresolved', () => {
   assert.deepEqual(OVERLAY_SOURCES, ['L2G_SHEET_URL', 'LIVELY_GOOD_SHEET_URL', 'CALATHEA_COLLECTIVE_SHEET_URL', 'SURFSIDE_ARRANGEMENT_SHEET_URL', 'LINDAMAKES_SHEET_URL']);
-  for (const k of ['MCG_SHEET_URL', 'MCG_POTS_SHEET_URL', 'AS_SHEET_URL', 'HP_SHEET_URL', 'SB_SKU_ALIAS_URL', 'MCG_EXTRA_SHEET_URL', 'productExport']) assert.ok(UNRESOLVED_SOURCES.includes(k), k);
+  for (const k of ['MCG_SHEET_URL', 'MCG_POTS_SHEET_URL', 'AS_SHEET_URL', 'HP_SHEET_URL', 'SB_SKU_ALIAS_URL', 'MCG_EXTRA_SHEET_URL', 'MCG_PACK_SHEET_URL', 'productExport']) assert.ok(UNRESOLVED_SOURCES.includes(k), k);
   const c = catalogCompleteness({ baseCatalogRev: 'cat_0000000000000000', base: base() });
   assert.equal(c.status, 'incomplete');
-  assert.match(c.label, /^Product-cost catalog incomplete: 12 cost sources are not refreshed live/);
-  assert.deepEqual(c.missingBaseTables, ['hp_by_name']);
+  assert.match(c.label, /^Product-cost catalog incomplete: 13 cost sources are not refreshed live/);   // 12 + the MCG pack tab (carried by the base)
+  assert.deepEqual(c.missingBaseTables, ['hp_by_name', 'mcg_pack']);
 });
 
 test('C6d: a base holds only the existing non-vendor tables, with a non-empty mcg_total', () => {

@@ -27,6 +27,7 @@ import { signManifest, manifestSignatureValid } from './auth.js';
 import { readBytes, gunzipCapped, sha256Text, HEX64 } from './gz.js';
 import { loadShipmentsForOrders, loadHpdForOrders, shipmentsFromRows, hpdFromRows, SHIPMENTS_SQL, SHIPMENT_ITEMS_SQL, HPD_SQL, HPD_ITEMS_SQL } from './store.js';
 import { catalogFreshnessFrom, anchorFromRows, chooseCatalogFrom, refreshFromRow, previousFromRows, ANCHOR_PUBLISHED_SQL, ANCHOR_LATEST_SQL, LATEST_REFRESH_SQL, PREV_PUBLISHED_SQL, PREV_DRAFT_SQL, PINNED_ACCEPTANCE_SQL } from './compute.js';
+import { actorFor } from './actor.js';
 import { createRunStatements } from './runs.js';
 import { scrBasisFrom, BASIS_VERSIONS_SQL } from './collectScr.js';
 import { ENGINE_VERSION } from '../../shared/snapshot.js';
@@ -124,7 +125,7 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
   const rs = r => r.results || [], one = r => rs(r)[0] || null;
   // Batch 1: everything keyed by the week alone.
   const b1 = await db.batch([
-    db.prepare('SELECT n, aux_n FROM input_epoch WHERE id = 1'),
+    db.prepare('SELECT n, aux_n, m FROM input_epoch WHERE id = 1'),
     db.prepare(SETTINGS_SQL),
     db.prepare('SELECT ship_date, version_id, day_hash FROM scr_day_owner WHERE ship_date BETWEEN ?1 AND ?2 ORDER BY ship_date').bind(weekStart, weekEnd),
     // The week's order list rendered by D1 as the manifest's JSON (no per-row objects in the Worker).
@@ -140,6 +141,7 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
     db.prepare('SELECT snapshot_id, revision, status, storage, manifest_hash FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(weekStart),
     db.prepare('SELECT aux_n, shipments_hash, hpd_hash, shipments, hpd_orders FROM aux_pin WHERE week_start = ?1').bind(weekStart),
     db.prepare(PINNED_ACCEPTANCE_SQL).bind(weekStart),
+    db.prepare(CORRECTION_FOR_WEEK_SQL).bind(weekStart),
   ]);
   const latestSnapshot = one(b1[11]);
   // The week's aux hashes pinned by POST …/aux-pin while no aux table has changed since (same
@@ -155,7 +157,10 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
   const ordersText = /^[\x20-\x5b\x5d-\x7e]*$/.test(ow.j) ? ow.j : null;
   const ordersList = () => JSON.parse(ow.j);
   const anchor = anchorFromRows(one(b1[4]), one(b1[5]));
-  const info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[6]), now), latest: one(b1[7]) });
+  let info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[6]), now), latest: one(b1[7]) });
+  // An audited cost correction naming this week (migration 0022): applied while the week is still on the
+  // correction's original catalog; the correction id travels with the corrected catalog after that.
+  info = correctedCatalog(info, { anchor, correction: one(b1[14]) });
   // The week's audited acceptance of its pinned catalog counts only for exactly that revision.
   // In the inputs (catalogAcceptance) whatever the anchor, so publishing the week does not change its inputs.
   const pinAcc = one(b1[13]);
@@ -195,19 +200,14 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
   // Shipping Cost Report dates the week depends on: its own seven dates, and every owned date that
   // holds cost for one of its orders or for an order shipped in the week (that order's first ship
   // date decides the unmatched count). Other dates cannot change this week's figures, so they are
-  // not pinned. The search over the stored groups runs in D1 (json_each), not in Worker CPU.
+  // not pinned. The search is an indexed lookup of the keys (scr_day_key, migration 0020).
   const weekKeys = rs(b2[1]).map(r => r.k);                                          // distinct, extracted in D1
   const keys = [...new Set([...nums.map(n => String(n).replace(/^#/, '')), ...weekKeys])];
   // Batch 3: the related dates and the report orders that are known Shopify orders.
   const b3 = await db.batch([
-    db.prepare(`SELECT DISTINCT o.ship_date, o.version_id, o.day_hash FROM scr_day_owner o
-        JOIN scr_day d ON d.version_id = o.version_id AND d.ship_date = o.ship_date, json_each(d.groups) g
-        WHERE json_extract(g.value, '$[0]') IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(keys)),
-    db.prepare('SELECT DISTINCT order_number FROM ord_ptr WHERE order_number IN (SELECT value FROM json_each(?1)) ORDER BY order_number').bind(JSON.stringify(weekKeys)),
-    db.prepare(`SELECT v.version_id, v.source_id, v.requested_from, v.requested_to, json_extract(v.outcome, '$.preserved') AS preserved FROM scr_version v WHERE v.version_id IN (
-        SELECT DISTINCT o.version_id FROM scr_day_owner o JOIN scr_day d ON d.version_id = o.version_id AND d.ship_date = o.ship_date, json_each(d.groups) g
-        WHERE json_extract(g.value, '$[0]') IN (SELECT value FROM json_each(?1))) OR v.version_id IN (SELECT value FROM json_each(?2)) ORDER BY v.version_id`)
-      .bind(JSON.stringify(keys), JSON.stringify(vids)),
+    db.prepare(RELATED_DATES_SQL).bind(JSON.stringify(keys)),
+    db.prepare(KNOWN_KEYS_SQL).bind(JSON.stringify(weekKeys)),
+    db.prepare(RELATED_VERSIONS_SQL).bind(JSON.stringify(keys), JSON.stringify(vids)),
   ]);
   const owners = [...new Map([...weekOwned, ...rs(b3[0])].map(o => [o.ship_date, o])).values()].sort((a, b) => (a.ship_date < b.ship_date ? -1 : 1));
   const known = weekKeys.length ? rs(b3[1]).map(r => r.order_number) : [];
@@ -219,7 +219,9 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
     .filter(v => !preservedOf.has(v));
   if (keptFrom.length) versions.push(...rs(await db.prepare('SELECT version_id, source_id, requested_from, requested_to FROM scr_version WHERE version_id IN (SELECT value FROM json_each(?1))').bind(JSON.stringify(keptFrom)).all()));
   versions.sort((a, b) => (a.version_id < b.version_id ? -1 : a.version_id > b.version_id ? 1 : 0));
-  return { epoch, latestSnapshot, ordersText, manifest: {
+  const mEpoch = one(b1[0])?.m ?? null;
+  const anchorIds = { published: one(b1[4])?.snapshot_id ?? null, prevPublished: one(b1[8])?.snapshot_id ?? null };
+  return { epoch, mEpoch, anchorIds, latestSnapshot, ordersText, manifest: {
     v: MANIFEST_VERSION, weekStart, engineVersion: ENGINE_VERSION, asOf: new Date(now).toISOString(), storeTimezone: settings.store_timezone, settings,
     catalog: { rev: info.rev, info, completeness: P(cat?.meta, {})?.completeness || null, parts: rs(b2[2]).map(p => [p.table_name, p.part]) },
     orders: rawOrders && ordersText ? RAW_ORDERS : ordersList(),
@@ -233,6 +235,21 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
     ...(catalogAcceptance ? { catalogAcceptance } : {}),
   } };
 }
+/**
+ * Owned dates (and their versions) whose stored groups hold one of the order keys ?1: an indexed
+ * lookup in scr_day_key joined to the current owners. Before migration 0020 this searched every
+ * stored day's JSON groups (≈15k rows read per call with a year of history).
+ */
+export const RELATED_DATES_SQL = `SELECT DISTINCT o.ship_date, o.version_id, o.day_hash FROM scr_day_key k
+    JOIN scr_day_owner o ON o.ship_date = k.ship_date AND o.version_id = k.version_id
+    WHERE k.order_key IN (SELECT value FROM json_each(?1))`;
+/** The report order keys ?1 that are stored Shopify orders (idx_ord_ptr_number, migration 0020). */
+export const KNOWN_KEYS_SQL = 'SELECT DISTINCT order_number FROM ord_ptr WHERE order_number IN (SELECT value FROM json_each(?1)) ORDER BY order_number';
+/** The versions owning those dates, plus the week's own versions ?2. */
+export const RELATED_VERSIONS_SQL = `SELECT v.version_id, v.source_id, v.requested_from, v.requested_to, json_extract(v.outcome, '$.preserved') AS preserved FROM scr_version v
+    WHERE v.version_id IN (SELECT o.version_id FROM scr_day_key k JOIN scr_day_owner o ON o.ship_date = k.ship_date AND o.version_id = k.version_id
+                           WHERE k.order_key IN (SELECT value FROM json_each(?1)))
+       OR v.version_id IN (SELECT value FROM json_each(?2)) ORDER BY v.version_id`;
 const withoutAsOf = ({ asOf: _a, ...m }) => m;
 /** REPORTING_START_DATE (Worker variable, YYYY-MM-DD) or null when reporting has no start date. */
 export const reportingStartOf = env => (/^\d{4}-\d{2}-\d{2}$/.test(env?.REPORTING_START_DATE || '') ? env.REPORTING_START_DATE : null);
@@ -286,12 +303,174 @@ async function manifestHashes(m, ordersText = null) {
           await sha256Text(join(keys.filter(k => !INPUT_EXCLUDED.has(k)), k => (k === 'catalog' ? stableStringify(catalog) : piece.get(k))))];
 }
 
+/**
+ * The newest audited correction naming week ?1 (migration 0022): its id, the week's original catalog
+ * revision and the corrected one. Weeks not named have none.
+ */
+export const CORRECTION_FOR_WEEK_SQL = `SELECT w.correction_id, w.from_catalog_rev, w.to_catalog_rev FROM cost_correction_week w
+    JOIN cost_correction c ON c.correction_id = w.correction_id WHERE w.week_start = ?1 ORDER BY c.at DESC, c.correction_id DESC LIMIT 1`;
+/**
+ * Pure: the catalog choice with a week's correction applied.
+ *   - The week is still on the correction's original catalog → the corrected catalog, basis
+ *     cost_restatement (freshness 'restated'), naming the correction and what it replaces.
+ *   - The week is already on the corrected catalog → the usual choice, carrying the correction id, so
+ *     every later revision on that catalog records which correction it applies.
+ *   - Anything else (no correction, no snapshot, another catalog) → the usual choice, unchanged.
+ */
+export function correctedCatalog(info, { anchor, correction }) {
+  if (!correction || !anchor) return info;
+  if (anchor.rev === correction.from_catalog_rev) {
+    return { rev: correction.to_catalog_rev, basis: 'cost_restatement', correctionId: correction.correction_id,
+             fromCatalogRev: anchor.rev, fromSnapshotId: anchor.fromSnapshotId, refreshId: null };
+  }
+  if (anchor.rev === correction.to_catalog_rev && info.rev === correction.to_catalog_rev) return { ...info, correctionId: correction.correction_id };
+  return info;
+}
+
+/**
+ * GET /v1/collect/corrections/pending?after=&limit= (ingest): named weeks whose correction still applies
+ * (the week's catalog — its published revision's, else its newest revision's — is the correction's
+ * original) and whose newest revision is not yet on the corrected catalog with this correction's id.
+ * Completion is by correction id and catalog revision, never by time. Oldest first, paged (≤ 50).
+ */
+export const CORRECTIONS_PENDING_SQL = `WITH cw AS (
+      SELECT w.week_start, w.correction_id, w.from_catalog_rev, w.to_catalog_rev,
+             ROW_NUMBER() OVER (PARTITION BY w.week_start ORDER BY c.at DESC, c.correction_id DESC) AS k
+        FROM cost_correction_week w JOIN cost_correction c ON c.correction_id = w.correction_id WHERE w.week_start > ?1)
+    SELECT cw.week_start, cw.correction_id FROM cw
+    JOIN snapshot s ON s.week_start = cw.week_start AND s.storage = 'chunked'
+      AND NOT EXISTS (SELECT 1 FROM snapshot n WHERE n.week_start = s.week_start AND n.revision > s.revision)
+    WHERE cw.k = 1
+      AND COALESCE((SELECT p.catalog_rev FROM snapshot p WHERE p.week_start = cw.week_start AND p.status = 'published'), s.catalog_rev) = cw.from_catalog_rev
+      AND NOT (s.catalog_rev = cw.to_catalog_rev AND json_extract(s.catalog_info, '$.correctionId') IS cw.correction_id)
+    ORDER BY cw.week_start LIMIT ?2`;
+export async function correctionsPending(env, request) {
+  const q = new URL(request.url).searchParams;
+  const after = q.get('after') || '0000-00-00';
+  if (after !== '0000-00-00' && !WEEK_RE.test(after)) throw new ApiError(400, 'bad_query', 'after must be YYYY-MM-DD');
+  const limit = Math.min(50, Math.max(1, Number(q.get('limit')) || 50));
+  const rows = (await env.DB.prepare(CORRECTIONS_PENDING_SQL).bind(after, limit + 1).all()).results || [];
+  const page = rows.slice(0, limit);
+  return json({ weeks: page.map(r => ({ weekStart: r.week_start, correctionId: r.correction_id })), next: rows.length > limit ? page[page.length - 1].week_start : null });
+}
+
+/**
+ * Leaf-by-leaf differences between two stored catalogs, every table except ?3 (the MCG pack table),
+ * computed by D1 from the stored parts (formatting and chunking do not matter). 0 = identical.
+ */
+export const CATALOG_DIFF_EXCEPT_SQL = `WITH
+    a AS (SELECT table_name, group_concat(payload, '' ORDER BY part) AS j FROM cost_catalog_part WHERE catalog_rev = ?1 AND table_name <> ?3 GROUP BY table_name),
+    b AS (SELECT table_name, group_concat(payload, '' ORDER BY part) AS j FROM cost_catalog_part WHERE catalog_rev = ?2 AND table_name <> ?3 GROUP BY table_name),
+    la AS (SELECT a.table_name AS t, x.fullkey AS k, x.atom AS v FROM a, json_tree(a.j) x WHERE x.type NOT IN ('object', 'array')),
+    lb AS (SELECT b.table_name AS t, x.fullkey AS k, x.atom AS v FROM b, json_tree(b.j) x WHERE x.type NOT IN ('object', 'array'))
+  SELECT (SELECT COUNT(*) FROM (SELECT t, k, v FROM la EXCEPT SELECT t, k, v FROM lb))
+       + (SELECT COUNT(*) FROM (SELECT t, k, v FROM lb EXCEPT SELECT t, k, v FROM la)) AS n`;
+export const MCG_TABLE = 'mcg_pack';
+
+/**
+ * POST /v1/admin/cost-corrections { reason, weeks: [{ weekStart, fromCatalogRev, toCatalogRev }] }
+ * GET  /v1/admin/cost-corrections — every correction with its weeks (who, why, which catalogs).
+ * The audited correction path. Each named week must have a snapshot whose catalog (the published
+ * revision's, else the newest's) is exactly fromCatalogRev; toCatalogRev must be an accepted catalog
+ * identical to fromCatalogRev except the MCG pack table, which it must hold and change. Nothing is
+ * recomputed or overwritten here: the collector's next run computes the corrected revisions, the
+ * verifier checks them and publication follows the usual controls.
+ */
+export async function createCostCorrection(request, env) {
+  const b = await readJson(request);
+  const reason = String(b.reason || '').trim();
+  if (reason.length < 10) throw new ApiError(400, 'bad_payload', 'A cost correction needs a reason of at least 10 characters');
+  const weeks = Array.isArray(b.weeks) ? b.weeks : [];
+  if (!weeks.length || weeks.length > 60) throw new ApiError(400, 'bad_payload', 'weeks: 1–60 entries { weekStart, fromCatalogRev, toCatalogRev }');
+  const seen = new Set(), REV = /^cat_[0-9a-f]{16}$/;
+  for (const w of weeks) {
+    if (!WEEK_RE.test(w?.weekStart || '') || weekStartOf(w.weekStart) !== w.weekStart || seen.has(w.weekStart)) throw new ApiError(400, 'bad_payload', 'each weekStart must be a distinct Monday');
+    if (!REV.test(w.fromCatalogRev || '') || !REV.test(w.toCatalogRev || '') || w.fromCatalogRev === w.toCatalogRev) throw new ApiError(400, 'bad_payload', 'fromCatalogRev and toCatalogRev must be two catalog revisions');
+    seen.add(w.weekStart);
+  }
+  const db = env.DB;
+  // Each week's current catalog must be the stated original.
+  for (const w of weeks) {
+    const cur = await db.prepare(`SELECT COALESCE((SELECT catalog_rev FROM snapshot WHERE week_start = ?1 AND status = 'published'),
+        (SELECT catalog_rev FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1)) AS rev`).bind(w.weekStart).first();
+    if (!cur?.rev) throw new ApiError(409, 'week_has_no_snapshot', `The week of ${w.weekStart} has no snapshot to correct`);
+    if (cur.rev !== w.fromCatalogRev) throw new ApiError(409, 'not_original_catalog', `The week of ${w.weekStart} is on ${cur.rev}, not ${w.fromCatalogRev}`);
+  }
+  // Each corrected catalog: accepted, holding the MCG table, otherwise identical to its original.
+  const pairs = [...new Set(weeks.map(w => `${w.fromCatalogRev}>${w.toCatalogRev}`))].map(x => x.split('>'));
+  for (const [from, to] of pairs) {
+    const cat = await db.prepare('SELECT status FROM cost_catalog WHERE catalog_rev = ?1').bind(to).first();
+    if (cat?.status !== 'accepted') throw new ApiError(409, 'catalog_not_accepted', `${to} is not an accepted catalog`);
+    const pack = await db.prepare(`SELECT (SELECT group_concat(payload, '' ORDER BY part) FROM cost_catalog_part WHERE catalog_rev = ?1 AND table_name = ?3) AS a,
+        (SELECT group_concat(payload, '' ORDER BY part) FROM cost_catalog_part WHERE catalog_rev = ?2 AND table_name = ?3) AS b`).bind(from, to, MCG_TABLE).first();
+    if (!pack?.b || pack.b === '{}') throw new ApiError(409, 'no_mcg_table', `${to} has no MCG pack table`);
+    if (pack.a === pack.b) throw new ApiError(409, 'mcg_table_unchanged', `${to} has the same MCG pack table as ${from}`);
+    const d = await db.prepare(CATALOG_DIFF_EXCEPT_SQL).bind(from, to, MCG_TABLE).first();
+    if ((d?.n ?? 1) !== 0) throw new ApiError(409, 'catalog_changes_more_than_mcg', `${to} differs from ${from} outside the MCG pack table (${d?.n} entries)`);
+  }
+  const actor = actorFor('admin_secret', b);
+  const id = newId('ccr'), at = nowIso();
+  await atomic(db, [
+    db.prepare('INSERT INTO cost_correction (correction_id, reason, actor_class, actor_label, at) VALUES (?1, ?2, ?3, ?4, ?5)').bind(id, reason, actor.cls, actor.label, at),
+    ...weeks.map(w => db.prepare('INSERT INTO cost_correction_week (correction_id, week_start, from_catalog_rev, to_catalog_rev) VALUES (?1, ?2, ?3, ?4)')
+      .bind(id, w.weekStart, w.fromCatalogRev, w.toCatalogRev)),
+  ]);
+  return json({ correctionId: id, at, weeks: weeks.map(w => ({ weekStart: w.weekStart, fromCatalogRev: w.fromCatalogRev, toCatalogRev: w.toCatalogRev })),
+                note: 'Each named week gets a new revision on its corrected catalog on the next collector run; earlier revisions are kept.' });
+}
+export async function listCostCorrections(env) {
+  const [c, w] = await env.DB.batch([env.DB.prepare('SELECT * FROM cost_correction ORDER BY at DESC LIMIT 100'),
+    env.DB.prepare('SELECT * FROM cost_correction_week ORDER BY week_start')]);
+  const weeks = w.results || [];
+  return json({ corrections: (c.results || []).map(({ actor_class, actor_label, ...r }) => ({ ...r, actorClass: actor_class, actorLabel: actor_label,
+    weeks: weeks.filter(x => x.correction_id === r.correction_id).map(x => ({ weekStart: x.week_start, fromCatalogRev: x.from_catalog_rev, toCatalogRev: x.to_catalog_rev })) })) });
+}
+
+/** Upsert of a week's unchanged-week check (only when something in it changed or it is 3 hours old). */
+export const MANIFEST_CHECK_UPSERT = `INSERT INTO manifest_check (week_start, m_epoch, env_sig, snapshot_id, published_id, prev_published_id, checked_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+    ON CONFLICT(week_start) DO UPDATE SET m_epoch = excluded.m_epoch, env_sig = excluded.env_sig, snapshot_id = excluded.snapshot_id,
+      published_id = excluded.published_id, prev_published_id = excluded.prev_published_id, checked_at = excluded.checked_at
+    WHERE manifest_check.m_epoch IS NOT excluded.m_epoch OR manifest_check.env_sig IS NOT excluded.env_sig OR manifest_check.snapshot_id IS NOT excluded.snapshot_id
+       OR manifest_check.published_id IS NOT excluded.published_id OR manifest_check.prev_published_id IS NOT excluded.prev_published_id
+       OR manifest_check.checked_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-3 hours')`;
+
+/**
+ * The Worker settings a manifest depends on besides D1 (engine and variables): part of the
+ * unchanged-week shortcut's key, so a deploy or a variable change re-checks every week.
+ */
+const manifestEnvSig = env => `${ENGINE_VERSION}|${env.PUBLICATION_ALLOWED === 'true'}|${reportingStartOf(env) || ''}`;
+
 export async function getManifest(env, weekStart) {
-  const { manifest, epoch, latestSnapshot: latest, ordersText } = await assemble(env, weekStart, { rawOrders: true });
+  if (!WEEK_RE.test(weekStart) || weekStartOf(weekStart) !== weekStart) throw new ApiError(400, 'bad_query', 'week must be a Monday (YYYY-MM-DD)');
+  // Unchanged-week shortcut (migration 0021): when the last full check found this week's newest revision
+  // computed from exactly its inputs, no manifest input other than snapshots was written since (same m
+  // counter), the snapshots the manifest reads are the same (the week's newest and published revisions,
+  // the prior week's published one), the engine and variables are the same and the check is recent, the
+  // answer is the same: no manifest is assembled (≈8.6k rows read per week saved on every retry).
+  const db = env.DB, envSig = manifestEnvSig(env), prevWeek = addDays(weekStart, -7);
+  const [er, cr, lr, pr, qr] = await db.batch([
+    db.prepare('SELECT n, m FROM input_epoch WHERE id = 1'),
+    db.prepare('SELECT m_epoch, env_sig, snapshot_id, published_id, prev_published_id, checked_at FROM manifest_check WHERE week_start = ?1').bind(weekStart),
+    db.prepare('SELECT snapshot_id, revision, status, storage FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(weekStart),
+    db.prepare("SELECT snapshot_id FROM snapshot WHERE week_start = ?1 AND status = 'published'").bind(weekStart),
+    db.prepare("SELECT snapshot_id FROM snapshot WHERE week_start = ?1 AND status = 'published'").bind(prevWeek),
+  ]);
+  const cnt = er.results?.[0], chk = cr.results?.[0], last = lr.results?.[0];
+  const pubId = pr.results?.[0]?.snapshot_id ?? null, prevPubId = qr.results?.[0]?.snapshot_id ?? null;
+  if (chk && last && cnt && chk.m_epoch === cnt.m && chk.env_sig === envSig && chk.snapshot_id === last.snapshot_id && last.storage === 'chunked'
+      && (chk.published_id ?? null) === pubId && (chk.prev_published_id ?? null) === prevPubId
+      && Date.now() - Date.parse(chk.checked_at) <= MANIFEST_MAX_AGE_MS) {
+    return json({ existing: { snapshotId: last.snapshot_id, revision: last.revision, status: last.status }, epoch: cnt.n, shortcut: true });
+  }
+  const { manifest, epoch, mEpoch, anchorIds, latestSnapshot: latest, ordersText } = await assemble(env, weekStart, { rawOrders: true });
   const [manifestHash, inputsHash] = await manifestHashes(manifest, ordersText);
   // The week's newest revision was computed from exactly these inputs: nothing to do (a retry or re-run writes 0 rows).
   const existing = latest?.storage === 'chunked' && latest.manifest_hash === inputsHash
     ? { snapshotId: latest.snapshot_id, revision: latest.revision, status: latest.status } : null;
+  // Remember the verdict with the counter and snapshot ids read in the manifest's first batch (a write
+  // during assembly moves the counter, so the next request checks again). Not an input: it moves nothing.
+  if (existing && mEpoch !== null) await db.prepare(MANIFEST_CHECK_UPSERT).bind(weekStart, mEpoch, envSig, existing.snapshotId, anchorIds.published, anchorIds.prevPublished, nowIso()).run();
   const body = JSON.stringify({ manifest, manifestHash, epoch, signature: await signManifest(env, manifestHash, epoch), existing });
   return manifest.orders === RAW_ORDERS ? jsonText(body.replace('{"rawOrders":true}', () => ordersText)) : jsonText(body);
 }
@@ -530,6 +709,16 @@ export async function finalizeResults(request, env, id) {
       .bind(id, ...tcols.map(c => totals[c])),
     db.prepare('INSERT INTO snapshot_narrative (snapshot_id, narrative) VALUES (?1, ?2)').bind(id, index.narrative),
     db.prepare("UPDATE result_upload SET status = 'finalized', finalized_at = ?2 WHERE snapshot_id = ?1 AND status = 'open'").bind(id, at),
+    // The new revision is computed from exactly the week's current inputs (checked above, inside this
+    // transaction): record the unchanged-week check with the m counter read in the same transaction, so the
+    // next run's manifest for this week answers "existing" without assembling it.
+    db.prepare(`INSERT INTO manifest_check (week_start, m_epoch, env_sig, snapshot_id, published_id, prev_published_id, checked_at)
+        SELECT ?1, (SELECT m FROM input_epoch WHERE id = 1), ?2, ?3,
+               (SELECT snapshot_id FROM snapshot WHERE week_start = ?1 AND status = 'published'),
+               (SELECT snapshot_id FROM snapshot WHERE week_start = ?4 AND status = 'published'), ?5 WHERE 1
+        ON CONFLICT(week_start) DO UPDATE SET m_epoch = excluded.m_epoch, env_sig = excluded.env_sig, snapshot_id = excluded.snapshot_id,
+          published_id = excluded.published_id, prev_published_id = excluded.prev_published_id, checked_at = excluded.checked_at`)
+      .bind(u.week_start, manifestEnvSig(env), id, addDays(u.week_start, -7), at),
   ];
   try { await atomic(db, stmts); }
   catch (e) {

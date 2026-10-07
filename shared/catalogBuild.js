@@ -26,7 +26,7 @@ export { PyCompatError };
 export const URL_SOURCES = Object.freeze([
   'MCG_SHEET_URL', 'MCG_POTS_SHEET_URL', 'SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL',
   'AS_SHEET_URL', 'L2G_SHEET_URL', 'LIVELY_GOOD_SHEET_URL', 'CALATHEA_COLLECTIVE_SHEET_URL',
-  'SURFSIDE_ARRANGEMENT_SHEET_URL', 'LINDAMAKES_SHEET_URL', 'HP_SHEET_URL', 'MCG_EXTRA_SHEET_URL',
+  'SURFSIDE_ARRANGEMENT_SHEET_URL', 'LINDAMAKES_SHEET_URL', 'HP_SHEET_URL', 'MCG_EXTRA_SHEET_URL', 'MCG_PACK_SHEET_URL',
 ]);
 export const LIVELY_ROOT_MODES = Object.freeze(['manual_list', 'sheet']);
 export const JSON_SOURCES = Object.freeze(['PRODUCT_COSTS_JSON1', 'PRODUCT_COSTS_JSON2', 'SKU_WEIGHTS_JSON']);
@@ -397,6 +397,46 @@ export function buildCatalogTables(src, { livelyRootSource = 'manual_list' } = {
     vendor_costs: Object.fromEntries([...vendorCatalog].map(([v, m]) => [v, toObj(m)])), vendor_index: toObj(vendorIndex),
     ...(exportTables || {}),
   };
+  // build.py 1b: the MCG pack sheet, its own table (only when the source is configured and readable).
+  if (has(src.MCG_PACK_SHEET_URL)) {
+    const pack = parseMcgPackRows(pyCsvRows(src.MCG_PACK_SHEET_URL));
+    report.sources.MCG_PACK_SHEET_URL = pack.stats;
+    if (pack.costs) tables.mcg_pack = toObj(pack.costs);
+    else report.warnings.push(`MCG pack sheet: ${pack.stats.error} — not imported`);
+  }
   const mcgExtra = has(src.MCG_EXTRA_SHEET_URL) ? parseMcgExtraCsv(src.MCG_EXTRA_SHEET_URL) : {};
   return { tables, mcgExtra, report };
+}
+
+/**
+ * build.py parse_mcg_pack_rows: csv rows → { costs: Map SKU → Total Cost/pack | null, stats }.
+ * Header: the first of the first ten rows with a "Total Cost/pack" cell; SKU column: the first
+ * "SKU" cell at or above it. Blank, non-numeric, $0 or negative → null (a missing cost, never zero).
+ * Two different costs for one SKU → null. The selling price is never read.
+ */
+export function parseMcgPackRows(rows) {
+  let headerIdx = null, costIdx = null, skuIdx = null;
+  const lows = row => row.map(c => lower(pyStrip(c)));
+  for (let i = 0; i < Math.min(10, rows.length); i++) {
+    const j = lows(rows[i]).indexOf('total cost/pack');
+    if (j >= 0) { headerIdx = i; costIdx = j; break; }
+  }
+  if (headerIdx === null) return { costs: null, stats: { error: 'no_total_cost_column' } };
+  for (let i = 0; i <= headerIdx; i++) {
+    const j = lows(rows[i]).indexOf('sku');
+    if (j >= 0) { skuIdx = j; break; }
+  }
+  if (skuIdx === null) return { costs: null, stats: { error: 'no_sku_column' } };
+  const costs = new Map(), conflicts = new Set();
+  for (const row of rows.slice(headerIdx + 1)) {
+    const sku = upper(pyStrip(skuIdx < row.length ? row[skuIdx] : ''));
+    if (!sku) continue;
+    let cost = costIdx < row.length ? buildMoney(row[costIdx]) : null;
+    cost = cost === null || !(cost > 0 && cost < Infinity) ? null : pyRound(cost, 4);
+    if (costs.has(sku) && costs.get(sku) !== cost) conflicts.add(sku);
+    costs.set(sku, cost);
+  }
+  for (const sku of conflicts) costs.set(sku, null);
+  const priced = [...costs.values()].filter(v => v !== null).length;
+  return { costs, stats: { skus: costs.size, priced, missing: costs.size - priced, conflicting: conflicts.size } };
 }

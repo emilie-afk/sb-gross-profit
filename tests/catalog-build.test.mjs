@@ -60,7 +60,10 @@ test('build.py parity: every table and the catalog revision are identical (full 
     const r = await runParity(file, { allowFixtures: true });
     assert.ok(r.identical, JSON.stringify(r.tables));
     assert.equal(r.buildPyCatalogRev, r.workerCatalogRev);
-    for (const t of ['mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement', 'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index', 'mcgExtra']) assert.ok(r.tables[t].buildPy > 0, t);
+    for (const t of ['mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement', 'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index', 'mcgExtra', 'mcg_pack']) assert.ok(r.tables[t].buildPy > 0, t);
+    // The MCG pack tab: "Total Cost/pack" (never the price); $0, blank and conflicting costs are null (missing).
+    assert.deepEqual(r.jsCandidate.tables.mcg_pack, { 'RAZZ9001-10': 10, 'RAZZ9001-30': null, 'TAZZ9002-25': 1041.25, 'TAZZ9002-50': null,
+      'RAZZ9003-6': 12, 'RAZZ9004-6': null, 'S2ZZ9005': 2 });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -128,4 +131,13 @@ test('Lively Root tab (the Lively Good source): columns E/G/Q, compared with the
   assert.deepEqual(d.tables.vendor_costs, b.tables.vendor_costs, 'the vendor catalog is unchanged by the mode');
   const noTab = syntheticSheets(); delete noTab.LIVELY_GOOD_SHEET_URL;
   assert.throws(() => buildCatalogTables(noTab, { livelyRootSource: 'sheet' }), e => e.code === 'lively_root_unavailable');
+});
+
+test('MCG pack tab: no "Total Cost/pack" column or no SKU column → nothing imported (never a guess)', async () => {
+  const { parseMcgPackRows } = await import('../shared/catalogBuild.js');
+  assert.deepEqual(parseMcgPackRows(pyCsvRows('SKU,Price\nA-1,$4.00\n')), { costs: null, stats: { error: 'no_total_cost_column' } });
+  assert.deepEqual(parseMcgPackRows(pyCsvRows('Item,Total Cost/pack\nA-1,$4.00\n')), { costs: null, stats: { error: 'no_sku_column' } });
+  const ok = parseMcgPackRows(pyCsvRows('SKU,Total Cost/pack,Price\na-1,$4.00,$8.00\nA-2,-1,\nA-3,nan,\nA-4,inf,\n'));
+  assert.deepEqual(Object.fromEntries(ok.costs), { 'A-1': 4, 'A-2': null, 'A-3': null, 'A-4': null });
+  assert.deepEqual(ok.stats, { skus: 4, priced: 1, missing: 3, conflicting: 0 });
 });

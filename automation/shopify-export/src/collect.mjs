@@ -7,8 +7,9 @@
  *   1. Gmail preflight: read-only token (scope checked) and the mailbox address
  *      must match config — before anything is requested from Shopify.
  *   2. Shopify Admin: classify the page; sign in from Credential Manager only on
- *      a plain login form; stop on 2FA, captcha, expired session that login
- *      does not fix, or any unknown page.
+ *      a plain login form. On 2FA or a captcha in a visible browser, tell the
+ *      caller and wait for a person to finish it in the open window, then go on;
+ *      otherwise (or when the wait ends) stop. Stop on an unknown page.
  *   3. Run the recorded export steps (rolling eight-week window). A small
  *      export may download directly; otherwise Shopify emails a link.
  *   4. Poll the fixed Gmail search until exactly one matching email with one
@@ -27,6 +28,9 @@ import nodePath from 'node:path';
 import { EXIT, KIND, rollingWindow, prepareShopifyExport, selectExportMessage, detectExportFormat, safeError, hostAllowed, unzipSingleCsv } from './lib.mjs';
 import { NEEDS_HUMAN } from './authState.mjs';
 
+/** Sign-in states only a person can finish: Shopify's two-step code and a human check. */
+export const PERSON_NEEDED = new Set(['two_factor_required', 'captcha']);
+
 const hash16 = s => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 16);
 
 /**
@@ -42,6 +46,9 @@ const hash16 = s => crypto.createHash('sha256').update(String(s)).digest('hex').
  * @param {() => Date} [d.now]
  * @param {(ms: number) => Promise<void>} [d.sleep]
  * @param {() => Promise<string>} [d.onWaiting]  C7: called once after the export is requested, before the Gmail wait
+ * @param {number} [d.signInWaitMinutes]  visible browser only: how long to wait for a person to finish Shopify's sign-in (0 = stop at once)
+ * @param {(x: { state, since, waitMinutes }) => Promise<void>} [d.onSignInRequired]  called once when that wait starts
+ * @param {(x: { since }) => Promise<void>} [d.onSignedIn]  called when the person finished it; the export continues
  */
 export async function runCollector(d) {
   const { config, week, paths, runId, browser } = d;
@@ -83,7 +90,32 @@ export async function runCollector(d) {
       ({ state, evidence } = await browser.authState());
       if (state === 'login_required') return finish('login_failed', EXIT.LOGIN_FAILED);
     }
-    if (state === 'two_factor_required') return finish('needs_2fa', EXIT.NEEDS_2FA, { note: 'Run npm run login once in a visible browser' });
+    // A person is needed (Shopify's two-step code or a human check). In a visible browser the run waits
+    // for them in the open window and continues the export in the same run once Admin is signed in;
+    // the caller is told first, so it can keep what is done (ShipStation) and say clearly who must act.
+    const waitMs = Math.max(0, Number(d.signInWaitMinutes) || 0) * 60_000;
+    if (PERSON_NEEDED.has(state) && waitMs > 0) {
+      const since = now().toISOString();
+      manifest.signIn = { needed: state, since };
+      if (d.onSignInRequired) { try { await d.onSignInRequired({ state, since, waitMinutes: waitMs / 60_000 }); } catch { /* the wait goes on */ } }
+      const until = now().getTime() + waitMs, poll = (d.signInPollSeconds ?? 10) * 1000;
+      let unknownSince = null;
+      while (state !== 'authenticated' && now().getTime() + poll <= until) {
+        await sleep(poll);
+        ({ state, evidence } = await browser.authState());
+        // After the code, Shopify can land outside Admin (account or store chooser): after a minute there, go back to Admin.
+        if (state === 'unknown' && browser.gotoAdmin) {
+          unknownSince ??= now().getTime();
+          if (now().getTime() - unknownSince >= 60_000) { await browser.gotoAdmin(); unknownSince = null; ({ state, evidence } = await browser.authState()); }
+        } else unknownSince = null;
+      }
+      manifest.signIn.waitedMinutes = Math.round((now().getTime() - Date.parse(since)) / 60_000);
+      if (state === 'authenticated') {
+        manifest.signIn.completedAt = now().toISOString();
+        if (d.onSignedIn) { try { await d.onSignedIn({ since }); } catch { /* reporting only */ } }
+      } else if (state === 'unknown' || state === 'login_required' || state === 'session_expired') state = manifest.signIn.needed;   // still the person's step
+    }
+    if (state === 'two_factor_required') return finish('needs_2fa', EXIT.NEEDS_2FA, { note: 'A person must enter the Shopify two-step code in the collector\'s browser window; the next attempt waits for it' });
     if (state === 'captcha') return finish('needs_human_captcha', EXIT.CAPTCHA);
     if (NEEDS_HUMAN.has(state) || state !== 'authenticated') return finish('unknown_page', EXIT.UNKNOWN_PAGE, { evidence });
 

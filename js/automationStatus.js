@@ -46,6 +46,7 @@ function freeTierRows(f) {
   if (!f || typeof f !== 'object') return [];
   const v = f.verification;
   return [
+    ...(f.attention ? [['Action needed', `<strong>${esc(f.attention.label)}</strong> · since ${esc(when(f.attention.since))}`]] : []),
     ['Verified-draft target', `${esc(when(f.dueAt))} — ${esc(TARGET_LABEL[f.target] || f.target)}`],
     ['Weekly status', esc(f.label || '—')],
     ['Waiting for', (f.pending || []).map(p => esc(p.label)).join('<br>') || 'Nothing'],

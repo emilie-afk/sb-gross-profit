@@ -44,6 +44,17 @@ export function syntheticSheets({ scale = false, vendorScale = 1 } = {}) {
       + extra('LindaMakes', 396),
     HP_SHEET_URL: 'SKU,Cost,WeightLb\nHPX-1,3.00,1.2\nHPX-2,4.00,\nHPX-1,3.25,1.3\nHPX-3,,2\n',
     MCG_EXTRA_SHEET_URL: '\ufeffSKU,Description,Cost per item\nS9ZZ0001,S9ZZ0001 Extra Plant / 2in,1.50\nS9ZZ0002,,0\n',
+    // The MCG succulent-pack tab's shape: a title row holding "SKU", then the row holding "Total Cost/pack";
+    // the selling price beside it; $0.00 and blank costs; a conflicting duplicate; a lowercase SKU; a note column.
+    MCG_PACK_SHEET_URL: 'No,Pack,SKU,,,,,Shopify,,note\n'
+      + ',,,Packs,Cost per plant,Total Cost/pack,Price,Uploaded Listing,,"pack <20 -> $4\npack >=100 -> $2"\n'
+      + '1,"Synthetic Assorted Pack (10-30 Plants, 2"" Pots)",RAZZ9001-10,10,$1.00,$10.00,$20.00,TRUE,,\n'
+      + ',,RAZZ9001-30,30,,$0.00,$0.00,TRUE,,\n'
+      + '2,Synthetic Bulk Pack,TAZZ9002-25,25,$1.65,"$1,041.25",$82.50,TRUE,,\n'
+      + ',,TAZZ9002-50,50,,,,FALSE,,\n'
+      + ',,razz9003-6, 6 ,$2.00, $12.00 ,$24.00,TRUE,,\n'
+      + ',,RAZZ9004-6,6,$2.00,$12.00,$24.00,TRUE,,\n,,RAZZ9004-6,6,$2.10,$12.60,$25.20,TRUE,,\n'
+      + '3,Mystery Synthetic,S2ZZ9005,1,$2.00,$2.00,$4.00,TRUE,,\n,,,,,$0.00,$0.00,FALSE,,\n',
     productExport: { name: 'products_export_2026-09-20.csv', text: 'Handle,Title,Vendor,Variant SKU,Cost per item,Body (HTML)\n'
       + 'sb-thing,SB Thing,Succulents Box,SB-1,2.00,"<p>line\nline</p>"\nsb-thing,,,SB-2,2.50,\n'
       + 'hp-fern,Boston Fern!,House Plant Dropship,HPF-1,9.00,\nhp-fern,,,HPF-2,11.00,\nhp-fern,,,,12.00,\n'

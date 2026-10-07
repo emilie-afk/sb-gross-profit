@@ -130,9 +130,13 @@ function getMcgVolumeDisc(plantCount) {
 
 // Returns number of MCG plant units for sku×qty.
 // Pots, Faire wholesale, and non-MCG SKUs return 0.
-function mcgPlantUnits(sku, qty) {
+function mcgPlantUnits(sku, qty, mcgPack = null) {
   const s = (sku || '').toUpperCase();
   if (!isMcgSku(sku)) return 0;
+  // MCG pack sheet SKUs (packs and random/Mystery plants): the sheet's Total Cost/pack is the final
+  // product cost (owner decision 2026-10-06). They get no volume discount and, like the rack/pack SKUs,
+  // do not count toward another line's discount. A bundle holding one is treated the same way.
+  if (mcgPack && s.split('+').some(part => Object.prototype.hasOwnProperty.call(mcgPack, part.trim()))) return 0;
   // Pots — not plants
   if (s.startsWith('EEZZ') || s.startsWith('EBZZ') || s.startsWith('EEVZ') ||
       s.startsWith('MODERNPOT')) return 0;
@@ -265,7 +269,7 @@ function mcgTierCost(sku, mcgCosts) {
  * catalog is inserted ahead of them, and it can never return another vendor's
  * cost.
  */
-function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, skuAlias = {}, mcgExtra = {}, vendorCosts = null, vendorIndex = null) {
+function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, skuAlias = {}, mcgExtra = {}, vendorCosts = null, vendorIndex = null, mcgPack = null) {
   const key = (sku || '').toUpperCase().trim();
 
   // 1. Vendor catalog, exact vendor + exact SKU. This runs before the composite
@@ -286,12 +290,24 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
     let total = 0;
     const labels = [];
     for (const part of parts) {
-      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts, hpByName, null, skuAlias, mcgExtra, vendorCosts, vendorIndex);
+      const [c, l] = getCost(part, vendor, mcgCosts, productCosts, additionalCosts, hpByName, null, skuAlias, mcgExtra, vendorCosts, vendorIndex, mcgPack);
       if (c === null) return [null, 'COST MISSING', 'missing'];
       total += c;
       labels.push(`${part}:${l}`);
     }
     return [Math.round(total * 100) / 100, 'Bundle (' + labels.join(' + ') + ')', 'bundle'];
+  }
+
+  // MCG pack sheet (catalog table mcg_pack, corrected costs effective Aug 1, 2026): the SKU-level
+  // "Total Cost/pack" wins over the rack/pack tier and the name rules below, and it is the FINAL
+  // product cost for packs and random/Mystery plants alike: no volume discount is applied to it
+  // (mcgPlantUnits gives these SKUs 0 plants). A SKU the sheet lists with a blank or $0 cost is
+  // stored as null and stays MISSING (never a zero-cost product, never a tier guess). Other plants
+  // keep the existing discount rules. Absent table → unchanged.
+  if (mcgPack && Object.prototype.hasOwnProperty.call(mcgPack, key)) {
+    const c = mcgPack[key];
+    if (typeof c === 'number' && Number.isFinite(c) && c > 0) return [c, 'MCG pack sheet', 'mcg_pack_sheet'];
+    return [null, 'MCG pack sheet (cost missing)', 'missing'];
   }
 
   // Rack/Pack SKUs (MCG only): detect by product name containing "PACK" + MCG vendor.
@@ -401,7 +417,7 @@ function getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName,
   //    If the order came in with an Amazon seller SKU, map it to the real SKU and re-lookup
   if (skuAlias && skuAlias[key] && skuAlias[key] !== key) {
     const canonical = skuAlias[key];
-    return getCost(canonical, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, {}, mcgExtra, vendorCosts, vendorIndex);
+    return getCost(canonical, vendor, mcgCosts, productCosts, additionalCosts, hpByName, productName, {}, mcgExtra, vendorCosts, vendorIndex, mcgPack);
     // pass empty alias to avoid infinite loops if canonical itself is aliased
   }
   // 7. MCG vendor + product name size fallback
@@ -427,6 +443,7 @@ function labelToMatchType(label) {
   if (l === 'COST MISSING')              return 'missing';
   if (l.startsWith('Bundle'))            return 'bundle';
   if (l.startsWith('MCG Total sheet'))   return 'mcg_sheet';
+  if (l.startsWith('MCG pack sheet'))    return 'mcg_pack_sheet';
   if (l.startsWith('MCG Pot Costs'))     return 'mcg_pot_sheet';
   if (l.startsWith('MCG extra (name'))   return 'mcg_extra_name';
   if (l.startsWith('MCG sheet (name'))   return 'mcg_sheet_name';
@@ -813,6 +830,9 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     // no line-level refunds, so the manual and CSV paths pass nothing and a
     // Route line never receives any part of a general refund.
     routeRefunds     = null,
+    // MCG pack sheet costs (catalog table mcg_pack): SKU → Total Cost/pack, or null when the sheet
+    // has no cost. Null/absent (every catalog before it existed) keeps the earlier rules.
+    mcgPackCosts     = null,
   } = options;
   if (routeRefunds !== null && !(routeRefunds instanceof Map)) throw new Error('routeRefunds must be a Map');
   if (!Object.values(SHIPPING_RULES).includes(shippingRules)) throw new Error(`Unknown shippingRules ${shippingRules}`);
@@ -882,7 +902,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const sku  = (row['Lineitem sku'] || '').trim();
     const qty  = parseInt(row['Lineitem quantity'] || '1') || 1;
     if (!name || !sku || sku.toLowerCase() === 'nan') continue;
-    const units = mcgPlantUnits(sku, qty);
+    const units = mcgPlantUnits(sku, qty, mcgPackCosts);
     if (units > 0) orderMcgPlants.set(name, (orderMcgPlants.get(name) || 0) + units);
   }
 
@@ -1028,7 +1048,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
     const lineRevenue = isInfluencerSample
       ? 0
       : Math.round((unitPrice * qty - lineDiscount) * 100) / 100;
-    let [unitCost, costSource, costMatchType] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias, mcgExtra, vendorCosts, vendorIndex);
+    let [unitCost, costSource, costMatchType] = getCost(sku, vendor, mcgCosts, productCosts, additionalCosts, hpByName, product, skuAlias, mcgExtra, vendorCosts, vendorIndex, mcgPackCosts);
     costMatchType = costMatchType || labelToMatchType(costSource);
     const vendorKey = inferVendorKey(sku, vendor);
     const productUp = (product || '').toUpperCase();
@@ -1050,7 +1070,7 @@ export function calculate(orderRows, shipStationCosts, mcgCosts, productCosts, s
       const orderPlantTotal = orderMcgPlants.get(orderNum) || 0;
       const discPerPlant    = getMcgVolumeDisc(orderPlantTotal);
       if (discPerPlant > 0) {
-        const plantsPerUnit = mcgPlantUnits(sku, 1); // plants in 1 unit of this SKU
+        const plantsPerUnit = mcgPlantUnits(sku, 1, mcgPackCosts); // plants in 1 unit of this SKU
         if (plantsPerUnit > 0) {
           mcgVolDisc = Math.round(discPerPlant * plantsPerUnit * qty * 100) / 100;
           unitCost   = Math.round((unitCost - discPerPlant * plantsPerUnit) * 100) / 100;

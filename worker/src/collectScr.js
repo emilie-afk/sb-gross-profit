@@ -59,12 +59,14 @@ async function dayGroupsOf(db, pairs) {
       JOIN json_each(?1) j ON d.version_id = json_extract(j.value, '$[0]') AND d.ship_date = json_extract(j.value, '$[1]')`, pairs);
   return new Map(rows.map(r => [`${r.version_id}|${r.ship_date}`, P(r.groups, [])]));
 }
+/** Order keys ?1 with cost on some currently owned date: an indexed lookup (scr_day_key, migration 0020). */
+export const ACCEPTED_KEYS_SQL = `SELECT DISTINCT k.order_key AS k FROM scr_day_key k
+    JOIN scr_day_owner o ON o.ship_date = k.ship_date AND o.version_id = k.version_id
+    WHERE k.order_key IN (SELECT value FROM json_each(?1))`;
 /** Which of these order keys already have accepted cost on some owned date (evaluated in D1, not Worker CPU). */
 async function keysWithAcceptedCost(db, keys) {
   if (!keys.length) return new Set();
-  const rows = await selectIn(db, `SELECT DISTINCT json_extract(g.value, '$[0]') AS k FROM scr_day_owner o
-      JOIN scr_day d ON d.version_id = o.version_id AND d.ship_date = o.ship_date, json_each(d.groups) g
-      WHERE json_extract(g.value, '$[0]') IN (SELECT value FROM json_each(?1))`, keys);
+  const rows = await selectIn(db, ACCEPTED_KEYS_SQL, keys);
   return new Set(rows.map(r => String(r.k)));
 }
 /** Weeks whose orders' shipping costs move when these dates change owner (order weeks + ship weeks). */
@@ -200,6 +202,9 @@ export async function uploadScrVersion(request, env) {
       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`).bind(versionId, src.source_id, b.requestedFrom, b.requestedTo, declared.exportedAt || b.exportedAt || null, at, status, JSON.stringify(out)),
     ...store.map(d => db.prepare('INSERT INTO scr_day (version_id, ship_date, day_hash, cost_cents, row_count, groups, outcome) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)')
       .bind(versionId, d.date, d.hash, d.costCents, d.rowCount, JSON.stringify(d.groups), dayOutcome(d))),
+    // The day's order keys, for indexed lookups (one row per order of the stored day).
+    ...store.filter(d => d.groups.length).map(d => db.prepare("INSERT OR IGNORE INTO scr_day_key (order_key, version_id, ship_date) SELECT json_extract(value, '$[0]'), ?1, ?2 FROM json_each(?3)")
+      .bind(versionId, d.date, JSON.stringify(d.groups))),
   ];
   if (activate.length) stmts.push(...activationStatements(db, { activationId, versionId, at, actorCls: 'ingest_secret', days: activate, own, weeks }),
     decisionStmt(db, { versionId, kind: 'auto_activate', at, actor: { cls: 'ingest_secret', label: 'collector' },

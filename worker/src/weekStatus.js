@@ -10,7 +10,7 @@
  * late, it names exactly which.
  */
 import { ApiError, json, WEEK_RE } from './http.js';
-import { getSettings } from './db.js';
+import { getSettings, newId } from './db.js';
 import { scrBasis } from './collectScr.js';
 import { verificationOf } from './verifyRoutes.js';
 import { addDays } from '../../shared/normalized.js';
@@ -18,6 +18,7 @@ import { weekWindowUtc, scheduledRunFor } from '../../shared/schedule.js';
 
 export const PENDING_LABELS = Object.freeze({
   week_open: 'Reporting week not closed yet',
+  shopify_signin_required: 'Shopify needs a person to sign in: enter the two-step code (or finish the check) in the Shopify window the collector opened on the reporting laptop. The collector waits there and continues by itself.',
   shopify_export_pending: 'Shopify rolling export not received yet',
   shipping_report_missing: 'Shipping Cost Report not received for this week',
   shipping_report_partial: 'Shipping Cost Report does not cover the whole week yet',
@@ -41,6 +42,11 @@ export async function weekStatus(db, weekStart, now = new Date()) {
   const shop = await db.prepare(`SELECT source_id, sealed_at, declared FROM src_object WHERE kind = 'shopify' AND status = 'retained'
       AND json_extract(declared, '$.window.to') >= ?1 AND json_extract(declared, '$.window.from') <= ?2 ORDER BY sealed_at DESC LIMIT 1`).bind(weekEnd, weekStart).first();
   const shopifyAfterClose = shop && shop.sealed_at >= win.endUtcExclusive;
+  // The collector reports when Shopify's sign-in needs a person; a later export (or its own "signed in") clears it.
+  const signIn = await db.prepare(`SELECT status, detail, at FROM automation_event WHERE week_start = ?1 AND step = ?2 ORDER BY at DESC LIMIT 1`)
+    .bind(weekStart, SIGNIN_STEP).first();
+  const signInNeeded = signIn?.status === 'needs_person' && !(shop && shop.sealed_at >= signIn.at);
+  if (!shopifyAfterClose && signInNeeded) pending.push('shopify_signin_required');
   if (!shopifyAfterClose) pending.push('shopify_export_pending');
   const basis = await scrBasis(db, weekStart, win.endUtcExclusive);
   // The newest automatically rejected version covering the week (failed automated checks), if any.
@@ -89,6 +95,8 @@ export async function weekStatus(db, weekStart, now = new Date()) {
     weekStart, dueAt: due, target, state: verified ? 'verified' : pending[0],
     label: published ? 'Verified and published (provisional)' : verified ? 'Verified draft (not published)' : PENDING_LABELS[pending[0]],
     pending: pending.map(code => ({ code, label: PENDING_LABELS[code] })),
+    ...(signInNeeded && !shopifyAfterClose ? { attention: { code: 'shopify_signin_required', since: signIn.at, authState: JSON.parse(signIn.detail || '{}').authState || null,
+                                                            label: PENDING_LABELS.shopify_signin_required } } : {}),
     sources: { shopifyReceivedAt: shop?.sealed_at || null,
                shippingReport: { status: basis.basisStatus, label: basis.label || null, newerPending: (basis.newerPending || []).length,
                                  flags: reportFlags, changedDates, omittedDates,
@@ -97,6 +105,28 @@ export async function weekStatus(db, weekStart, now = new Date()) {
     verification: v ? { status: v.status, at: v.at, attempts: v.attempts, counts: { ordersChecked: v.report.ordersChecked ?? null,
       orderMismatches: v.report.orderMismatches ?? null, sectionMismatches: v.report.sectionMismatches ?? null } } : null,
   };
+}
+
+export const SIGNIN_STEP = 'collector:shopify_signin';
+const SIGNIN_STATUSES = new Set(['needs_person', 'signed_in']);
+const SIGNIN_AUTH_STATES = new Set(['two_factor_required', 'captcha']);
+
+/**
+ * POST /v1/collect/weeks/:week/signin { status: 'needs_person' | 'signed_in', authState?, waitMinutes? } (ingest):
+ * the collector says that Shopify's sign-in needs a person (and while it waits for them), or that it
+ * was finished. Codes and numbers only; shown on the week's status until the export arrives.
+ */
+export async function postSignInEvent(request, env, weekStart) {
+  if (!WEEK_RE.test(weekStart)) throw new ApiError(400, 'bad_query', 'week must be YYYY-MM-DD');
+  let b; try { b = await request.json(); } catch { throw new ApiError(400, 'bad_payload', 'JSON body required'); }
+  if (!SIGNIN_STATUSES.has(b?.status)) throw new ApiError(400, 'bad_payload', 'status must be needs_person or signed_in');
+  if (b.authState != null && !SIGNIN_AUTH_STATES.has(b.authState)) throw new ApiError(400, 'bad_payload', 'authState must be two_factor_required or captcha');
+  if (b.waitMinutes != null && !(Number.isInteger(b.waitMinutes) && b.waitMinutes >= 0 && b.waitMinutes <= 120)) throw new ApiError(400, 'bad_payload', 'waitMinutes must be 0–120');
+  const detail = { source: 'shopify', ...(b.authState ? { authState: b.authState } : {}), ...(b.waitMinutes != null ? { waitMinutes: b.waitMinutes } : {}) };
+  const at = new Date().toISOString();
+  await env.DB.prepare(`INSERT INTO automation_event (event_id, week_start, step, status, detail, correlation_id, actor_class, actor_label, at)
+      VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'ingest_secret', 'collector', ?6)`).bind(newId('evt'), weekStart, SIGNIN_STEP, b.status, JSON.stringify(detail), at).run();
+  return json({ weekStart, status: b.status, at });
 }
 
 export async function getWeekStatus(env, weekStart) {

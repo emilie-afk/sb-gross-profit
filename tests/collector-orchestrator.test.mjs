@@ -132,3 +132,50 @@ test('C7 collector: the example config holds no credentials and names separate c
   assert.notEqual(ex.shipstationConfig, ex.shopifyConfig);
   assert.ok(!/password|secret|token/i.test(JSON.stringify(Object.keys(ex))));
 });
+
+test('collector: Shopify sign-in that needs a person — ShipStation kept first, the status says so, retries wait for the person and then finish', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-orch-'));
+  const log = [], events = [];
+  let collected = { shopify: 'missing', shopify_updates: 'missing', shipping_cost_report: 'missing' }, signedIn = false, computes = 0;
+  const d = {
+    week, lockFile: path.join(dir, 'collector.lock'), stateFile: path.join(dir, 'state.json'),
+    weekPlan: async () => ({ weekStart: week.weekStart, collected }),
+    shipstation: {
+      collect: async () => { log.push('shipstation:collect'); return { status: 'prepared', pending: { sanitized: true } }; },
+      upload: async () => { log.push('shipstation:upload'); collected = { ...collected, shipping_cost_report: 'ok' }; return { status: 'ok', exitCode: 0 }; },
+    },
+    shopify: {
+      run: async ({ onSignInRequired, onSignedIn }) => {
+        log.push('shopify:open');
+        await onSignInRequired({ state: 'two_factor_required', since: '2026-09-21T08:10:00Z', waitMinutes: 30 });
+        if (!signedIn) return { status: 'needs_2fa', exitCode: 20 };     // nobody signed in during the wait
+        await onSignedIn({ since: '2026-09-21T08:10:00Z' });
+        log.push('shopify:export');
+        collected = { ...collected, shopify: 'ok', shopify_updates: 'ok' };
+        return { status: 'ok', exitCode: 0 };
+      },
+    },
+    signInEvent: async (status, detail) => { events.push([status, detail?.authState ?? null]); },
+    compute: async () => { computes++; return { status: 'ok' }; },
+  };
+  // Attempt 1: the ShipStation report is uploaded BEFORE the wait for the person; the week computes what it can.
+  const a = await runWeeklyCollection(d);
+  assert.deepEqual([a.status, a.exitCode], ['signin_required', EXIT.SIGNIN_REQUIRED]);
+  assert.deepEqual(log, ['shipstation:collect', 'shopify:open', 'shipstation:upload']);
+  assert.deepEqual(events, [['needs_person', 'two_factor_required']]);
+  assert.equal(a.sources.shipping_cost_report, 'ok');
+  assert.equal(computes, 1);
+  // Attempt 2: nothing exported again; still waiting — no compute (no D1 reads for nothing).
+  log.length = 0;
+  const b = await runWeeklyCollection(d);
+  assert.deepEqual([b.exitCode, b.compute], [EXIT.SIGNIN_REQUIRED, { status: 'skipped', code: 'shopify_signin_required' }]);
+  assert.deepEqual(log, ['shopify:open'], 'ShipStation is not collected twice');
+  assert.equal(computes, 1);
+  // Attempt 3: the person signs in in the open window; the same run continues the export and finishes.
+  signedIn = true; log.length = 0; events.length = 0;
+  const c = await runWeeklyCollection(d);
+  assert.deepEqual([c.status, c.exitCode], ['ok', EXIT.OK]);
+  assert.deepEqual(log, ['shopify:open', 'shopify:export']);
+  assert.deepEqual(events.map(e => e[0]), ['needs_person', 'signed_in']);
+  assert.equal(computes, 2);
+});

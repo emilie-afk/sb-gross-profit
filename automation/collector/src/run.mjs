@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * run.mjs — Windows entry point for the weekly collector orchestrator (C7)
- *   node src/run.mjs --config config.local.json [--week 2026-09-14] [--headed]
+ *   node src/run.mjs --config config.local.json [--week 2026-09-14] [--headed] [--recovery]
  * Task Scheduler: weekly Monday 15:05 (ICT) AND at startup/logon, with
  * "Run task as soon as possible after a scheduled start is missed".
  */
@@ -45,9 +45,21 @@ const closed = Date.now() >= closeAt;
 const ingestSecret = () => readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest').password;
 const ft = config.pipeline === 'free_tier' ? freeTierPipeline({
   workerUrl: config.workerUrl, ingestSecret: ingestSecret(), closedWeek: weekStart,
-  verifyUrl: config.verifyUrl || null, verifyWaitMs: (config.verifyWaitMinutes ?? 8) * 60_000,
+  verifyUrl: config.verifyUrl || null, verifyWaitMs: (config.verifyWaitMinutes ?? 8) * 60_000, maxRefreshesPerRun: config.maxRefreshesPerRun ?? 12,
   triggerSecret: config.verifyUrl ? readWindowsCredential(config.verifyTriggerCredentialTarget || 'sb-gp-verify-trigger').password : null,
 }) : null;
+
+// Recovery start (the task's daily and repeat triggers once the week is marked done on this PC): one cheap
+// question to the Worker first. Nothing unfinished → exit now (no browser, no compute). No budget → exit 42.
+// The check itself failing → exit 40 (bounded retries); it never counts as "nothing to do" or "within budget".
+if (args.recovery && ft) {
+  let w = null;
+  try { w = await ft.work(); } catch { w = null; }
+  if (!w) { console.log('recovery: unfinished-work check unavailable (exit 40)'); process.exit(40); }
+  if (!w.unfinished?.length) { console.log('recovery: nothing unfinished (exit 0)'); process.exit(0); }
+  if (w.budget?.state !== 'ok') { console.log(`recovery: ${w.unfinished.join(', ')}; deferred (${(w.budget?.reasons || []).join(', ')})`); process.exit(w.budget?.state === 'defer' ? 42 : 40); }
+  console.log(`recovery: resuming ${w.unfinished.join(', ')}`);
+}
 
 const r = await runWeeklyCollection({
   week: { ...w, closed },
@@ -65,8 +77,9 @@ const r = await runWeeklyCollection({
     collect: () => runShipStationJob({ config: ssConfig, week: w, headed: !!args.headed, deferUpload: true }),
     upload: pending => finishShipStationUpload(pending, ft ? { uploadImpl: ft.uploadImpl } : {}),
   },
-  shopify: { run: ({ onWaiting }) => runShopifyJob({ config: shConfig, week: w, headed: !!args.headed, onWaiting, ...(ft ? { uploadImpl: ft.uploadImpl } : {}) }) },
-  ...(ft ? { compute: () => ft.compute() } : {}),
+  shopify: { run: ({ onWaiting, onSignInRequired, onSignedIn }) => runShopifyJob({ config: shConfig, week: w, headed: !!args.headed, onWaiting, onSignInRequired, onSignedIn,
+    ...(ft ? { uploadImpl: ft.uploadImpl } : {}) }) },
+  ...(ft ? { compute: () => ft.compute(), signInEvent: (status, detail) => ft.signInEvent(status, detail), budget: () => ft.budget() } : {}),
 });
 console.log(scrub(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}${r.compute ? ` compute ${JSON.stringify(r.compute)}` : ''}`));
 process.exitCode = r.exitCode;

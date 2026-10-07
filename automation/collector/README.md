@@ -71,6 +71,12 @@ The Worker's first compute attempt is Monday 15:30 ICT.
 | 0 | Every missing source was delivered, the week was already collected, or the week has not closed yet |
 | 5 | Another instance is running |
 | 40 | Partial: at least one source failed. The run output and each collector's manifest name the source and its own exit code (see the collector READMEs) |
+| 41 | Shopify's sign-in needs a person (two-step code or a human check). The ShipStation report was uploaded first; the week's status says "Shopify needs a person to sign in". `windows/weekly-task.ps1` opens the Shopify window again every 2 minutes until that start's time is up (it ends 15 minutes before the task's 3-hour limit); the next trigger (Monday every 3 hours for 12 hours, daily 07:20, at logon) opens it again, and the run continues by itself once someone signs in there |
+| 42 | Deferred: the day's D1 budget is used up (background work stops at 60% of the Free plan's daily allowance, `GET /v1/collect/budget`). Nothing more is attempted and nothing is retried soon; no done marker. The daily 07:20 (ICT) trigger after D1's 00:00 UTC reset resumes it |
+
+## Windows task (weekly-task.ps1 and install-task.ps1)
+
+`windows/install-task.ps1` without `-Apply` prints the task's actual settings and triggers; with `-Apply` it sets the triggers (Monday 15:05 repeating every 3 hours for 12 hours, daily 07:20, at logon) and the limits (ExecutionTimeLimit 3 hours, MultipleInstances IgnoreNew, StartWhenAvailable). It never changes the action, the user or credentials. `weekly-task.ps1` stops itself 15 minutes before the 3-hour limit, gives each attempt at most 100 minutes (a 30-minute sign-in wait plus a 45-minute export email wait fit), and stops an attempt that overruns together with its child processes, releasing the collector lock that attempt held. Only exit 0 writes `done-<week>.txt`.
 
 ## Tests
 

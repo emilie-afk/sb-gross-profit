@@ -191,6 +191,8 @@ test('orders and results: non-canonical orders, unretained sources, forged manif
   const s = orderBodyString(body), hs = crypto.createHash('sha256').update(s).digest('hex');
   await assert.rejects(c.call('POST', '/v1/collect/orders', { json: { sourceId: 'src_00000000000000000000', orders: [{ s, h: hs }] } }), e => e.code === 'source_not_retained');
   const week = d.weeks[d.weeks.length - 1];
+  assert.ok((await c.call('GET', `/v1/collect/weeks/${week}/manifest`)).shortcut, 'recorded at finalize: answered without assembling');
+  await env.DB.prepare('DELETE FROM manifest_check').run();
   const m = await c.call('GET', `/v1/collect/weeks/${week}/manifest`);
   assert.ok(m.existing, 'unchanged inputs: the manifest says the week is already computed');
   const forged = { ...m.manifest, previousShippingExpense: 1 };
@@ -230,7 +232,24 @@ test('retries: repeating every upload and every week computes nothing and writes
   assert.equal(s.sourceStatus, 'already_have');
   assert.equal(o.written, 0);
   assert.ok(again.every(r => r.status === 'unchanged'), JSON.stringify(again));
+  // Finalize recorded each week's check (migration 0021): a repeat writes 0 rows ...
   assert.equal(changes(env), before, '0 rows written');
+  // ... and assembles no manifest (the shortcut answers), as does every further repeat.
+  const mid = changes(env);
+  let assembled = 0; const orig = env.DB.prepare.bind(env.DB);
+  env.DB.prepare = sql => { if (/FROM ord_ptr WHERE week_start/.test(sql)) assembled++; return orig(sql); };
+  const third = [];
+  for (const w of d.weeks) third.push(await FT.computeAndUploadWeek(c, w, ft.cache));
+  env.DB.prepare = orig;
+  assert.ok(third.every(r => r.status === 'unchanged'));
+  assert.equal(changes(env), mid, '0 rows written');
+  assert.equal(assembled, 0, 'no manifest assembled');
+  // Any input write (here a setting) moves the epoch: the next check assembles the manifest again.
+  await api(env, 'POST', '/v1/admin/settings', { mcg_free_shipping_threshold: 77, reason: 'test: an input changed' });
+  env.DB.prepare = sql => { if (/FROM ord_ptr WHERE week_start/.test(sql)) assembled++; return orig(sql); };
+  await FT.computeAndUploadWeek(c, d.weeks[0], ft.cache);
+  env.DB.prepare = orig;
+  assert.ok(assembled > 0, 'a moved epoch re-checks');
 });
 
 test('verifier: an altered order GP or vendor total is a mismatch; the exact difference is stored privately; the public answer and logs carry counts only', async () => {
@@ -326,4 +345,25 @@ test('duplicate deliveries: the same source manifest and the same report version
   const [v1, v2] = await Promise.all([c.call('POST', '/v1/collect/scr/versions', { json: vb }), c.call('POST', '/v1/collect/scr/versions', { json: vb })]);
   assert.equal(v1.versionId, v2.versionId);
   assert.equal((await env.DB.prepare('SELECT COUNT(*) AS n FROM scr_version').first()).n, 1);
+});
+
+test('unchanged-week checks: a result or publication re-checks only the weeks whose manifest reads it', async () => {
+  const d = dataset({ n: 120 });
+  const ft = await freeTierRun(d, { verify: false });
+  const { env, c } = ft;
+  const short = async w => !!(await c.call('GET', `/v1/collect/weeks/${w}/manifest`)).shortcut;
+  for (const w of d.weeks) assert.equal(await short(w), true, `${w}: recorded when its result was finalized`);
+  // A published revision changed outside the publish path (here directly): weeks 3 (its own published revision)
+  // and 4 (its comparison) are checked again; every other week is still answered without assembling.
+  const w3 = d.weeks[3];
+  await env.DB.prepare("UPDATE snapshot SET status = 'published' WHERE week_start = ?1").bind(w3).run();
+  const after = [];
+  for (const w of d.weeks) after.push(await short(w));
+  assert.deepEqual(after, d.weeks.map((w, i) => !(i === 3 || i === 4)));
+  // Re-assembled: week 3 is still unchanged (recorded again, answered without assembling next time); week 4's
+  // comparison changed, so it is no longer "existing" (it needs its recompute) and is never answered from a check.
+  const again = [];
+  for (const w of d.weeks) again.push(await short(w));
+  assert.deepEqual(again, d.weeks.map((w, i) => i !== 4));
+  assert.equal((await c.call('GET', `/v1/collect/weeks/${d.weeks[4]}/manifest`)).existing, null);
 });

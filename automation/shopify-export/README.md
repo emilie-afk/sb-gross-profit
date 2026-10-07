@@ -58,7 +58,7 @@ The updated-order scan is this same rolling eight-week export. A refund or cance
 
 ## Checks before upload (the job stops rather than guesses)
 
-- **Sign-in state:** the job stops on a 2FA prompt, a captcha, an expired session that login does not fix, or any page it does not recognise, including an Admin-looking page outside the Admin origin.
+- **Sign-in state:** an expired session is signed in again from Credential Manager. When Shopify then asks for its two-step code (or a human check), a visible run (the weekly task runs headed) reports it to the Worker — the week's status shows "Shopify needs a person to sign in" — and waits `signInWaitMinutes` (default 30) in the open window. Once someone enters the code there, the same run continues the export. If nobody does, it stops with exit 20/21 and the weekly task opens the window again a few minutes later (for up to 12 hours). A headless run stops at once. The job stops on any page it does not recognise, including an Admin-looking page outside the Admin origin.
 - **File format:** the download must be a Shopify orders CSV. Shopify emails large exports as a ZIP holding one CSV: that one entry is extracted in memory (stored or deflate, CRC checked, size capped) and handled exactly like the CSV. An HTML page (usually a sign-in), any other ZIP or anything else is refused.
 - **Required columns:** the Worker minimum plus `Cancelled at`, `Fulfilled at`, `Financial Status` and `Refunded Amount`.
 - **Order dates:** every order's `Created at` must fall inside the rolling window. If any does not, the export filter is wrong (`export_window_mismatch`).
@@ -83,8 +83,8 @@ The email can take a while, so the job polls for up to `gmail.timeoutMinutes` (d
 | --- | --- | --- |
 | 0 | Uploaded (`source_received` or `source_no_change`) | nothing |
 | 10 | Config error (including a Gmail search in the config) | fix `config.local.json` |
-| 20 | Shopify 2FA required | `npm run login` |
-| 21 | Captcha shown | `npm run login` |
+| 20 | Shopify 2FA required and nobody signed in during the wait | Enter the code in the collector's Shopify window when it opens again (or `npm run login`) |
+| 21 | Captcha shown and not finished during the wait | Finish the check in the collector's Shopify window (or `npm run login`) |
 | 22 | Unrecognised page | open Shopify Admin; update `auth.selectors` if the layout changed |
 | 23 | Login rejected | update the `sb-shopify-export` credential |
 | 24 | Gmail authorization missing, not read-only, or the wrong mailbox | `npm run gmail-authorize` |

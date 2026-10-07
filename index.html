@@ -1834,7 +1834,7 @@ window.runCalc = async () => {
     };
 
     const [mcgCosts, productCosts, skuWeights, sbCosts, hpSupp, hpByName, skuAlias, mcgExtra,
-           vendorCosts, vendorIndex] = await Promise.all([
+           vendorCosts, vendorIndex, mcgPack] = await Promise.all([
       loadData('mcg_total.json'),
       loadData('product_costs.json'),
       loadData('sku_weights.json'),
@@ -1845,6 +1845,7 @@ window.runCalc = async () => {
       fetchMcgExtraCosts(),
       loadData('vendor_costs.json'),
       loadData('vendor_index.json'),
+      loadData('mcg_pack.json'),
     ]);
 
     // Build additionalCosts: baked-in Shopify export costs + any user-uploaded overrides
@@ -1896,10 +1897,10 @@ window.runCalc = async () => {
 
     setLoadingMsg('Calculating gross profit…');
     await new Promise(r => setTimeout(r, 20));
-    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias, hpdData, mcgExtra, vendorCosts, vendorIndex);
+    allLines = calculate(orderRows, shipCosts, mcgCosts, productCosts, skuWeights, additionalCosts, hpByName, skuAlias, hpdData, mcgExtra, vendorCosts, vendorIndex, { mcgPackCosts: mcgPack });
     c3Preview = await buildC3Preview({ orderRows, lines: allLines, reportPreview, hasShipFile: !!shipText,
       catalog: { tables: { mcg_total: mcgCosts, product_costs: productCosts, sku_weights: skuWeights, sb_costs: sbCosts, hp_supplement: hpSupp,
-                           hp_by_name: hpByName, sku_alias: skuAlias, vendor_costs: vendorCosts, vendor_index: vendorIndex }, mcgExtra } });
+                           hp_by_name: hpByName, sku_alias: skuAlias, vendor_costs: vendorCosts, vendor_index: vendorIndex, mcg_pack: mcgPack }, mcgExtra } });
     renderDashboard(allLines);
     renderC3Disclosure(c3Preview);
     _unmatchedState = { search: '', reason: '', sortKey: 'shipDate', sortDir: 'asc', open: new Set() };

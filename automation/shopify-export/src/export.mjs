@@ -40,6 +40,7 @@ export function playwrightBrowser({ config, paths, headed, launchOptions = {}, b
       page = context.pages()[0] || await context.newPage();
       await page.goto(config.adminUrl, { waitUntil: 'domcontentloaded' });
     },
+    async gotoAdmin() { await page.goto(config.adminUrl, { waitUntil: 'domcontentloaded' }).catch(() => {}); },
     authState: () => settleShopifyAuthState(page, { adminOrigin: origin, selectors: config.auth?.selectors, text: config.auth?.text, settleMs: config.auth?.settleMs }),
     async login({ username, password }) {
       const f = config.loginForm || {};
@@ -127,7 +128,7 @@ async function browserFetchFile(context, page, link, { fallbackStatus, fallbackH
 }
 
 /** One Shopify collection (used by the CLI and by the C7 collector orchestrator). */
-export async function runShopifyJob({ config, week, headed = false, onWaiting = null, uploadImpl = uploadToWorker }) {
+export async function runShopifyJob({ config, week, headed = false, onWaiting = null, onSignInRequired = null, onSignedIn = null, uploadImpl = uploadToWorker }) {
   assertCollectorConfig(config);
   const paths = localPaths(config);
   for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
@@ -135,7 +136,9 @@ export async function runShopifyJob({ config, week, headed = false, onWaiting = 
   purgeOlderThan(paths.quarantine, RETENTION_MS); purgeOlderThan(paths.downloads, RETENTION_MS);
   const runId = `shx_${new Date().toISOString().replace(/[:.]/g, '-')}`;
   return runCollector({
-    config, week, paths, runId, onWaiting,
+    config, week, paths, runId, onWaiting, onSignInRequired, onSignedIn,
+    // Only a visible window can be signed in by a person; headless runs stop at once as before.
+    signInWaitMinutes: headed ? (config.signInWaitMinutes ?? 30) : 0,
     browser: playwrightBrowser({ config, paths, headed, launchOptions: browserLaunchOptions(config) }),
     credential: target => readWindowsCredential(target),
     gmailClient: async () => {

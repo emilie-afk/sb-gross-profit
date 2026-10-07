@@ -40,6 +40,13 @@ const sha = b => crypto.createHash('sha256').update(b).digest('hex');
 const gz = s => zlib.gzipSync(Buffer.from(s, 'utf8'), { level: 9 });
 const sleepMs = ms => new Promise(r => setTimeout(r, ms));
 
+/**
+ * Worker answers that mean "the day's D1 allowance is (nearly) used up; resume after 00:00 UTC":
+ * the Worker's background budget (background_deferred) and D1's own daily limit. Never retried soon.
+ */
+export const DEFERRAL_CODES = new Set(['background_deferred', 'd1_daily_limit_reached']);
+export const isDeferral = e => e instanceof WorkerCallError && DEFERRAL_CODES.has(e.code);
+
 export class WorkerCallError extends Error {
   constructor(status, code, detail) { super(code); this.status = status; this.code = code; this.detail = detail; }
 }
@@ -64,9 +71,11 @@ export function collectClient({ workerUrl, ingestSecret, fetchImpl = fetch, atte
         if (res.ok) return raw ? res : res.json();
         let j = null; try { j = await res.json(); } catch { /* not JSON */ }
         last = new WorkerCallError(res.status, typeof j?.error === 'string' ? j.error.slice(0, 64) : `http_${res.status}`, j?.detail);
+        // The day's D1 allowance (or the background budget) is used up: retrying only adds load. Stop now.
+        if (DEFERRAL_CODES.has(last.code)) throw last;
         if (!(res.status === 429 || res.status >= 500)) throw last;
       } catch (e) {
-        if (e instanceof WorkerCallError && !(e.status === 429 || e.status >= 500)) throw e;
+        if (e instanceof WorkerCallError && (DEFERRAL_CODES.has(e.code) || !(e.status === 429 || e.status >= 500))) throw e;
         last = e instanceof WorkerCallError ? e : new WorkerCallError(null, 'network_error');
       }
       if (i < attempts) { stats.retries++; await sleep(backoffMs * i); }
@@ -195,11 +204,14 @@ export async function computeAndUploadWeek(c, weekStart, cache) {
 export async function requestVerification({ verifyUrl, triggerSecret, snapshots, client, fetchImpl = fetch, waitMs = 8 * 60_000, pollMs = 15_000, sleep = sleepMs, now = () => Date.now() }) {
   if (!snapshots.length) return [];
   let accepted = true;
-  try {
-    const res = await fetchImpl(verifyUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Verify-Trigger': triggerSecret },
-      body: JSON.stringify({ snapshotIds: snapshots.map(s => s.snapshotId) }) });
-    accepted = res.status === 202 || res.ok;
-  } catch { accepted = false; }
+  // The verifier takes at most 20 snapshots per request.
+  for (let i = 0; i < snapshots.length && accepted; i += 20) {
+    try {
+      const res = await fetchImpl(verifyUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Verify-Trigger': triggerSecret },
+        body: JSON.stringify({ snapshotIds: snapshots.slice(i, i + 20).map(s => s.snapshotId) }) });
+      accepted = res.status === 202 || res.ok;
+    } catch { accepted = false; }
+  }
   if (!accepted) return snapshots.map(s => ({ snapshotId: s.snapshotId, status: 'verifier_unreachable' }));
   const out = new Map(), t0 = now();
   let batched = true;                       // GET /v1/collect/verification: one light request per poll (404/400 → per-week status)
@@ -207,10 +219,9 @@ export async function requestVerification({ verifyUrl, triggerSecret, snapshots,
     if (batched) {
       const pending = snapshots.filter(s => !out.has(s.snapshotId));
       try {
-        const r = await client.call('GET', `/v1/collect/verification?ids=${pending.map(s => s.snapshotId).join(',')}`);
-        for (const x of r.snapshots || []) {
-          if (x.superseded) out.set(x.snapshotId, 'superseded');
-          else if (x.verification) out.set(x.snapshotId, x.verification);
+        for (const [id, x] of await verificationOf(client, pending.map(s => s.snapshotId))) {
+          if (x.superseded) out.set(id, 'superseded');
+          else if (x.verification) out.set(id, x.verification);
         }
       } catch (e) { if (!(e instanceof WorkerCallError) || e.status === 404 || e.status === 400) batched = false; }   // older Worker or refused: per-week status
     }
@@ -225,6 +236,86 @@ export async function requestVerification({ verifyUrl, triggerSecret, snapshots,
   }
   return snapshots.map(s => ({ snapshotId: s.snapshotId, status: out.get(s.snapshotId) || 'verification_pending' }));
 }
+
+/** Verification state of snapshots (GET /v1/collect/verification, ≤ 16 ids per request): Map id → { verification, superseded }. */
+export async function verificationOf(client, ids) {
+  const out = new Map();
+  for (let i = 0; i < ids.length; i += 16) {
+    const r = await client.call('GET', `/v1/collect/verification?ids=${ids.slice(i, i + 16).join(',')}`);
+    for (const x of r.snapshots || []) out.set(x.snapshotId, { verification: x.verification || null, superseded: !!x.superseded });
+  }
+  return out;
+}
+/**
+ * Every page of GET /v1/collect/verification/pending (oldest week first), up to `maxPages`.
+ * → { status: 'ok' | 'unsupported' | 'failed' | 'truncated', pending, otherEngine }.
+ * 'unsupported' only for an explicit 404 from an older Worker without the route; any other error
+ * (network, quota, 5xx, refused) is 'failed' — never read as an empty backlog.
+ */
+export async function drainPendingVerifications(client, { pageSize = 50, maxPages = 10 } = {}) {
+  const pending = [];
+  let after = null, otherEngine = 0;
+  for (let page = 0; page < maxPages; page++) {
+    let r;
+    try { r = await client.call('GET', `/v1/collect/verification/pending?limit=${pageSize}${after ? `&after=${after}` : ''}`); }
+    catch (e) {
+      if (e instanceof WorkerCallError && e.status === 404 && !pending.length) return { status: 'unsupported', pending: [], otherEngine: 0 };
+      return { status: 'failed', code: e instanceof WorkerCallError ? e.code : 'network_error', pending, otherEngine };
+    }
+    pending.push(...(r.pending || []));
+    otherEngine += Number(r.otherEngine) || 0;
+    // A Worker before paging answers one list without `next`: that list is all it has.
+    if (!r.next) return { status: 'ok', pending, otherEngine };
+    after = r.next;
+  }
+  return { status: 'truncated', pending, otherEngine };
+}
+
+/**
+ * Every page of GET /v1/collect/publication/pending: weeks whose newest revision is a verified,
+ * unpublished draft (eligible weeks only) or a published revision with a stale comparison.
+ * Same contract as drainPendingVerifications: only an explicit 404 is 'unsupported'.
+ */
+export async function drainPublicationBacklog(client, { pageSize = 50, maxPages = 4 } = {}) {
+  const weeks = [];
+  let after = null;
+  for (let page = 0; page < maxPages; page++) {
+    let r;
+    try { r = await client.call('GET', `/v1/collect/publication/pending?limit=${pageSize}${after ? `&after=${after}` : ''}`); }
+    catch (e) {
+      if (e instanceof WorkerCallError && e.status === 404 && !weeks.length) return { status: 'unsupported', weeks: [] };
+      return { status: 'failed', code: e instanceof WorkerCallError ? e.code : 'network_error', weeks };
+    }
+    weeks.push(...(r.weeks || []));
+    if (!r.next) return { status: 'ok', weeks };
+    after = r.next;
+  }
+  return { status: 'truncated', weeks };
+}
+
+/**
+ * Every page of GET /v1/collect/corrections/pending: weeks an audited cost correction covers whose newest
+ * revision predates it. Same contract as the other backlogs: only an explicit 404 is 'unsupported'.
+ */
+export async function drainCorrections(client, { pageSize = 50, maxPages = 2 } = {}) {
+  const weeks = [];
+  let after = null;
+  for (let page = 0; page < maxPages; page++) {
+    let r;
+    try { r = await client.call('GET', `/v1/collect/corrections/pending?limit=${pageSize}${after ? `&after=${after}` : ''}`); }
+    catch (e) {
+      if (e instanceof WorkerCallError && e.status === 404 && !weeks.length) return { status: 'unsupported', weeks: [] };
+      return { status: 'failed', code: e instanceof WorkerCallError ? e.code : 'network_error', weeks };
+    }
+    weeks.push(...(r.weeks || []));
+    if (!r.next) return { status: 'ok', weeks };
+    after = r.next;
+  }
+  return { status: 'truncated', weeks };
+}
+
+/** Verified, or a finished verification that found differences (not retryable by verifying again). */
+const VERIFICATION_FINISHED = new Set(['verified', 'mismatch']);
 
 /**
  * Weeks to check, oldest first: every week of the rolling window up to the closed week, plus
@@ -260,8 +351,12 @@ export const publicationOutcome = p => (p.published ? (p.alreadyPublished ? 'alr
  * csv_text routes, and the compute step the orchestrator runs after them.
  * Returns codes and counts only.
  */
-export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, triggerSecret = null, closedWeek, fetchImpl = fetch, sleep, verifyWaitMs }) {
-  const c = collectClient({ workerUrl, ingestSecret, fetchImpl, ...(sleep ? { sleep } : {}) });
+export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, triggerSecret = null, closedWeek, fetchImpl = fetch, sleep, verifyWaitMs,
+                                   maxRefreshesPerRun = 12, maxCorrectionWeeksPerRun = 12 }) {
+  const base = collectClient({ workerUrl, ingestSecret, fetchImpl, ...(sleep ? { sleep } : {}) });
+  // The first deferral answer of this run (quota): every later step stops, and the run reports 'deferred'.
+  let deferredBy = null;
+  const c = { stats: base.stats, async call(...a) { try { return await base.call(...a); } catch (e) { if (isDeferral(e)) deferredBy ??= e; throw e; } } };
   const seen = { touched: new Set(), windowFrom: null, bodies: new Map() };
   async function uploadImpl({ path, payload }) {
     try {
@@ -284,48 +379,155 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
       return { ok: false, httpStatus: e?.status ?? null, error: typeof e?.code === 'string' ? e.code.slice(0, 64) : 'upload_failed' };
     }
   }
+  /**
+   * The Worker's background budget for today. → { state: 'ok' | 'defer' | 'unknown', resetAt?, reasons? }.
+   * Unreadable (unreachable Worker, error, a Worker without the route) is 'unknown', and 'unknown' starts
+   * no background work: it is never read as "within budget".
+   */
+  async function budget() {
+    try { const b = await c.call('GET', '/v1/collect/budget'); return { state: b.state === 'defer' ? 'defer' : 'ok', resetAt: b.resetAt, reasons: b.reasons || [], fractions: b.fractions }; }
+    catch (e) {
+      if (isDeferral(e)) return { state: 'defer', resetAt: e.detail?.resetAt || null, reasons: [e.code] };
+      return { state: 'unknown', code: e instanceof WorkerCallError ? e.code : 'network_error' };
+    }
+  }
+  /** GET /v1/collect/work: { unfinished: [codes], budget: { state, reasons, resetAt } } for the closed week. */
+  async function work() { return c.call('GET', `/v1/collect/work?week=${closedWeek}`); }
+  const deferredResult = extra => ({ status: 'deferred', code: deferredBy?.code || 'background_deferred', resumeAfter: deferredBy?.detail?.resetAt || null,
+                                     requests: c.stats.requests, retries: c.stats.retries, ...extra });
   async function compute() {
+    deferredBy = null;
+    const b = await budget();
+    // Fail closed: when the day's usage cannot be read, no background work starts (bounded retries follow).
+    if (b.state === 'unknown') return { status: 'partial', code: 'budget_unavailable', weeks: [], publication: [], requests: c.stats.requests, retries: c.stats.retries };
+    if (b.state === 'defer') { deferredBy ??= new WorkerCallError(503, 'background_deferred', { resetAt: b.resetAt, reasons: b.reasons }); return deferredResult({ weeks: [], publication: [], reasons: b.reasons }); }
+    const out = await computeRun();
+    // A deferral anywhere in the run (the Worker's budget gate or D1's own limit): nothing more was attempted,
+    // and the run is never reported ok or complete.
+    return deferredBy ? deferredResult({ weeks: out.weeks, publication: out.publication }) : out;
+  }
+  async function computeRun() {
     const windowFrom = seen.windowFrom || rollingWindow({ weekStart: closedWeek, weekEnd: addDaysLocal(closedWeek, 6) }).from;
-    const weeks = weeksToCompute({ closedWeek, windowFrom, touched: [...seen.touched] });
+    // Weeks an audited cost correction covers that still need their corrected revision, whatever the window
+    // (oldest first, at most maxCorrectionWeeksPerRun per run; what is left keeps the run partial).
+    const corrections = await drainCorrections(c);
+    const correctionWeeks = corrections.weeks.map(x => x.weekStart).filter(w => w <= closedWeek);
+    const capped = correctionWeeks.slice(0, maxCorrectionWeeksPerRun);
+    const weeks = [...new Set([...weeksToCompute({ closedWeek, windowFrom, touched: [...seen.touched] }), ...capped])].sort();
     const cache = newCache(seen.bodies), results = [];
     for (const w of weeks) {
+      if (deferredBy) break;
       try { results.push(await computeAndUploadWeek(c, w, cache)); }
       catch (e) { results.push({ weekStart: w, status: 'failed', code: typeof e?.code === 'string' ? e.code.slice(0, 64) : 'compute_failed' }); }
     }
     const fresh = results.filter(r => r.status === 'computed');
-    const verification = verifyUrl && triggerSecret ? await requestVerification({ verifyUrl, triggerSecret, snapshots: fresh, client: c, fetchImpl, ...(verifyWaitMs !== undefined ? { waitMs: verifyWaitMs } : {}), ...(sleep ? { sleep } : {}) })
-      : fresh.map(r => ({ snapshotId: r.snapshotId, status: 'not_requested' }));
+    // Unfinished verification is recovered on every run: the newest revision of an unchanged week that
+    // has no finished verification (a run stopped mid-way, the verifier was unreachable), and the newest
+    // unverified revision of any other week the Worker lists, are requested again with this run's drafts.
+    const unchanged = results.filter(r => r.status === 'unchanged' && r.snapshotId);
+    let known = new Map(), recover = [], lookupFailed = false;
+    try { known = await verificationOf(c, unchanged.map(r => r.snapshotId)); } catch { lookupFailed = unchanged.length > 0; }
+    for (const r of unchanged) {
+      const x = known.get(r.snapshotId);
+      if (lookupFailed) r.verification = 'verification_unknown';
+      else if (x && !x.superseded) { r.verification = x.verification || 'verification_pending'; if (!VERIFICATION_FINISHED.has(x.verification)) recover.push(r); }
+    }
+    const inRun = new Set(results.map(r => r.weekStart));
+    // The Worker's backlog of unverified newest drafts, every page. Only an explicit "route unsupported"
+    // (older Worker) falls back to this run's weeks; a lookup that failed keeps the run partial.
+    if (deferredBy) return { status: 'deferred', weeks: results, publication: [] };
+    const backlog = await drainPendingVerifications(c);
+    const elsewhere = backlog.pending.filter(p => !inRun.has(p.weekStart));
+    const toVerify = [...fresh, ...recover, ...elsewhere.map(p => ({ weekStart: p.weekStart, snapshotId: p.snapshotId, revision: p.revision, status: 'unchanged' }))];
+    const verification = verifyUrl && triggerSecret ? await requestVerification({ verifyUrl, triggerSecret, snapshots: toVerify, client: c, fetchImpl, ...(verifyWaitMs !== undefined ? { waitMs: verifyWaitMs } : {}), ...(sleep ? { sleep } : {}) })
+      : toVerify.map(r => ({ snapshotId: r.snapshotId, status: 'not_requested' }));
     const byId = new Map(verification.map(v => [v.snapshotId, v.status]));
     const weeksOut = results.map(r => ({ weekStart: r.weekStart, status: r.status, ...(r.code ? { code: r.code } : {}), ...(r.revision ? { revision: r.revision } : {}),
-                                          ...(byId.has(r.snapshotId) ? { verification: byId.get(r.snapshotId) } : {}) }));
+                                          ...(byId.has(r.snapshotId) ? { verification: byId.get(r.snapshotId) } : r.verification ? { verification: r.verification } : {}),
+                                          ...(recover.includes(r) ? { verificationRecovered: true } : {}) }));
+    const otherWeeks = elsewhere.map(p => ({ weekStart: p.weekStart, revision: p.revision, verification: byId.get(p.snapshotId) || 'verification_pending' }));
     // Automatic publication (owner decision 2026-10-05), oldest week first: the Worker publishes a week's
     // newest verified revision only when every control allows it, and answers with the reason otherwise.
-    // A week whose draft was computed before the prior week was published is recomputed, verified and
-    // offered again (its stored comparison must be with the published prior week).
+    // Comparisons are brought up to date in the same run: a week whose stored comparison is not with the
+    // prior week's published snapshot (a draft computed before that week was published, or a published
+    // week whose prior week has since published a new revision) is recomputed from the cached and stored
+    // inputs (no new export), verified and offered again. Each newly published revision then offers the
+    // next week too, even outside the window, so a chain of dependent weeks finishes in one run.
     const publication = [];
-    for (const r of weeksOut) {
-      if (!(r.status === 'unchanged' || (r.status === 'computed' && r.verification === 'verified'))) continue;
-      let p = await c.call('POST', `/v1/collect/weeks/${r.weekStart}/publish`, { json: {} }).catch(e => ({ published: false, reason: e?.status === 404 ? 'publish_route_unavailable' : e?.code || 'publish_failed' }));
+    const publish = w => c.call('POST', `/v1/collect/weeks/${w}/publish`, { json: {} }).catch(e => ({ published: false, reason: e?.status === 404 ? 'publish_route_unavailable' : e?.code || 'publish_failed' }));
+    const verifyOne = async snap => {
+      if (!(verifyUrl && triggerSecret)) return 'not_requested';
+      const [v] = await requestVerification({ verifyUrl, triggerSecret, snapshots: [snap], client: c, fetchImpl, ...(verifyWaitMs !== undefined ? { waitMs: verifyWaitMs } : {}), ...(sleep ? { sleep } : {}) });
+      return v?.status || 'verification_pending';
+    };
+    const inWindow = new Map(weeksOut.map(r => [r.weekStart, r]));
+    const offered = r => r.verification === 'verified' || (r.status === 'unchanged' && r.verification === undefined);
+    // Publication work left by earlier runs, whatever their window (a dependent comparison that could not be
+    // updated, a verified draft whose publication failed): resumed here, oldest first, from retained inputs.
+    const pubBacklog = await drainPublicationBacklog(c);
+    const resumed = new Set(pubBacklog.weeks.map(x => x.weekStart).filter(w => !inWindow.has(w)));
+    const queue = [...new Set([...weeksOut.filter(offered).map(r => r.weekStart), ...otherWeeks.filter(o => o.verification === 'verified').map(o => o.weekStart),
+                               ...resumed])].sort();
+    const done = new Set(), dependents = [];
+    let refreshes = 0;
+    while (queue.length && !deferredBy) {
+      const w = queue.shift();
+      if (done.has(w)) continue;
+      done.add(w);
+      const r = inWindow.get(w) || null, dependent = !r && !otherWeeks.some(o => o.weekStart === w) && !resumed.has(w);
+      let p = await publish(w), refreshed = null;
+      // A per-run cap on recomputes for comparisons: what is left stays listed by the Worker and is resumed
+      // by the next attempt (the run is partial), so one run cannot spend the day's allowance on a long chain.
+      if (!p.published && p.reason === 'comparison_stale' && refreshes >= maxRefreshesPerRun) p = { published: false, reason: 'run_work_cap' };
       if (!p.published && p.reason === 'comparison_stale') {
-        const again = await computeAndUploadWeek(c, r.weekStart, cache).catch(() => null);
-        if (again?.status === 'computed' && verifyUrl && triggerSecret) {
-          const [v] = await requestVerification({ verifyUrl, triggerSecret, snapshots: [again], client: c, fetchImpl, ...(verifyWaitMs !== undefined ? { waitMs: verifyWaitMs } : {}), ...(sleep ? { sleep } : {}) });
-          r.revision = again.revision; r.status = 'computed'; r.verification = v?.status || 'verification_pending';
-          if (r.verification === 'verified') p = await c.call('POST', `/v1/collect/weeks/${r.weekStart}/publish`, { json: {} }).catch(e => ({ published: false, reason: e?.status === 404 ? 'publish_route_unavailable' : e?.code || 'publish_failed' }));
+        refreshes++;
+        const again = await computeAndUploadWeek(c, w, cache).catch(() => null);
+        let v = null;
+        if (again?.status === 'computed') v = await verifyOne(again);
+        else if (again?.status === 'unchanged') {       // a draft with the current comparison already exists
+          const x = (await verificationOf(c, [again.snapshotId]).catch(() => new Map())).get(again.snapshotId);
+          v = VERIFICATION_FINISHED.has(x?.verification) ? x.verification : await verifyOne(again);
         }
+        refreshed = { revision: again?.revision ?? null, verification: v || (again?.status === 'pending' ? again.code : 'recompute_failed') };
+        if (r) { if (again?.status === 'computed') { r.revision = again.revision; r.status = 'computed'; } r.verification = refreshed.verification; }
+        if (v === 'verified') p = await publish(w);
+        else if (!VERIFICATION_FINISHED.has(v)) p = { published: false, reason: 'comparison_stale' };   // unfinished: retried
+        else p = { published: false, reason: `verification_${v}` };
       }
+      // A week outside the run is skipped only when it is confirmed to need nothing: it has no snapshot, or its
+      // newest revision is published with a current comparison. Anything else is recorded; a retryable outcome
+      // keeps the run partial and the Worker lists the week again on the next run (publication backlog).
+      const nothingToDo = !refreshed && (p.reason === 'no_snapshot' || (p.published === true && p.alreadyPublished === true));
+      if ((dependent || resumed.has(w)) && nothingToDo) continue;
+      if (dependent || resumed.has(w)) dependents.push({ weekStart: w, ...(resumed.has(w) ? { resumed: true } : {}),
+        ...(refreshed ? { revision: refreshed.revision, verification: refreshed.verification } : {}) });
       const outcome = publicationOutcome({ ...p, reason: p.reason || 'publish_failed' });
-      publication.push({ weekStart: r.weekStart, published: p.published === true, outcome, ...(p.alreadyPublished ? { alreadyPublished: true } : {}),
+      publication.push({ weekStart: w, published: p.published === true, outcome, ...(p.alreadyPublished && p.published ? { alreadyPublished: true } : {}),
+                         ...(refreshed ? { comparisonRefreshed: true } : {}), ...(dependent ? { dependent: true } : {}), ...(resumed.has(w) ? { resumed: true } : {}),
                          ...(p.published ? {} : { reason: p.reason || 'publish_failed' }) });
       // Switched off for every week: stop asking.
       if (!p.published && GLOBAL_HOLDS.has(p.reason)) break;
+      // A newly published revision changes the next week's comparison: offer that week in this run.
+      if (p.published && !p.alreadyPublished) { const next = addDaysLocal(w, 7); if (!done.has(next) && !queue.includes(next)) { queue.push(next); queue.sort(); } }
     }
     const closed = weeksOut.find(r => r.weekStart === closedWeek);
     // A week before the reporting start is not a failure: it is not reported.
-    const good = weeksOut.every(r => r.status === 'unchanged' || r.code === 'before_reporting_start' || (r.status === 'computed' && r.verification === 'verified'));
+    // Unfinished verification (pending, unavailable, unreachable, unknown) keeps the run partial, for this run's
+    // weeks and for the other weeks recovered; a finished `mismatch` of an unchanged week is reported, not retried.
+    const finished = r => r.verification === undefined || VERIFICATION_FINISHED.has(r.verification);
+    const good = weeksOut.every(r => r.code === 'before_reporting_start' || (r.status === 'unchanged' && finished(r)) || (r.status === 'computed' && r.verification === 'verified'))
+      && otherWeeks.every(finished) && (backlog.status === 'ok' || backlog.status === 'unsupported')
+      && (pubBacklog.status === 'ok' || pubBacklog.status === 'unsupported')
+      && (corrections.status === 'ok' || corrections.status === 'unsupported') && capped.length === correctionWeeks.length;
     // A retryable publication failure keeps the run partial, so the week is retried; intentional holds do not.
     const publishRetry = publication.filter(p => p.outcome === 'retry').length;
-    return { status: good && !publishRetry ? 'ok' : 'partial', closedWeek: closed || null, weeks: weeksOut, publication,
+    return { status: good && !publishRetry ? 'ok' : 'partial', closedWeek: closed || null, weeks: weeksOut, ...(otherWeeks.length ? { otherWeeks } : {}),
+             ...(dependents.length ? { dependentWeeks: dependents } : {}),
+             ...(backlog.status === 'ok' ? {} : { verificationBacklog: { status: backlog.status, ...(backlog.code ? { code: backlog.code } : {}) } }),
+             ...(pubBacklog.status === 'ok' ? {} : { publicationBacklog: { status: pubBacklog.status, ...(pubBacklog.code ? { code: pubBacklog.code } : {}) } }),
+             ...(correctionWeeks.length ? { correctedWeeks: capped, ...(capped.length < correctionWeeks.length ? { correctionWeeksLeft: correctionWeeks.length - capped.length } : {}) } : {}),
+             ...(corrections.status === 'ok' ? {} : { correctionBacklog: { status: corrections.status, ...(corrections.code ? { code: corrections.code } : {}) } }),
+             ...(backlog.otherEngine ? { otherEngineDrafts: backlog.otherEngine } : {}), publication,
              ...(publishRetry ? { publicationRetry: publishRetry } : {}), requests: c.stats.requests, retries: c.stats.retries };
   }
   /** The orchestrator's week plan on this path: what the Worker already holds for the closed week. */
@@ -337,6 +539,10 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
     const report = ['shipping_report_missing', 'shipping_report_partial', 'shipping_report_invalid'].some(k => pending.has(k)) ? 'missing' : 'ok';
     return { weekStart: closedWeek, collected: { shopify, shopify_updates: shopify, shipping_cost_report: report }, status: s.state };
   }
-  return { uploadImpl, compute, weekPlan, client: c };
+  /** Shopify's sign-in needs a person (or was finished): shown on the closed week's status. Codes and numbers only. */
+  async function signInEvent(status, { authState, waitMinutes } = {}) {
+    await c.call('POST', `/v1/collect/weeks/${closedWeek}/signin`, { json: { status, ...(authState ? { authState } : {}), ...(Number.isInteger(waitMinutes) ? { waitMinutes } : {}) } });
+  }
+  return { uploadImpl, compute, weekPlan, signInEvent, budget, work, client: c };
 }
 function addDaysLocal(d, n) { const t = new Date(`${d}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); }

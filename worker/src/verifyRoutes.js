@@ -17,17 +17,45 @@ import { ApiError, json, readJson } from './http.js';
 import { nowIso } from './db.js';
 import { blobBytes } from './gz.js';
 
+import { ENGINE_VERSION } from '../../shared/snapshot.js';
 const P = (s, d = null) => { try { return JSON.parse(s); } catch { return d; } };
 export const REPORT_STATUSES = ['verified', 'mismatch', 'unavailable'];
 export const PUBLIC_REPORT_KEYS = ['status', 'reason', 'ordersChecked', 'orderMismatches', 'sectionsChecked', 'sectionMismatches', 'sequenceMatches',
   'provenanceChecked', 'provenanceMismatches', 'durationMs', 'engineVersion', 'verifierCommit', 'gateInputsMatch', 'gateMatches', 'gateHash'];
 const MAX_DIFF_CHARS = 256 * 1024;
 
-export async function pendingVerifications(env) {
-  const r = (await env.DB.prepare(`SELECT s.snapshot_id, s.week_start, s.revision, v.status AS vstatus, v.attempts FROM snapshot s
+/**
+ * The newest collector-computed revision of each week that still has no verification (or whose
+ * verifier could not run), on this engine: the work a run must finish. Older revisions of a week
+ * are never listed. Paged by week (?1 = after this week, ?2 = page size, ?3 = engine version).
+ * A newest draft from another engine cannot be verified by this verifier (it needs a recompute);
+ * it is counted as `otherEngine`, not listed.
+ */
+export const PENDING_VERIFICATION_SQL = `SELECT s.snapshot_id, s.week_start, s.revision, s.engine_version, v.status AS vstatus, v.attempts FROM snapshot s
       LEFT JOIN verify_report v ON v.snapshot_id = s.snapshot_id
-      WHERE s.storage = 'chunked' AND (v.status IS NULL OR v.status = 'unavailable') ORDER BY s.computed_at DESC LIMIT 20`).all()).results || [];
-  return json({ pending: r.map(x => ({ snapshotId: x.snapshot_id, weekStart: x.week_start, revision: x.revision, lastStatus: x.vstatus || null, attempts: x.attempts || 0 })) });
+      WHERE s.storage = 'chunked' AND (v.status IS NULL OR v.status = 'unavailable') AND s.week_start > ?1
+        AND NOT EXISTS (SELECT 1 FROM snapshot n WHERE n.week_start = s.week_start AND n.revision > s.revision)
+      ORDER BY s.week_start LIMIT ?2`;
+/** Is any newest chunked revision of this engine (?1) still unverified? One row at most: the engine filter
+ *  is applied in SQL before LIMIT 1, so drafts of older engines ahead of it never hide it, and the daily
+ *  work check never fetches the backlog. */
+export const CURRENT_ENGINE_PENDING_SQL = `SELECT s.snapshot_id FROM snapshot s
+      LEFT JOIN verify_report v ON v.snapshot_id = s.snapshot_id
+      WHERE s.storage = 'chunked' AND s.engine_version = ?1 AND (v.status IS NULL OR v.status = 'unavailable')
+        AND NOT EXISTS (SELECT 1 FROM snapshot n WHERE n.week_start = s.week_start AND n.revision > s.revision)
+      LIMIT 1`;
+export const PENDING_PAGE_MAX = 50;
+export async function pendingVerifications(env, request = null) {
+  const q = request ? new URL(request.url).searchParams : new URLSearchParams();
+  const after = q.get('after') || '0000-00-00';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(after) && after !== '0000-00-00') throw new ApiError(400, 'bad_query', 'after must be YYYY-MM-DD');
+  const limit = Math.min(PENDING_PAGE_MAX, Math.max(1, Number(q.get('limit')) || 20));
+  // One row more than the page tells whether another page follows.
+  const rows = (await env.DB.prepare(PENDING_VERIFICATION_SQL).bind(after, limit + 1).all()).results || [];
+  const page = rows.slice(0, limit);
+  const mine = page.filter(x => x.engine_version === ENGINE_VERSION);
+  return json({ pending: mine.map(x => ({ snapshotId: x.snapshot_id, weekStart: x.week_start, revision: x.revision, lastStatus: x.vstatus || null, attempts: x.attempts || 0 })),
+                otherEngine: page.length - mine.length, next: rows.length > limit ? page[page.length - 1].week_start : null });
 }
 
 async function chunked(db, id) {

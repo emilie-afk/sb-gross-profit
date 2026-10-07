@@ -33,6 +33,7 @@ export function summarizeManifest(m) {
     kind: pick(m.kind, CODE), weekStart: pick(m.weekStart, DATE), windowFrom: pick(m.windowFrom, DATE), windowTo: pick(m.windowTo, DATE),
     status: pick(m.status, CODE), exitCode: num(m.exitCode), startedAt: pick(m.startedAt, ISO), finishedAt: pick(m.finishedAt, ISO),
     authStateAtStart: pick(m.authStateAtStart, CODE), mailboxVerified: m.mailboxVerified === true ? true : undefined,
+    signInNeeded: pick(m.signIn?.needed, CODE), signInWaitedMinutes: num(m.signIn?.waitedMinutes), signInCompletedAt: pick(m.signIn?.completedAt, ISO),
     emailReceivedAt: pick(m.email?.receivedAt, ISO), emailPolls: num(m.email?.polls ?? m.polls), messageIdSha256: pick(m.email?.messageIdSha256, HASH),
     downloadHost: pick(m.downloadHost, HOST), downloadFinalHost: pick(m.downloadFinalHost, HOST),
     downloadVia: pick(m.download?.via, CODE), downloadBytes: num(m.download?.bytes), downloadFormat: pick(m.download?.format, CODE),

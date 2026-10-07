@@ -33,7 +33,10 @@ test('compute takes shipping expense from the Shipping Cost Report, not the mapp
   assert.ok(!r.json.gate.failures.some(f => f.code === 'shipping_order_coverage_open'));
 });
 
-test('a later report version that changes a week makes the next compute "updated" and touches that week', async () => {
+test('a later report version that changes a week makes the next compute "updated" and touches that week', async (t) => {
+  // The coverage of WEEK ages out 14 days after the week ends; pin the clock inside that window (the test
+  // started failing on the released tree once real time passed 2026-10-04).
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-28T12:00:00Z') });
   const { env, nodes } = await loaded(20, {}, { reportMissingEvery: 10 });
   const a = await admin(env, 'POST', '/v1/admin/runs', { weekStart: WEEK });
   assert.equal(a.json.gate.failures.find(f => f.code === 'shipping_order_coverage_open')?.code, 'shipping_order_coverage_open');

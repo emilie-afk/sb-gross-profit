@@ -7,6 +7,8 @@
   "timeZone": "America/Los_Angeles",
   "_browserChannelComment": "null = Playwright's bundled Chromium. \"msedge\" or \"chrome\" drives the installed browser (with this collector's own profile) where the bundled build will not start.",
   "browserChannel": null,
+  "_signInWaitComment": "When Shopify asks for its two-step code (or a human check) in the visible browser, the run waits this many minutes for a person to finish it in that window, then continues by itself. 0 = stop at once.",
+  "signInWaitMinutes": 30,
   "localDir": null,
   "gmail": {
     "_comment": "The export mailbox that receives Shopify's 'export ready' email. Read-only access, fixed search.",

@@ -251,6 +251,9 @@ export function assertCollectorConfig(config) {
   const poll = g.pollSeconds ?? 60, timeout = g.timeoutMinutes ?? 45;
   if (!(poll >= 15 && poll <= 600)) throw new Error('gmail.pollSeconds must be between 15 and 600');
   if (!(timeout >= 5 && timeout <= 120)) throw new Error('gmail.timeoutMinutes must be between 5 and 120');
+  if (config.signInWaitMinutes !== undefined && !(Number.isInteger(config.signInWaitMinutes) && config.signInWaitMinutes >= 0 && config.signInWaitMinutes <= 120)) {
+    throw new Error('signInWaitMinutes must be a whole number of minutes, 0–120');
+  }
   adminOrigin(config.adminUrl);
   return { pollSeconds: poll, timeoutMinutes: timeout };
 }

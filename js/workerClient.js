@@ -11,7 +11,7 @@
 export const API_BASE = '/api/v1';
 
 export class WorkerApiError extends Error {
-  constructor(status, code, message) { super(message); this.status = status; this.code = code; }
+  constructor(status, code, message, detail = null) { super(message); this.status = status; this.code = code; this.detail = detail; }
 }
 
 export async function workerApi(path, { method = 'GET', body, fetchImpl = globalThis.fetch } = {}) {
@@ -23,7 +23,7 @@ export async function workerApi(path, { method = 'GET', body, fetchImpl = global
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => null);
-  if (!res.ok) throw new WorkerApiError(res.status, data?.error || 'http_error', data?.message || `HTTP ${res.status}`);
+  if (!res.ok) throw new WorkerApiError(res.status, data?.error || 'http_error', data?.message || `HTTP ${res.status}`, data?.detail || null);
   return data;
 }
 

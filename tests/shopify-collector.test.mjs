@@ -341,3 +341,39 @@ test('C5 end to end: sanitized rolling upload → week and updated-order runs; r
     + JSON.stringify((await env.DB.prepare('SELECT * FROM shopify_order_line').all()).results);
   noPii(dump, 'D1');
 });
+
+test('collector: Shopify sign-in that needs a person — a visible run waits in the open window and continues the export once signed in', async () => {
+  const calls = [];
+  const hooks = { signInWaitMinutes: 30, signInPollSeconds: 10, onSignInRequired: async x => { calls.push(['required', x.state, x.waitMinutes]); },
+                  onSignedIn: async () => { calls.push(['signed_in']); } };
+  const runWith = async (auth, extra = {}) => {
+    const dir = tmpDir(), config = baseConfig(dir), paths = localPaths(config), f = fakes({ auth });
+    let gotoAdmin = 0;
+    f.browser.gotoAdmin = async () => { gotoAdmin++; };
+    const m = await runCollector({ config, week, paths, runId: 'shx_test', ...f, ...hooks, ...extra });
+    return { m, f, gotoAdmin, manifest: fs.readFileSync(path.join(paths.runs, 'shx_test.json'), 'utf8') };
+  };
+  // Signed in after a few polls: the same run requests the export and uploads it.
+  const ok = await runWith(['login_required', 'two_factor_required', 'two_factor_required', 'two_factor_required', 'authenticated']);
+  assert.deepEqual([ok.m.status, ok.m.exitCode, ok.f.log.logins, ok.f.log.steps, ok.f.log.uploads.length], ['ok', EXIT.OK, 1, 1, 1]);
+  assert.deepEqual(calls, [['required', 'two_factor_required', 30], ['signed_in']]);
+  assert.equal(ok.m.signIn.needed, 'two_factor_required');
+  assert.ok(ok.m.signIn.completedAt && ok.m.signIn.waitedMinutes >= 0);
+  assert.ok(!ok.manifest.includes('synthetic-password'));
+  // Shopify lands outside Admin after the code: after a minute there the run goes back to Admin.
+  calls.length = 0;
+  const away = await runWith(['two_factor_required', ...Array(7).fill('unknown'), 'authenticated']);
+  assert.deepEqual([away.m.status, away.gotoAdmin >= 1], ['ok', true]);
+  // Nobody signs in: the wait ends after signInWaitMinutes, nothing is requested, and the run says why.
+  calls.length = 0;
+  const no = await runWith(['two_factor_required']);
+  assert.deepEqual([no.m.status, no.m.exitCode, no.f.log.steps, no.f.log.uploads.length], ['needs_2fa', EXIT.NEEDS_2FA, 0, 0]);
+  assert.equal(no.m.signIn.waitedMinutes, 30);
+  assert.deepEqual(calls, [['required', 'two_factor_required', 30]]);
+  // A human check is waited for the same way; a headless run (wait 0) still stops at once.
+  const cap = await runWith(['captcha', 'authenticated']);
+  assert.equal(cap.m.status, 'ok');
+  calls.length = 0;
+  const headless = await runWith(['two_factor_required'], { signInWaitMinutes: 0 });
+  assert.deepEqual([headless.m.status, calls.length], ['needs_2fa', 0]);
+});
