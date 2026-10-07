@@ -270,8 +270,13 @@ export function summarizeScenario(lines, assumptions = {}) {
   const totalAd = r2(totalScenarioRevenue * adRate);
   const adAlloc = allocateByWeight(totalAd, productWeights(scen, l => l.scenarioRevenue));
 
-  const laborInfo = allocateLabor({
+  // Labor is allocated over the included product lines. With none (no orders match, or only pass-through Route
+  // lines), nothing carries it: the allocated amount is 0 and the period's labor is reported as unallocated,
+  // so the current and scenario columns and the reconciliation stay consistent (never a $9,500 difference).
+  const laborPeriod = allocateLabor({
     monthlyLabor: a.monthlyLabor, dateFrom: a.dateFrom, dateTo: a.dateTo });
+  const laborInfo = scen.some(l => !isPassThrough(l)) ? laborPeriod
+    : { ...laborPeriod, allocated: 0, unallocated: laborPeriod.allocated, method: 'no_product_lines' };
   const laborAlloc = allocateByWeight(laborInfo.allocated, productWeights(scen, l => l.scenarioRevenue));
 
   const enriched = scen.map((l, i) => {

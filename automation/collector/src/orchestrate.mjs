@@ -67,6 +67,11 @@ export function saveState(file, state, fsImpl = fs) { fsImpl.mkdirSync(path.dirn
  * @param {{ run: ({ onWaiting, onSignInRequired, onSignedIn }) => Promise<{status, exitCode}> }} d.shopify
  * @param {(status: 'needs_person'|'signed_in', detail?: object) => Promise<void>} [d.signInEvent]  tells the Worker (shown on the status)
  * @param {() => Promise<{ state: 'ok'|'defer'|'unknown', resetAt?, reasons? }>} [d.budget]  the day's D1 budget (Free-tier path)
+ * @param {{ needed: () => Promise<boolean>, run: ({ scrText }) => Promise<{ status, exitCode?, facts? }> }} [d.apsMapping]
+ *        Air Plant Shop scenario input (the saved line-item export, mapping only). Runs after the Shipping Cost
+ *        Report (its rows let split shipments be matched) or, when that is already in, only if the stored mapping
+ *        does not cover the week. Its outcome never changes the run's exit code: a failed export is retried by
+ *        the next run (its window starts where the stored mapping ends).
  * @param {string} d.lockFile
  * @param {string} d.stateFile
  */
@@ -87,6 +92,17 @@ export async function runWeeklyCollection(d) {
   const state = loadState(d.stateFile, d.fs);
   const mine = state[d.week.weekStart] || {};
   const sources = {};
+  let aps;                                                             // { status, ... } when the APS mapping step ran
+  const apsStep = async (scrText, scrPayload = null) => {
+    if (!d.apsMapping) return;
+    let needed = !!scrText;
+    if (!needed) { try { needed = await d.apsMapping.needed(); } catch { needed = false; } }
+    if (!needed) { aps = { status: 'covered' }; return; }
+    log('shipstation: Air Plant Shop line-item export');
+    aps = await guarded(() => d.apsMapping.run({ scrText: scrText || null,
+      scrSource: scrText && scrPayload ? { sanitizedSha256: scrPayload.sanitizedSha256, from: scrPayload.requestedFrom, to: scrPayload.requestedTo } : null }));
+    log(`aps mapping: ${aps.status}`);
+  };
   try {
     // Quota first: with the day's D1 budget used up, no browser opens and nothing is exported or computed.
     // The work is not done; the next start after the reset (00:00 UTC = 07:00 ICT) resumes it.
@@ -111,17 +127,19 @@ export async function runWeeklyCollection(d) {
     const needReport = plan ? workerSays('shipping_cost_report') !== 'ok' : mine.shipping_cost_report !== 'ok';
     const needShopify = plan ? (workerSays('shopify') !== 'ok' || workerSays('shopify_updates') !== 'ok') : mine.shopify !== 'ok';
     if (!needReport && !needShopify) {
+      await apsStep(null);
+      const withAps = r => (aps ? { ...r, aps } : r);
       // Free-tier path: the sources being in does not mean the weeks are computed (e.g. a report
       // review was accepted after the last run, or a run stopped mid-compute). Computing is
       // idempotent: unchanged weeks are skipped and write nothing.
-      if (!d.compute) return { status: 'already_collected', exitCode: EXIT.OK, sources: { shipping_cost_report: 'ok', shopify: 'ok' } };
+      if (!d.compute) return withAps({ status: 'already_collected', exitCode: EXIT.OK, sources: { shipping_cost_report: 'ok', shopify: 'ok' } });
       let compute;
       try { compute = await d.compute({ sources: { shipping_cost_report: 'ok', shopify: 'ok' } }); }
       catch (e) { compute = { status: 'failed', code: typeof e?.code === 'string' ? e.code.slice(0, 64) : 'compute_failed' }; }
       log(`compute: ${compute.status}`);
-      if (compute.status === 'deferred') return { status: 'deferred', exitCode: EXIT.DEFERRED, sources: { shipping_cost_report: 'ok', shopify: 'ok' }, compute, resumeAfter: compute.resumeAfter || null };
-      return { status: compute.status === 'ok' ? 'already_collected' : 'partial', exitCode: compute.status === 'ok' ? EXIT.OK : EXIT.PARTIAL,
-               sources: { shipping_cost_report: 'ok', shopify: 'ok' }, compute };
+      if (compute.status === 'deferred') return withAps({ status: 'deferred', exitCode: EXIT.DEFERRED, sources: { shipping_cost_report: 'ok', shopify: 'ok' }, compute, resumeAfter: compute.resumeAfter || null });
+      return withAps({ status: compute.status === 'ok' ? 'already_collected' : 'partial', exitCode: compute.status === 'ok' ? EXIT.OK : EXIT.PARTIAL,
+               sources: { shipping_cost_report: 'ok', shopify: 'ok' }, compute });
     }
 
     // 1. ShipStation (browser A), upload deferred
@@ -132,6 +150,8 @@ export async function runWeeklyCollection(d) {
       if (r.status === 'prepared' && r.pending) pending = r.pending;
       else sources.shipping_cost_report = r.status === 'ok' ? 'ok' : `${r.status} (exit ${r.exitCode})`;
     } else sources.shipping_cost_report = 'ok';
+    // Air Plant Shop mapping right after the report, still before Shopify's browser (one browser at a time).
+    await apsStep(pending?.prep?.sanitizedText || null, pending?.prep?.payload || null);
     const uploadShipStation = async () => {
       if (!pending) return 'nothing_pending';
       const p = pending; pending = null;
@@ -176,9 +196,9 @@ export async function runWeeklyCollection(d) {
     }
     const computeOk = !compute || compute.status === 'ok';
     // Deferral wins: retrying soon would only add load. Sources already received are kept (state above).
-    if (compute?.status === 'deferred') return { status: 'deferred', exitCode: EXIT.DEFERRED, sources, compute, resumeAfter: compute.resumeAfter || null };
+    if (compute?.status === 'deferred') return { status: 'deferred', exitCode: EXIT.DEFERRED, sources, compute, resumeAfter: compute.resumeAfter || null, ...(aps ? { aps } : {}) };
     const exitCode = allOk && computeOk ? EXIT.OK : signInNeeded ? EXIT.SIGNIN_REQUIRED : EXIT.PARTIAL;
-    return { status: exitCode === EXIT.OK ? 'ok' : signInNeeded ? 'signin_required' : 'partial', exitCode, sources, ...(compute ? { compute } : {}) };
+    return { status: exitCode === EXIT.OK ? 'ok' : signInNeeded ? 'signin_required' : 'partial', exitCode, sources, ...(compute ? { compute } : {}), ...(aps ? { aps } : {}) };
   } finally {
     releaseLock(d.lockFile, d.fs);
   }

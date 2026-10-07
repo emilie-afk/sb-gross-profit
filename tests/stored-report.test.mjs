@@ -14,7 +14,7 @@ import { dataset, freeTierRun, api, ok } from '../worker/test/freeTierHarness.mj
 import * as SR from '../js/storedReport.js';
 import { ORDERS_PER_PART } from '../shared/resultParts.js';
 import { refundIndex, refundSummary, matchesRefundFilter } from '../js/refunds.js';
-import { isNegativeText } from '../js/shell.js';
+import { isNegativeText, disclosureHint } from '../js/shell.js';
 import { shopifyRows } from './fixtures-free-tier.mjs';
 import { toCsvText } from '../shared/adapters/shopifyCsv.js';
 import { parseCSV, calculate } from '../shared/calculator.js';
@@ -329,4 +329,31 @@ test('missing costs: the headline operating GP keeps the approved formula and sa
   const text = d.items.find(i => i.kind === 'missing_cost').text;
   assert.match(text, /Operating GP includes that revenue but deducts no cost for it, so it is overstated/);
   assert.doesNotMatch(text, /left out of (product )?GP|never counted at \$0/);
+});
+
+test('collapsed Provisional result card: the hint counts notes and those needing attention', () => {
+  assert.equal(disclosureHint(0), 'Show details');
+  assert.equal(disclosureHint(1), 'Show 1 note');
+  assert.equal(disclosureHint(7, 0), 'Show 7 notes');
+  assert.equal(disclosureHint(7, 1), 'Show 7 notes (1 needs attention)');
+  assert.equal(disclosureHint(7, 3), 'Show 7 notes (3 need attention)');
+});
+
+test('switching saved reports: neighbours and the full list of published months and weeks', async () => {
+  const SRm = await import('../js/storedReport.js');
+  const pub = w => ({ weekStart: w, revisions: [{ revision: 1, status: 'published' }] });
+  const held = w => ({ weekStart: w, revisions: [{ revision: 1, status: 'blocked' }] });
+  const list = ['2026-07-27', '2026-08-03', '2026-08-10', '2026-08-24', '2026-08-31', '2026-09-07', '2026-09-14', '2026-09-21'].map(pub)
+    .concat([held('2026-08-17'), held('2026-09-28'), pub('2026-07-20')]);
+  // Weeks: published, holding days from Aug 3 on (Jul 27 week ends Aug 2: excluded), newest first.
+  assert.deepEqual(SRm.weeksOf(list), ['2026-09-21', '2026-09-14', '2026-09-07', '2026-08-31', '2026-08-24', '2026-08-10', '2026-08-03']);
+  assert.deepEqual(SRm.monthsOf(list), ['2026-09', '2026-08']);
+  // August ↔ September, both ways; nothing before August or after September.
+  assert.equal(SRm.adjacentPeriod('month', '2026-08', list, 1), '2026-09');
+  assert.equal(SRm.adjacentPeriod('month', '2026-09', list, -1), '2026-08');
+  assert.equal(SRm.adjacentPeriod('month', '2026-08', list, -1), null);
+  assert.equal(SRm.adjacentPeriod('month', '2026-09', list, 1), null);
+  // Weeks skip the held week of Aug 17.
+  assert.equal(SRm.adjacentPeriod('week', '2026-08-10', list, 1), '2026-08-24');
+  assert.equal(SRm.adjacentPeriod('week', '2026-08-24', list, -1), '2026-08-10');
 });

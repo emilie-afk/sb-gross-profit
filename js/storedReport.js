@@ -74,6 +74,20 @@ export function monthsOf(weekList, { earliest = PUBLICATION_EARLIEST } = {}) {
   return [...out].sort().reverse();
 }
 
+/** Published weeks (Monday, newest first) that hold days from PUBLICATION_EARLIEST on: the weeks a report can open. */
+export function weeksOf(weekList, { earliest = PUBLICATION_EARLIEST } = {}) {
+  return (weekList || []).filter(w => isDate(w.weekStart) && publishedOf(w) && addDays(w.weekStart, 6) >= earliest)
+    .map(w => w.weekStart).sort().reverse();
+}
+
+/** The neighbouring period of the same kind that has a report (dir -1 = earlier, +1 = later), or null. */
+export function adjacentPeriod(kind, key, weekList, dir, opts) {
+  const list = (kind === 'month' ? monthsOf(weekList, opts) : weeksOf(weekList, opts)).slice().sort();   // oldest first
+  const i = list.indexOf(key);
+  if (i < 0) { const later = list.filter(k => (dir > 0 ? k > key : k < key)); return later.length ? (dir > 0 ? later[0] : later[later.length - 1]) : null; }
+  return list[i + dir] ?? null;
+}
+
 /**
  * What a period needs. kind 'week' (key = Monday) or 'month' (key = YYYY-MM).
  * → { kind, key, period, weeks: [{ weekStart, days: {from,to} (inside the period), published }],

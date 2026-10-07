@@ -64,6 +64,14 @@ const STYLES = `
 #view-scenario .sc-btn{padding:7px 14px;background:transparent;border:1px solid var(--border);
   border-radius:6px;color:var(--muted);font-size:.78rem}
 #view-scenario .sc-btn:hover{border-color:var(--accent);color:var(--accent)}
+#view-scenario .sc-primary{background:var(--gp-brand,#15803d);border-color:var(--gp-brand,#15803d);color:#fff;font-weight:600}
+#view-scenario .sc-primary:hover{color:#fff;opacity:.92}
+#view-scenario .sc-primary[disabled]{opacity:.6;cursor:progress}
+#view-scenario .sc-status{font-size:12px;color:var(--muted)}
+#view-scenario .sc-status.stale{color:var(--gp-warn,#92600a);font-weight:600}
+#view-scenario .sc-status.error{color:var(--gp-neg,#b91c1c);font-weight:600}
+#view-scenario .sc-empty{padding:14px 16px;border:1px dashed var(--border);border-radius:10px;font-size:13px}
+#view-scenario.sc-updating #sc-alerts,#view-scenario.sc-updating .sc-card+.sc-card{opacity:.45;transition:opacity .1s}
 #view-scenario .sc-kpi{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
 #view-scenario .sc-kpi div{background:var(--surface2);border-radius:8px;padding:12px}
 #view-scenario .sc-kpi .k{font-size:.7rem;color:var(--muted);text-transform:uppercase}
@@ -97,6 +105,11 @@ const MARKUP = `
     <div class="sc-h">Vendor-specific discount overrides</div>
     <div id="sc-overrides"></div>
     <button class="sc-btn" id="sc-add-override">+ Add vendor override</button>
+  </div>
+
+  <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <button class="sc-btn sc-primary" id="sc-calc" type="button">Calculate scenario</button>
+    <span class="sc-status" id="sc-status" role="status" aria-live="polite"></span>
   </div>
 
   <div style="margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -178,12 +191,15 @@ export function initScenarioView(container, linesGetter) {
   container.innerHTML = STYLES + MARKUP;
   resetToDefaults(false);
 
+  // Assumptions apply only when "Calculate scenario" is pressed: a date typed digit by digit passes through invalid
+  // values (year 0026, from after to), which recalculating on every keystroke turned into wild or frozen results.
   ['sc-sitewide', 'sc-ad', 'sc-labor', 'sc-target', 'sc-from', 'sc-to',
-   'sc-vendor-filter', 'sc-channel-filter', 'sc-missing'].forEach(id =>
-    $(id).addEventListener('input', renderScenarioView));
-
-  $('sc-add-override').addEventListener('click', () => { addOverrideRow(); renderScenarioView(); });
-  $('sc-reset').addEventListener('click', () => { resetToDefaults(true); renderScenarioView(); });
+   'sc-vendor-filter', 'sc-channel-filter', 'sc-missing'].forEach(id => {
+    $(id).addEventListener('input', markStale); $(id).addEventListener('change', markStale);
+  });
+  $('sc-calc').addEventListener('click', () => calculateScenario());
+  $('sc-add-override').addEventListener('click', () => { addOverrideRow(); markStale(); });
+  $('sc-reset').addEventListener('click', () => { resetToDefaults(true); calculateScenario(); });
   $('sc-save').addEventListener('click', saveScenario);
   $('sc-load').addEventListener('click', loadScenario);
   $('sc-delete').addEventListener('click', deleteScenario);
@@ -195,6 +211,7 @@ export function initScenarioView(container, linesGetter) {
 
   refreshSavedList();
   renderStandalone();
+  calcLines = null;
   renderScenarioView();
 }
 
@@ -265,15 +282,15 @@ function renderOverrides() {
 
   wrap.querySelectorAll('.sc-ovr-v').forEach(el => el.addEventListener('change', e => {
     overrideRows[+e.target.dataset.i].vendor = e.target.value;
-    renderOverrides(); renderScenarioView();
+    renderOverrides(); markStale();
   }));
   wrap.querySelectorAll('.sc-ovr-r').forEach(el => el.addEventListener('input', e => {
     overrideRows[+e.target.dataset.i].rate = parseFloat(e.target.value) || 0;
-    renderScenarioView();
+    markStale();
   }));
   wrap.querySelectorAll('.sc-ovr-x').forEach(el => el.addEventListener('click', e => {
     overrideRows.splice(+e.target.dataset.i, 1);
-    renderOverrides(); renderScenarioView();
+    renderOverrides(); markStale();
   }));
 }
 
@@ -310,15 +327,85 @@ function filterLines(lines, a) {
 
 // ─── Render ───────────────────────────────────────────────────────────────────
 
+/** The "Current actual" column exactly as the Discount & operating margin view computes it now (its filters included). */
+export function scenarioCurrentActual() {
+  const all = getLines ? getLines() : null;
+  if (!all || !all.length) return null;
+  let a;
+  try { a = readAssumptions(); } catch { a = { ...SCENARIO_DEFAULTS }; }
+  const lines = filterLines(all, a);
+  const d = all.map(l => l.date).filter(Boolean).sort();
+  const narrower = (a.dateFrom && d.length && a.dateFrom > d[0]) || (a.dateTo && d.length && a.dateTo < d[d.length - 1]);
+  const filtered = !!(a.vendorFilter || a.channelFilter || narrower || a.excludeMissing);
+  return { current: summarizeScenario(lines, a).current, filtered };
+}
+
+/**
+ * Shown when the view opens: calculates only for new data (a new report or upload); otherwise keeps the last
+ * calculated results, so edited assumptions are applied only by "Calculate scenario".
+ */
 export function renderScenarioView() {
   const all = getLines();
   if (!all || !all.length) return;
+  if (calcLines === all && lastResult) return;
+  calculateScenario();
+}
+
+let calcLines = null;
+function setStatus(text, cls = '') { const el = $('sc-status'); if (el) { el.textContent = text; el.className = `sc-status ${cls}`.trim(); } }
+function markStale() { if (lastResult || calcLines) setStatus('Assumptions changed: press Calculate scenario to apply them.', 'stale'); }
+
+const RESULT_IDS = ['sc-alerts', 'sc-kpis', 'sc-compare', 'sc-target-kpis', 'sc-target-note', 'sc-vendor', 'sc-sku', 'sc-sku-count', 'sc-coverage', 'sc-missing-table', 'sc-method'];
+function clearResults(message) {
+  for (const id of RESULT_IDS) { const el = $(id); if (el) el.innerHTML = ''; }
+  lastResult = null;
+  if (message) $('sc-alerts').innerHTML = `<div class="sc-empty" role="status">${esc(message)}</div>`;
+}
+
+const DATE_OK = d => /^\d{4}-\d{2}-\d{2}$/.test(d) && d >= '2000-01-01' && d <= '2100-12-31' && !Number.isNaN(Date.parse(`${d}T00:00:00Z`));
+const fmtDay = d => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+
+/** Apply the current assumptions: visible updating state, validation, a clear message when no orders match. */
+export function calculateScenario() {
+  const all = getLines();
+  if (!all || !all.length) return;
+  const btn = $('sc-calc'), view = btn?.closest('#view-scenario') || document.getElementById('view-scenario');
+  if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+  view?.classList.add('sc-updating');
+  setStatus('Updating…');
+  // Let the browser paint the updating state before the work.
+  setTimeout(() => {
+    try { applyScenario(all); }
+    catch (e) { clearResults('The scenario could not be calculated. Check the assumptions and try again.'); setStatus('Calculation failed.', 'error'); console.error(e); }
+    finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Calculate scenario'; }
+      view?.classList.remove('sc-updating');
+    }
+  }, 30);
+}
+
+function applyScenario(all) {
   populateFilters(all);
+  calcLines = all;
   const a = readAssumptions();
+  if ((a.dateFrom && !DATE_OK(a.dateFrom)) || (a.dateTo && !DATE_OK(a.dateTo))) {
+    clearResults('Enter complete dates (year 2000 or later) before calculating.'); setStatus('Dates are incomplete.', 'error'); return;
+  }
+  if (a.dateFrom && a.dateTo && a.dateFrom > a.dateTo) {
+    clearResults(`The start date (${fmtDay(a.dateFrom)}) is after the end date (${fmtDay(a.dateTo)}).`); setStatus('Dates are reversed.', 'error'); return;
+  }
   const lines = filterLines(all, a);
+  if (!lines.some(l => !l.isRoute)) {
+    const range = a.dateFrom && a.dateTo ? ` from ${fmtDay(a.dateFrom)} to ${fmtDay(a.dateTo)}` : '';
+    clearResults(`No orders match these filters${range}${a.vendorFilter ? `, vendor ${a.vendorFilter}` : ''}${a.channelFilter ? `, channel ${a.channelFilter}` : ''}. Previous results were cleared.`);
+    setStatus('No orders match.', 'error');
+    return;
+  }
   const res = summarizeScenario(lines, a);
   const target = calculateAllowableCogs(res);
   lastResult = res;
+  const orders = new Set(lines.map(l => l.orderNum)).size;
+  setStatus(`Calculated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })} · ${orders.toLocaleString()} order${orders === 1 ? '' : 's'}${a.dateFrom && a.dateTo ? ` · ${fmtDay(a.dateFrom)} – ${fmtDay(a.dateTo)}` : ''}`);
 
   renderAlerts(res, target);
   renderKpis(res);
@@ -498,6 +585,7 @@ function renderMethod(res, t) {
     • Labor: ${money(l.monthlyLabor)}/month → ${money(l.allocated)} allocated
       (${l.method === 'whole_calendar_months' ? `${l.months} whole calendar month(s)`
         : l.days ? `${l.days} inclusive days ÷ 30.4375` : 'single month assumed'}).<br>
+    ${l.unallocated ? `• ${money(l.unallocated)} of labor for this period is not allocated: the filters leave no product lines to carry it.<br>` : ''}
     • Order shipping and labor are allocated to vendors and SKUs by scenario product-revenue share;
       advertising is computed from each line's own scenario revenue.<br>
     • Cancelled orders are excluded. Order-level refunds are prorated across eligible product lines by
@@ -576,10 +664,10 @@ function loadScenario() {
   overrideRows = Object.entries(s.vendorDiscounts || {}).map(([vendor, rate]) =>
     ({ vendor, rate: rate * 100 }));
   renderOverrides();
-  renderScenarioView();
+  populateFilters(getLines() || []);
   if (s.vendorFilter) $('sc-vendor-filter').value = s.vendorFilter;
   if (s.channelFilter) $('sc-channel-filter').value = s.channelFilter;
-  renderScenarioView();
+  calculateScenario();
 }
 function deleteScenario() {
   const i = parseInt($('sc-saved').value, 10);

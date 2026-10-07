@@ -179,3 +179,40 @@ test('collector: Shopify sign-in that needs a person — ShipStation kept first,
   assert.deepEqual(events.map(e => e[0]), ['needs_person', 'signed_in']);
   assert.equal(computes, 2);
 });
+
+test('APS mapping: runs after the Shipping Cost Report with its rows, one browser at a time; never changes the exit code', async () => {
+  const r = rig();
+  r.d.shipstation.collect = async () => ({ status: 'prepared', pending: { sanitized: true, prep: { sanitizedText: 'SCR',
+    payload: { sanitizedSha256: 'e'.repeat(64), requestedFrom: '2026-07-27', requestedTo: '2026-09-20' } } } });
+  const calls = [];
+  r.d.apsMapping = { needed: async () => { calls.push('needed'); return false; },
+    run: async ({ scrText, scrSource }) => { calls.push(`run:${scrText}`); calls.push(scrSource); r.log.push('aps:export'); return { status: 'ok', apsOrders: 3 }; } };
+  const out = await runWeeklyCollection(r.d);
+  assert.deepEqual([out.status, out.exitCode, out.aps], ['ok', 0, { status: 'ok', apsOrders: 3 }]);
+  assert.deepEqual(calls, ['run:SCR', { sanitizedSha256: 'e'.repeat(64), from: '2026-07-27', to: '2026-09-20' }], 'with this run’s report rows and their provenance; no coverage question needed');
+  assert.ok(r.log.indexOf('aps:export') < r.log.indexOf('shopify:open'), 'before the Shopify browser opens');
+  // A failure (e.g. steps not recorded) is reported, never a partial week.
+  const f = rig();
+  f.d.shipstation.collect = async () => ({ status: 'prepared', pending: { sanitized: true, prep: { sanitizedText: 'SCR' } } });
+  f.d.apsMapping = { needed: async () => true, run: async () => ({ status: 'aps_mapping_not_configured' }) };
+  const of = await runWeeklyCollection(f.d);
+  assert.deepEqual([of.status, of.exitCode, of.aps.status], ['ok', 0, 'aps_mapping_not_configured']);
+  // A crash in the step is contained too.
+  const c = rig();
+  c.d.apsMapping = { needed: async () => true, run: async () => { throw new Error('browser'); } };
+  const oc = await runWeeklyCollection(c.d);
+  assert.deepEqual([oc.status, oc.aps.status], ['ok', 'failed']);
+});
+
+test('APS mapping: when the sources are already in, it runs only if the stored mapping does not cover the week', async () => {
+  const done = { shopify: 'ok', shopify_updates: 'ok', shipping_cost_report: 'ok' };
+  const a = rig({ collected: done });
+  let ran = 0;
+  a.d.apsMapping = { needed: async () => false, run: async () => { ran++; return { status: 'ok' }; } };
+  const oa = await runWeeklyCollection(a.d);
+  assert.deepEqual([oa.status, oa.aps, ran], ['already_collected', { status: 'covered' }, 0]);
+  const b = rig({ collected: done });
+  b.d.apsMapping = { needed: async () => true, run: async ({ scrText }) => { ran++; return { status: 'ok', scrText }; } };
+  const ob = await runWeeklyCollection(b.d);
+  assert.deepEqual([ob.status, ob.aps, ran], ['already_collected', { status: 'ok', scrText: null }, 1]);
+});

@@ -47,3 +47,5 @@ export const automationStatus = (weekStart, o) => workerApi(`/automation/status$
  */
 export const reportPart = (weekStart, k, snapshotId, o) =>
   workerApi(`/snapshot/${weekStart}/report-part/${Number(k) || 0}${snapshotId ? `?snapshot=${encodeURIComponent(snapshotId)}` : ''}`, o);
+/** Air Plant Shop scenario input for a published week (the line-item export's per-order mapping; separate from results). */
+export const apsInput = (weekStart, o) => workerApi(`/aps/${weekStart}`, o);

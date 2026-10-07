@@ -36,7 +36,7 @@ const W = '\\d{4}-\\d{2}-\\d{2}';
 export const SAFE_READS = Object.freeze([
   '/v1/auth/session', '/v1/ingest/week-plan',
   '/v1/weeks', '/v1/history', '/v1/compare', '/v1/automation/status',
-  `/v1/snapshot/${W}`, `/v1/snapshot/${W}/orders`, `/v1/snapshot/${W}/orders/[^/]+`, `/v1/snapshot/${W}/issues`, `/v1/snapshot/${W}/scenario-input`, `/v1/snapshot/${W}/report-part/\\d{1,4}`,
+  `/v1/snapshot/${W}`, `/v1/snapshot/${W}/orders`, `/v1/snapshot/${W}/orders/[^/]+`, `/v1/snapshot/${W}/issues`, `/v1/snapshot/${W}/scenario-input`, `/v1/snapshot/${W}/report-part/\\d{1,4}`, `/v1/aps/${W}`,
   '/v1/admin/settings', '/v1/admin/week-plan', '/v1/admin/readiness', '/v1/admin/restatements', '/v1/admin/catalog-pushes',
   '/v1/admin/runs/[\\w-]+', '/v1/admin/catalog-refresh/[\\w-]+', `/v1/admin/cycles/${W}`,
   '/v1/admin/shipping-cost/versions', '/v1/admin/shipping-cost/versions/[\\w-]+', '/v1/admin/shipping-cost/segments', '/v1/admin/shipping-cost/effective',

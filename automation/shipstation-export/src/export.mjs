@@ -34,7 +34,7 @@ import { uploadToWorker, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
 
 export { safeError };
 export { writeRunRecord };
-import { prepareExport, reportWindow, KINDS, DEFAULT_KIND, assertKindEnabled } from './kinds.mjs';
+import { prepareExport, reportWindow, KINDS, DEFAULT_KIND, assertKindEnabled, apsSteps } from './kinds.mjs';
 
 function argv() {
   const a = process.argv.slice(2), o = {};
@@ -46,7 +46,8 @@ export async function runSteps(page, steps, vars, downloadsDir) {
   let file = null;
   for (const [i, s] of steps.entries()) {
     const at = `step ${i + 1} (${s.action})`;
-    if (s.action === 'goto') await page.goto(render(s.url, vars), { waitUntil: 'domcontentloaded' });
+    if (s.action === 'viewport') await page.setViewportSize({ width: Number(s.width) || 1500, height: Number(s.height) || 950 });   // a narrow default hides toolbar buttons
+    else if (s.action === 'goto') await page.goto(render(s.url, vars), { waitUntil: 'domcontentloaded' });
     else if (s.action === 'click') await page.locator(s.selector).first().click({ timeout: s.timeout || 15000 });
     else if (s.action === 'fill') await page.locator(s.selector).first().fill(render(s.value, vars), { timeout: s.timeout || 15000 });
     else if (s.action === 'select') await page.locator(s.selector).first().selectOption(render(s.value, vars));
@@ -57,15 +58,18 @@ export async function runSteps(page, steps, vars, downloadsDir) {
       // Take the file from the network instead of the browser's download manager: on the Windows
       // laptop Edge 154 and Chrome 154 driven by Playwright closed ~3 s after a download started.
       // The matching request is fetched by Playwright and answered with an empty 204 to the page.
+      // captureScope 'context': the file is opened in a NEW tab (ShipStation's shipment export), so the route is
+      // set on the browser context, not only on this page.
+      const scope = s.captureScope === 'context' ? page.context() : page;
       let settle; const got = new Promise(r => { settle = r; });
-      await page.route(s.capture, async route => {
+      await scope.route(s.capture, async route => {
         try { const res = await route.fetch({ timeout: s.timeout || 180000 }); settle({ status: res.status(), body: await res.body() }); }
         catch (e) { settle({ status: 0, error: String(e.message).split('\n')[0].slice(0, 120) }); }
         await route.fulfill({ status: 204, body: '' }).catch(() => {});
       });
       await page.locator(s.selector).first().click({ timeout: 15000 });
       const r = await Promise.race([got, new Promise(res => setTimeout(() => res({ status: 0, error: 'capture_timeout' }), s.timeout || 180000))]);
-      await page.unroute(s.capture).catch(() => {});
+      await scope.unroute(s.capture).catch(() => {});
       if (r.status !== 200 || !r.body?.length) throw new Error(`${at}: report download failed (${r.status} ${r.error || 'empty'})`);
       file = path.join(downloadsDir, `download_${Date.now()}.csv`);
       fs.writeFileSync(file, r.body);
@@ -102,7 +106,7 @@ export async function runSteps(page, steps, vars, downloadsDir) {
  * can upload it while it waits for Shopify's export email (one browser at a
  * time). finishShipStationUpload() completes it and rewrites the manifest.
  */
-export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, headed = false, deferUpload = false }) {
+export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, headed = false, deferUpload = false, apsWindow = null, scrRows = null, scrSource = null, resolveScrRows = null }) {
   assertNoSecretsInConfig(config);
   const paths = localPaths(config);
   for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
@@ -111,9 +115,14 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
   purgeOlderThan(paths.quarantine, 72 * 3600_000);                        // also runs daily from purge.mjs
   if (!KINDS[kind]) throw new Error(`--kind must be one of ${Object.keys(KINDS).join(', ')}`);
   assertKindEnabled(kind, config);                                         // mapping export: dormant unless re-enabled
-  const steps = config.kinds?.[kind]?.exportSteps || (kind === 'shipstation_mapping_export' ? config.exportSteps : null) || [];
+  const aps = kind === 'shipstation_aps_mapping';
+  if (aps && !apsWindow) throw new Error('apsWindow is required for the Air Plant Shop mapping export');
+  const steps = aps ? apsSteps(config) : (config.kinds?.[kind]?.exportSteps || (kind === 'shipstation_mapping_export' ? config.exportSteps : null) || []);
   const win = reportWindow(week);
-  const vars = { ...week, reportFrom: win.from, reportTo: win.to, reportFromUS: win.fromUS, reportToUS: win.toUS };
+  const vars = { ...week, reportFrom: win.from, reportTo: win.to, reportFromUS: win.fromUS, reportToUS: win.toUS,
+    // The saved template's recorded steps use {{weekStartUS}}–{{weekEndUS}}: for the APS mapping they are its ship-date window.
+    ...(aps ? { weekStart: apsWindow.from, weekEnd: apsWindow.to, weekStartUS: apsWindow.fromUS, weekEndUS: apsWindow.toUS,
+                apsFrom: apsWindow.from, apsTo: apsWindow.to, apsFromUS: apsWindow.fromUS, apsToUS: apsWindow.toUS } : {}) };
   const runId = `ssx_${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const manifest = { runId, kind, weekStart: week.weekStart, weekEnd: week.weekEnd, startedAt: new Date().toISOString(), status: 'running' };
   const finish = (status, exitCode, extra = {}) => {
@@ -144,10 +153,19 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
     if (state === 'captcha') return finish('needs_human_captcha', EXIT.CAPTCHA);
     if (NEEDS_HUMAN.has(state) || state !== 'authenticated') return finish('unknown_page', EXIT.UNKNOWN_PAGE, { evidence });
 
+    const t0 = Date.now();
     const file = await runSteps(page, steps, vars, paths.downloads);
+    manifest.exportMs = Date.now() - t0;                                  // export steps incl. the download (measured per run)
     const buf = fs.readFileSync(file);
     const exportedAt = new Date().toISOString();
-    const prep = prepareExport(kind, buf.toString('utf8'), { week, exportedAt });
+    let prep = prepareExport(kind, buf.toString('utf8'), { week, exportedAt, apsWindow, scrRows, scrSource });
+    // APS split dates holding both kinds of label: read the owning report versions' retained rows, then prepare again.
+    // Unreadable rows leave those orders split_cost_unverified (no cost), never guessed.
+    if (prep.needRows?.length && resolveScrRows) {
+      let rowsFor = null;
+      try { rowsFor = await resolveScrRows(prep.needRows); } catch { rowsFor = null; }
+      if (rowsFor) prep = prepareExport(kind, buf.toString('utf8'), { week, exportedAt, apsWindow, scrRows, scrSource, rowsFor });
+    }
     if (prep.refused) {
       fs.rmSync(file);                                                     // a refused raw file is never kept or forwarded
       return finish(prep.refused, EXIT.EXPORT_FAILED, { reason: prep.reason, columns: prep.columns });
@@ -155,6 +173,7 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
     const outName = `${kind}_${week.weekStart}_${runId}.csv`;
     const facts = { exportedAt, bytes: buf.length, ...prep.facts };
     if (kind === 'shipstation_shipping_cost_report') fs.rmSync(file);    // raw report holds Recipient: gone once sanitized
+    if (aps) { fs.rmSync(file); prep.sanitizedText = JSON.stringify(prep.payload); }   // only the per-order classification is kept or sent
     if (delivery === 'drive') {                                            // rollback path only (mapping export)
       if (kind !== 'shipstation_mapping_export') return finish('drive_not_supported', EXIT.CONFIG, { note: 'Drive rollback exists only for the mapping export' });
       fs.mkdirSync(config.outputDir, { recursive: true });

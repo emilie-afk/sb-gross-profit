@@ -10,6 +10,7 @@
     "build": "python3 build.py",
     "historical": "node tools/historical_totals.mjs",
     "hash-password": "node tools/hash-password.mjs",
-    "backfill": "node tools/backfill.mjs"
+    "backfill": "node tools/backfill.mjs",
+    "test:browser": "node --test \"tests/browser/*.browser.test.mjs\""
   }
 }

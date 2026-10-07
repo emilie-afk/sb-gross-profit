@@ -10,10 +10,13 @@
  *   projectionUnitCost(...)           a SKU's unit cost for the price projection: the average of its
  *                                     known-cost sales, else the engine's shared cost resolver over all
  *                                     cost tables (MCG pack sheet included). Unknown stays null, never $0.
+ *   packDependent(sku, product, label) without the MCG pack table, whether a cost would come from the
+ *                                     older pack/random rules the table replaced. Such costs are shown as
+ *                                     unknown (never the old tier figure) until the table is loaded.
  *   projectionTotals(rows, baseline)  revenue, known cost and GP with unknown costs left unknown: GP is
  *                                     known-cost GP and is marked incomplete when any cost is unknown.
  */
-import { resolveCost, mcgPlantUnits } from '../shared/calculator.js';
+import { resolveCost, mcgPlantUnits, isMcgSku } from '../shared/calculator.js';
 
 const r2 = x => Math.round((Number(x) || 0) * 100) / 100;
 const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
@@ -57,6 +60,39 @@ export function mcgVolumeSavings(volume, discs) {
   return { tiers, total };
 }
 
+// Cost labels of the rules the MCG pack sheet replaced (calculator.js getCost), bundles included.
+const PACK_RULE_LABEL = /MCG tier \((Pack|Random)|Random\/Pack succulent/i;
+const PACK_NAME = /PACK|RANDOM|MYSTERY|ASSORTED/i;
+export const PACK_TABLE_MISSING = 'Unknown: MCG pack table not loaded';
+
+/**
+ * Without the MCG pack table, is this cost one the table would decide? True when the resolver used an older
+ * pack/random rule, or the SKU is an MCG SKU named as a pack, random, assorted or Mystery plant. Conservative:
+ * a cost the table might replace is treated as unknown rather than shown at the older figure.
+ */
+export function packDependent(sku, product, label) {
+  if (PACK_RULE_LABEL.test(String(label || ''))) return true;
+  const parts = String(sku || '').toUpperCase().split('+').map(p => p.trim()).filter(Boolean);
+  const mcg = parts.some(p => isMcgSku(p)) || /^MCG/i.test(String(label || ''));
+  return mcg && (PACK_NAME.test(String(product || '')) || parts.some(p => /RANDOM|MYSTERY/.test(p)));
+}
+
+/**
+ * CSV report without the MCG pack table: lines whose cost the table would decide become missing costs
+ * (null cost and GP, reason given), so no old tier figure is shown as a cost. Returns how many lines changed.
+ */
+export function markPackDependentUnknown(lines) {
+  let n = 0;
+  for (const li of lines || []) {
+    if (li.lineCogs === null || li.lineCogs === undefined) continue;
+    if (!packDependent(li.sku, li.product, li.costSource)) continue;
+    Object.assign(li, { unitCost: null, costSource: 'COST MISSING', costMissingReason: PACK_TABLE_MISSING,
+      lineCogs: null, lineGp: null, lineGpPct: null, lineNetGp: null, lineNetGpPct: null });
+    n++;
+  }
+  return n;
+}
+
 /**
  * @param {object[]} lines   the SKU's sold lines (may be empty for a new SKU)
  * @param {object}   t       cost tables { mcgCosts, productCosts, additionalCosts, hpByName, skuAlias, mcgExtra, vendorCosts, vendorIndex, mcgPack }
@@ -71,6 +107,7 @@ export function projectionUnitCost(lines, sku, product, vendor, t = {}) {
   if (!(sku || '').trim()) return { cost: null, source: 'No SKU' };
   const [c, label] = resolveCost(sku, vendor || '', t.mcgCosts || {}, t.productCosts || {}, t.additionalCosts || {}, t.hpByName || {}, product || '',
     t.skuAlias || {}, t.mcgExtra || {}, t.vendorCosts || null, t.vendorIndex || null, t.mcgPack || null);
+  if (!hasPackTable(t.mcgPack) && packDependent(sku, product, label)) return { cost: null, source: PACK_TABLE_MISSING };
   return typeof c === 'number' && Number.isFinite(c) ? { cost: c, source: label } : { cost: null, source: label || 'COST MISSING' };
 }
 

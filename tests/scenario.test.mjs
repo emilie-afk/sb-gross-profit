@@ -650,3 +650,12 @@ test('LindaMakes takes part in vendor discount overrides and vendor analysis', (
   assert.ok(lm.maxCogs !== undefined, 'reverse max-cost analysis covers the vendor');
   for (const c of s.reconciliation.checks) assert.ok(c.ok, c.label);
 });
+
+test('labor with no product lines: nothing to allocate onto → 0 allocated, reported unallocated, reconciliation passes', async () => {
+  const { summarizeScenario } = await import('../shared/scenario.js');
+  const a = { monthlyLabor: 9500, dateFrom: '2026-09-01', dateTo: '2026-09-30' };
+  const none = summarizeScenario([], a);
+  assert.deepEqual([none.reconciliation.ok, none.current.labor, none.scenario.labor, none.labor.unallocated, none.labor.method], [true, 0, 0, 9500, 'no_product_lines']);
+  const routeOnly = summarizeScenario([{ orderNum: '#1', sku: 'ROUTEINS', isRoute: true, lineRevenue: 0.98, qty: 1, lineCogs: 0.98, shipCollected: 0, shipPaid: 0 }], a);
+  assert.equal(routeOnly.reconciliation.ok, true, routeOnly.reconciliation.checks.filter(c => !c.ok).map(c => `${c.label} ${c.diff}`).join('; '));
+});

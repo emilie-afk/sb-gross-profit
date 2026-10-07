@@ -241,7 +241,19 @@ export async function getScrOwners(request, env) {
   const b = await readJson(request);
   if (!DATE.test(b.from || '') || !DATE.test(b.to || '') || b.from > b.to || addDays(b.from, MAX_DAYS) <= b.to) throw new ApiError(400, 'bad_payload', `from / to: YYYY-MM-DD, at most ${MAX_DAYS} days`);
   const own = await owners(env.DB, b.from, b.to);
-  return json({ owners: [...own].sort((x, y) => (x[0] < y[0] ? -1 : 1)).map(([d, o]) => [d, o.dayHash]) });
+  const list = [...own].sort((x, y) => (x[0] < y[0] ? -1 : 1));
+  if (b.detail !== true) return json({ owners: list.map(([d, o]) => [d, o.dayHash]) });
+  // detail (the APS mapping's split dates): each date's owning version and the costs it kept from an earlier report,
+  // and every such version's retained source, so the collector can read the exact rows a date's groups came from.
+  const vrows = async ids => (ids.length ? (await env.DB.prepare(`SELECT version_id, source_id, requested_from, requested_to, json_extract(outcome, '$.preserved') AS preserved
+      FROM scr_version WHERE version_id IN (SELECT value FROM json_each(?1))`).bind(JSON.stringify(ids)).all()).results || [] : []);
+  const vs = await vrows([...new Set(list.map(([, o]) => o.versionId))]);
+  const keptOf = new Map(vs.map(v => [v.version_id, P(v.preserved, null) || {}]));
+  const detail = list.map(([d, o]) => [d, o.versionId, o.dayHash, keptOf.get(o.versionId)?.[d] || []]);
+  const more = [...new Set(detail.flatMap(x => x[3].map(k => k[1])))].filter(v => !keptOf.has(v));
+  const all = [...vs, ...(await vrows(more))];
+  return json({ owners: list.map(([d, o]) => [d, o.dayHash]), detail,
+                versions: all.map(v => [v.version_id, v.source_id, v.requested_from, v.requested_to]).sort((x, y) => (x[0] < y[0] ? -1 : 1)) });
 }
 
 export async function getScrDays(request, env) {

@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mcgVolumeOrders, mcgVolumeSavings, hasPackTable, projectionUnitCost, projectionTotals } from '../js/scenarioModels.js';
+import { mcgVolumeOrders, mcgVolumeSavings, hasPackTable, projectionUnitCost, projectionTotals, packDependent, markPackDependentUnknown, PACK_TABLE_MISSING } from '../js/scenarioModels.js';
 import { calculate } from '../shared/calculator.js';
 
 const STORE = 'Succulents Box (17381)';
@@ -87,4 +87,32 @@ test('price projection totals: unknown costs are not $0; GP is known-cost and ma
   // Entering the cost completes it.
   const done = projectionTotals([{ id: 2, qty: 5, sellPrice: 20, costPerUnit: 7 }], []);
   assert.deepEqual([done.proj.cogs, done.proj.gp, done.proj.incomplete], [35, 65, false]);
+});
+
+test('without the MCG pack table, costs it would decide are unknown, never the older tier figure', () => {
+  // The live case: a 30-pack resolved by the older rack rule at $60; the pack sheet says $30.
+  const noPack = { mcgCosts: { S2KY1048: 4.1, S3MY3003: 4 }, mcgPack: null };
+  assert.deepEqual(projectionUnitCost([], 'XAZZ3141-30', 'Succulent Pack (30 plants)', 'Succulents Box', noPack), { cost: null, source: PACK_TABLE_MISSING });
+  assert.equal(projectionUnitCost([], 'XAZZ3141-30', 'Succulent Pack (30 plants)', 'Succulents Box', { ...noPack, mcgPack: { 'XAZZ3141-30': 30 } }).cost, 30, 'with the table: the sheet cost');
+  // A single Mystery plant priced by the MCG Total sheet ($4; the pack sheet says $2): unknown without the table.
+  assert.equal(projectionUnitCost([], 'S3MY3003', 'Mystery Succulent', 'Succulents Box', noPack).cost, null);
+  // Random plants by the older $2 rules: unknown.
+  assert.equal(projectionUnitCost([], 'JN1234', 'Random 2" succulent', 'Succulents Box', noPack).cost, null);
+  // Individual plants keep their cost; known-cost sales still win (saved reports carry the engine's pinned costs).
+  assert.equal(projectionUnitCost([], 'S2KY1048', 'Echeveria Lola', 'Succulents Box', noPack).cost, 4.1);
+  assert.equal(projectionUnitCost([{ qty: 1, lineCogs: 30 }], 'XAZZ3141-30', 'Succulent Pack', 'Succulents Box', noPack).cost, 30);
+  // Non-MCG products named "pack" are not affected.
+  assert.equal(packDependent('LTG-100', 'Gift pack', 'Products export'), false);
+  assert.equal(packDependent('S2KY1048+XAZZ3141-30', 'Bundle', 'Bundle (MCG Total sheet + MCG tier (Pack 30×$2))'), true);
+});
+
+test('CSV report without the MCG pack table: pack-dependent lines become missing costs, others unchanged', () => {
+  const lines = [
+    { sku: 'XAZZ3141-30', product: 'Succulent Pack (30 plants)', costSource: 'MCG tier (Pack 30×$2)', unitCost: 60, lineCogs: 60, lineGp: 10, lineGpPct: 14.3, lineNetGp: 8, lineNetGpPct: 11.4 },
+    { sku: 'S2KY1048', product: 'Echeveria Lola', costSource: 'MCG Total sheet', unitCost: 4.1, lineCogs: 4.1, lineGp: 5, lineGpPct: 50, lineNetGp: 5, lineNetGpPct: 50 },
+    { sku: 'GC100', product: 'Gift Card', costSource: 'Gift Card (no COGS)', unitCost: 0, lineCogs: 0, lineGp: 25, lineGpPct: 100, lineNetGp: 25, lineNetGpPct: 100 },
+  ];
+  assert.equal(markPackDependentUnknown(lines), 1);
+  assert.deepEqual([lines[0].costSource, lines[0].lineCogs, lines[0].lineGp, lines[0].lineNetGp, lines[0].costMissingReason], ['COST MISSING', null, null, null, PACK_TABLE_MISSING]);
+  assert.equal(lines[1].lineCogs, 4.1); assert.equal(lines[2].lineCogs, 0);
 });

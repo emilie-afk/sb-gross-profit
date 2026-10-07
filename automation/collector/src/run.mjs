@@ -14,6 +14,8 @@ import { lastCompletedWeek, weekFromStart, assertSafeLocalDir, assertNoSecretsIn
 import { readWindowsCredential } from '../../shipstation-export/src/credentials.mjs';
 import { workerEndpoint } from '../../shipstation-export/src/upload.mjs';
 import { runShipStationJob, finishShipStationUpload } from '../../shipstation-export/src/export.mjs';
+import { apsExportWindow, assertKindEnabled, PUBLICATION_EARLIEST_DATE } from '../../shipstation-export/src/kinds.mjs';
+import { parseCSV } from '../../../shared/calculator.js';
 import { runShopifyJob } from '../../shopify-export/src/export.mjs';
 import { weekWindowUtc } from '../../../shared/schedule.js';
 import { runWeeklyCollection } from './orchestrate.mjs';
@@ -77,9 +79,25 @@ const r = await runWeeklyCollection({
     collect: () => runShipStationJob({ config: ssConfig, week: w, headed: !!args.headed, deferUpload: true }),
     upload: pending => finishShipStationUpload(pending, ft ? { uploadImpl: ft.uploadImpl } : {}),
   },
+  // Air Plant Shop scenario input (free-tier path): the saved line-item export, mapping only. Not configured or
+  // turned off → reported, never a failure of the week.
+  ...(ft ? { apsMapping: {
+    needed: async () => { const cov = await ft.apsCoverage(); return !cov || !cov.coveredTo || cov.coveredTo < w.weekEnd || !cov.coveredFrom || cov.coveredFrom > PUBLICATION_EARLIEST_DATE; },
+    run: async ({ scrText, scrSource }) => {
+      try { assertKindEnabled('shipstation_aps_mapping', ssConfig); } catch (e) { return { status: e.code || 'aps_mapping_off' }; }
+      const apsWindow = apsExportWindow(w, await ft.apsCoverage());
+      const job = await runShipStationJob({ config: ssConfig, week: w, kind: 'shipstation_aps_mapping', headed: !!args.headed, deferUpload: true,
+        apsWindow, scrRows: scrText ? parseCSV(scrText) : null, scrSource: scrText ? scrSource : null, resolveScrRows: pairs => ft.scrRowsFor(pairs) });
+      if (job.status !== 'prepared') return { status: job.status, exitCode: job.exitCode };
+      const up = await finishShipStationUpload(job.pending, { uploadImpl: ft.uploadImpl });
+      const m = up.manifest || {};
+      return { status: up.status, window: `${apsWindow.from}..${apsWindow.to}`, exportMs: m.exportMs ?? null, apsOrders: m.apsOrders ?? null,
+               byStatus: m.byStatus || null, sourceStatus: m.ingest?.sourceStatus || null };
+    },
+  } } : {}),
   shopify: { run: ({ onWaiting, onSignInRequired, onSignedIn }) => runShopifyJob({ config: shConfig, week: w, headed: !!args.headed, onWaiting, onSignInRequired, onSignedIn,
     ...(ft ? { uploadImpl: ft.uploadImpl } : {}) }) },
   ...(ft ? { compute: () => ft.compute(), signInEvent: (status, detail) => ft.signInEvent(status, detail), budget: () => ft.budget() } : {}),
 });
-console.log(scrub(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}${r.compute ? ` compute ${JSON.stringify(r.compute)}` : ''}`));
+console.log(scrub(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}${r.compute ? ` compute ${JSON.stringify(r.compute)}` : ''}${r.aps ? ` aps ${JSON.stringify(r.aps)}` : ''}`));
 process.exitCode = r.exitCode;

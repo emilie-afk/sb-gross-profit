@@ -1399,4 +1399,4 @@ export function summarize(lineItems) {
 //   resolveCost       the cost resolver (vendor catalog, bundles, MCG pack sheet, tables, alias, missing)
 //   mcgPlantUnits     MCG plants a line counts toward the volume discount (packs and random/Mystery
 //                     plants on the MCG pack sheet, pots, wholesale, subscriptions and racks count 0)
-export { getCost as resolveCost, mcgPlantUnits };
+export { getCost as resolveCost, mcgPlantUnits, isMcgSku };

@@ -436,3 +436,46 @@ a { color: var(--gp-accent); text-decoration: none; }
 #dashboard button[style*="--red"], #dashboard .logout-btn[style*="--red"] {
   border-color: var(--gp-border-strong) !important; color: var(--gp-text) !important;
 }
+
+/* ── Collapsible card (Provisional result) ───────────────────────────────── */
+.gp-collapsible .gp-card-head { cursor: pointer; }
+.gp-collapsible [hidden] { display: none !important; }  /* the body sets display inline */
+.gp-collapsible:not(.is-open) .gp-card-head { border-bottom-color: transparent; }
+.gp-collapse-btn { all: unset; display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  font: inherit; color: inherit; border-radius: 6px; }
+.gp-collapse-btn:focus-visible { outline: 2px solid var(--gp-accent, #1d4ed8); outline-offset: 3px; }
+.gp-chev { width: 8px; height: 8px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg); transition: transform .15s; margin-right: 2px; flex: none; }
+.gp-collapsible.is-open .gp-chev { transform: rotate(45deg); }
+.gp-collapse-hint { font-size: 12px; font-weight: 600; color: var(--gp-text2); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .gp-chev { transition: none; } }
+
+/* ── Saved-report period switcher (previous / list / next) ───────────────── */
+.gp-period-switch { display: flex; align-items: center; gap: 2px; border: 1px solid var(--gp-border-strong);
+  border-radius: 10px; padding: 3px 4px; background: var(--gp-surface); }
+.gp-period-switch .gp-btn-ghost { font-size: 18px; line-height: 1; padding: 4px 9px; }
+.gp-period-switch .gp-btn-ghost:disabled { opacity: .35; cursor: default; background: none; }
+.gp-period-switch select { border: none; background: none; font: inherit; font-size: 13px; font-weight: 600;
+  color: var(--gp-text); padding: 4px 2px; max-width: 220px; cursor: pointer; }
+.gp-switch-msg { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--gp-warn); text-align: right; }
+@media (max-width: 900px) {
+  .gp-header-actions { flex-wrap: wrap; }
+  .gp-period-switch { flex: 1 1 100%; }
+  .gp-period { flex: 1 1 100%; min-width: 0; gap: 4px; padding: 7px 8px; }
+  .gp-period { flex-wrap: wrap; }
+  .gp-period label { flex-basis: 100%; }
+  .gp-period-switch select { flex: 1; max-width: none; }
+  .gp-switch-msg { text-align: left; }
+}
+.gp-date-note { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--gp-text2); text-align: right; }
+@media (max-width: 900px) { .gp-date-note { text-align: left; } }
+
+/* ── Scenarios: baselines reconciliation ───────────────────────────────── */
+.gp-scen-baselines { margin: 18px 22px 0; }
+.gp-baselines { border: 1px solid var(--gp-border); border-radius: 10px; padding: 10px 14px; font-size: 13px; line-height: 1.5; background: var(--gp-subtle); }
+.gp-baselines summary { cursor: pointer; }
+.gp-baselines[open] summary { margin-bottom: 8px; }
+.gp-bl-row { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0; border-top: 1px solid var(--gp-border); }
+.gp-bl-row > span:last-child { white-space: nowrap; text-align: right; }
+.gp-bl-row.head { margin-top: 4px; }
+.gp-bl-row.sub { padding-left: 16px; color: var(--gp-text2); font-size: 12px; }

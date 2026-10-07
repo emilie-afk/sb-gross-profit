@@ -348,3 +348,10 @@ export function markNegatives(root) {
     el.classList.toggle('is-neg', isNegativeText(el.textContent) && !el.closest('[data-sign="neutral"]'));
   }
 }
+
+/** Hint shown on the collapsed "Provisional result" card: how many notes it holds and how many need attention. */
+export function disclosureHint(notes, attention = 0) {
+  if (!notes) return 'Show details';
+  const n = `${notes} note${notes === 1 ? '' : 's'}`;
+  return attention ? `Show ${n} (${attention} need${attention === 1 ? 's' : ''} attention)` : `Show ${n}`;
+}

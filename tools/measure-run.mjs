@@ -216,6 +216,34 @@ await measure('monthly_report_open', async () => {
   }
   return { month, weeks: inMonth.length, parts, requests };
 });
+// Air Plant Shop scenario input: one line-item export's mapping (every order of the window with an APS item: an
+// upper bound, about 1 in 6 orders), the same export again (no change), and the reader route for a month.
+const { buildApsMap } = await imp('shared/apsMapping.js');
+const { parseCSV: parse1 } = await imp('shared/calculator.js');
+const apsRows = d.meta.filter(o => o.k % 6 === 1).flatMap(o => {
+  const base = { 'Tracking Number': '', 'Modify Date': '', 'Void Flag': 'false', 'Void Date': '', Carrier: 'UPS', Service: 'Ground', 'Carrier Fee': '7', Rate: '7',
+    'Insurance Cost': '0', 'Shipping Paid': '0', Provider: '', 'Carrier Transaction ID': '', 'Internal Transaction ID': '', 'External ID': '', 'No Postage': 'false',
+    'Store Name': 'SB', 'Package Count': '1', Weight: '10', 'Item Quantity': '1', 'Order Number': o.number, 'Ship Date': `${o.day.slice(5, 7)}/${o.day.slice(8)}/${o.day.slice(0, 4)}` };
+  return o.k % 24 === 1 ? [{ ...base, 'Shipment ID': `A${o.k}`, 'Item SKU': 'AS-T-1' }, { ...base, 'Shipment ID': `B${o.k}`, 'Item SKU': 'MG-ALOE' }]
+       : [{ ...base, 'Shipment ID': `A${o.k}`, 'Item SKU': 'AS-T-1' }, { ...base, 'Shipment ID': `A${o.k}`, 'Item SKU': 'AS-X-2' }];
+});
+const apsMap = buildApsMap(apsRows, { window: { from: d.win.from, to: d.win.to }, scrRows: parse1(d.scr.text), source: { sanitizedSha256: 'a'.repeat(64), exportedAt: '2026-10-05T08:10:00Z' } });
+await measure('aps_mapping_upload', async () => { const r = await call('POST', '/v1/collect/aps-map', { meta: apsMap.meta, orders: apsMap.orders }, 'ingest'); return { orders: apsMap.orders.length, rows: apsRows.length, sourceStatus: r.json.sourceStatus }; });
+await measure('aps_mapping_same_again', async () => (await call('POST', '/v1/collect/aps-map', { meta: apsMap.meta, orders: apsMap.orders }, 'ingest')).json.sourceStatus);
+await measure('aps_month_reads', async () => {
+  // Published weeks for the reader route (measurement only; publication is off in this run).
+  const wk = d.weeks.slice(-5), restore = [];
+  for (const w of wk) {
+    const s = await db.prepare('SELECT snapshot_id, status FROM snapshot WHERE week_start = ?1 ORDER BY revision DESC LIMIT 1').bind(w).first();
+    if (s && s.status !== 'published') { restore.push(s); await db.prepare("UPDATE snapshot SET status = 'published' WHERE snapshot_id = ?1").bind(s.snapshot_id).run(); }
+  }
+  const login = await call('POST', '/v1/auth/login', { password: PASSWORD }, 'none', { Origin: 'https://sb-profit.netlify.app' });
+  const cookie = (login.headers.get('set-cookie') || '').split(';')[0];
+  let orders = 0;
+  for (const w of wk) orders += ((await call('GET', `/v1/aps/${w}`, undefined, 'none', { Cookie: cookie })).json?.orders || []).length;
+  for (const s of restore) await db.prepare('UPDATE snapshot SET status = ?2 WHERE snapshot_id = ?1').bind(s.snapshot_id, s.status).run();
+  return { weeks: wk.length, ordersReturned: orders };
+});
 // The meter's own upsert (not in its sums): its rows read / written as D1 reports them, first insert and update.
 const up = sql => db.prepare(`INSERT INTO d1_usage (day, scope, rows_read, rows_written, requests) VALUES ('2000-01-01', 'probe', 1, 1, 1)
   ON CONFLICT(day, scope) DO UPDATE SET rows_read = rows_read + excluded.rows_read, rows_written = rows_written + excluded.rows_written, requests = requests + 1`).run();

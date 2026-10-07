@@ -37,6 +37,7 @@ const ROUTES = [
   ['GET',  /^\/v1\/weeks\/\d{4}-\d{2}-\d{2}\/status$/],
   ['GET',  /^\/v1\/snapshot\/\d{4}-\d{2}-\d{2}(\/(orders(\/[^/]+)?|issues|scenario-input))?$/],
   ['GET',  /^\/v1\/snapshot\/\d{4}-\d{2}-\d{2}\/report-part\/\d{1,4}$/],
+  ['GET',  /^\/v1\/aps\/\d{4}-\d{2}-\d{2}$/],
 ];
 const FORWARD = ['content-type', 'accept', 'origin'];
 const RETURN = ['content-type', 'cache-control', 'x-content-type-options', 'referrer-policy'];

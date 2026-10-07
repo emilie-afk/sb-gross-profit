@@ -10,6 +10,7 @@
  *   /v1/collect/*           X-Ingest-Secret     Free-tier path: sources, orders, SCR dates, results
  *                           (read-only parts also X-Verify-Secret)
  *   /v1/verify/*            X-Verify-Secret     independent verifier (Netlify Function gp-verify)
+ *   /v1/aps/:week           reader              Air Plant Shop scenario input (apsMap.js); POST /v1/collect/aps-map stores it
  *
  * The Worker never returns a secret, a D1 credential or customer data.
  */
@@ -34,6 +35,7 @@ import { uploadScrVersion, getScrOwners, getScrDays, listScrVersions, getScrVers
 import { ordersDiff, uploadOrders, getManifest, orderBodies, catalogPart, weekAux, pinAux, openResults, putResultPart, finalizeResults, correctionsPending, createCostCorrection, listCostCorrections } from './collectWeeks.js';
 import { pendingVerifications, verifyInputs, verifyPart, postVerifyReport } from './verifyRoutes.js';
 import { getWeekStatus, verificationStatuses, postSignInEvent } from './weekStatus.js';
+import { uploadApsMap, apsMapCoverage, apsForWeek } from './apsMap.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -95,6 +97,8 @@ async function route(request, env) {
     if (p === '/v1/collect/sources' && m === 'POST') return openSource(request, env);
     if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/segments\/(\d+)$/)) && m === 'PUT') return putSegment(request, env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/collect\/sources\/(src_[0-9a-f]{20})\/seal$/)) && m === 'POST') return sealSource(request, env, g[1]);
+    if (p === '/v1/collect/aps-map' && m === 'POST') return uploadApsMap(request, env);
+    if (p === '/v1/collect/aps-map/coverage' && m === 'GET') return apsMapCoverage(env);
     if (p === '/v1/collect/scr/versions' && m === 'POST') return uploadScrVersion(request, env);
     if (p === '/v1/collect/scr/owners' && m === 'POST') return getScrOwners(request, env);
     if (p === '/v1/collect/orders/diff' && m === 'POST') return ordersDiff(request, env);
@@ -172,6 +176,8 @@ async function route(request, env) {
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/issues$/))) return listIssues(request, env, await requireReader(request, env), g[1]);
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/scenario-input$/))) return scenarioInput(request, env, await requireReader(request, env), g[1]);
     if ((g = p.match(/^\/v1\/snapshot\/(\d{4}-\d{2}-\d{2})\/report-part\/(\d{1,4})$/))) return reportPart(request, env, await requireReader(request, env), g[1], Number(g[2]));
+    // Air Plant Shop scenario input (separate from results; published-only reader access like the rest).
+    if ((g = p.match(/^\/v1\/aps\/(\d{4}-\d{2}-\d{2})$/))) { await requireReader(request, env); return apsForWeek(env, g[1]); }
   }
 
   throw new ApiError(404, 'not_found', 'No such route');

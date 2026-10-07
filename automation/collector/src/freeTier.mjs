@@ -30,7 +30,7 @@ import { parseShippingCostReport } from '../../../shared/adapters/shippingCostRe
 import { weekStartOf } from '../../../shared/normalized.js';
 import { orderBodyString, computeFromParts } from '../../../shared/bundle.js';
 import { resultParts } from '../../../shared/resultParts.js';
-import { versionDays, SCR_SEGMENT_ROWS } from '../../../shared/scrDays.js';
+import { versionDays, dayGroups, dayHash, SCR_SEGMENT_ROWS } from '../../../shared/scrDays.js';
 import { ENGINE_VERSION } from '../../../shared/snapshot.js';
 import { rollingWindow } from '../../shopify-export/src/lib.mjs';
 
@@ -374,6 +374,11 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
         return { ok: true, httpStatus: 200, attempts: 1, status: 'ok', sourceStatus: r.sourceStatus, rowsWritten: r.written,
                  duplicates: r.orders - r.written, sanitizedSha256: payload.sanitizedSha256 || null };
       }
+      if (path === '/v1/collect/aps-map') {
+        // Air Plant Shop scenario input: stored apart from results; never touches a week's inputs or revisions.
+        const r = await c.call('POST', '/v1/collect/aps-map', { json: payload });
+        return { ok: true, httpStatus: 200, attempts: 1, status: 'ok', sourceStatus: r.sourceStatus, versionId: r.versionId, orders: r.orders };
+      }
       return { ok: false, httpStatus: null, error: 'unsupported_path' };
     } catch (e) {
       return { ok: false, httpStatus: e?.status ?? null, error: typeof e?.code === 'string' ? e.code.slice(0, 64) : 'upload_failed' };
@@ -543,6 +548,75 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
   async function signInEvent(status, { authState, waitMinutes } = {}) {
     await c.call('POST', `/v1/collect/weeks/${closedWeek}/signin`, { json: { status, ...(authState ? { authState } : {}), ...(Number.isInteger(waitMinutes) ? { waitMinutes } : {}) } });
   }
-  return { uploadImpl, compute, weekPlan, signInEvent, budget, work, client: c };
+  /** Which ship dates the Air Plant Shop mapping covers (the collector's backfill window). null when unreachable. */
+  async function apsCoverage() {
+    try { return await c.call('GET', '/v1/collect/aps-map/coverage'); } catch { return null; }
+  }
+  return { uploadImpl, compute, weekPlan, signInEvent, budget, work, apsCoverage, scrRowsFor: pairs => scrRowsResolver(c, pairs), client: c };
 }
+
+const OWNER_SPAN_DAYS = 60;                                  // well inside the owners route's date limit
+/**
+ * The exact Shipping Cost Report rows behind given [date, orderKey] pairs (APS split dates holding both kinds of
+ * label): the version that owns each date now (or, for a cost the date kept from an earlier report, that cost's
+ * source version), read from its retained source and parsed exactly as the verifier does. A date whose rows do not
+ * rebuild the owner's stored day hash is not used. Returns rowsFor(date, orderKey) → { versionId, rows } | null.
+ */
+export async function scrRowsResolver(c, pairs) {
+  const dates = [...new Set(pairs.map(p => p[0]))].sort();
+  if (!dates.length) return () => null;
+  const detail = new Map(), versions = new Map();
+  for (let from = dates[0]; from <= dates[dates.length - 1];) {
+    const to = [...dates].reverse().find(d => d <= addDaysIso(from, OWNER_SPAN_DAYS - 1));
+    const r = await c.call('POST', '/v1/collect/scr/owners', { json: { from, to, detail: true } });
+    if (!Array.isArray(r.detail)) return () => null;                         // an older Worker: no version detail
+    for (const x of r.detail) detail.set(x[0], { versionId: x[1], dayHash: x[2], kept: new Map((x[3] || []).map(([k, v]) => [k, v])) });
+    for (const v of r.versions || []) versions.set(v[0], { sourceId: v[1], from: v[2], to: v[3] });
+    from = dates.find(d => d > to) || '9999-12-31';
+  }
+  const parsed = new Map();                                                  // versionId → parser rows (sources are immutable)
+  const rowsOf = async vid => {
+    if (parsed.has(vid)) return parsed.get(vid);
+    const v = versions.get(vid);
+    let rows = null;
+    if (v) {
+      try {
+        const meta = await c.call('GET', `/v1/collect/sources/${v.sourceId}`);
+        const csv = [];
+        for (let i = 0; i < (meta.segments || []).length; i++) csv.push(...parseCSV((await (await c.call('GET', `/v1/collect/sources/${v.sourceId}/segments/${i}`, { raw: true })).text()).replace(/^\uFEFF/, '')));
+        rows = parseShippingCostReport(csv, { requestedFrom: v.from, requestedTo: v.to }).rows;
+      } catch { rows = null; }
+    }
+    parsed.set(vid, rows);
+    return rows;
+  };
+  // The stored groups of the owned days (what a snapshot pins): the order's rows must add up to its group exactly.
+  const stored = new Map();
+  const ownedKeys = [...new Set(pairs.map(p => p[0]))].filter(d => detail.has(d)).map(d => [detail.get(d).versionId, d]);
+  for (let i = 0; i < ownedKeys.length; i += 400) {
+    for (const [, d, h, g] of (await c.call('POST', '/v1/collect/scr/days', { json: { keys: ownedKeys.slice(i, i + 400) } })).days || []) {
+      if (detail.get(d)?.dayHash === h) stored.set(d, new Map(JSON.parse(g).map(x => [x[0], x])));
+    }
+  }
+  const out = new Map();
+  for (const [date, key] of pairs) {
+    const d = detail.get(date);
+    if (!d || !stored.has(date)) continue;
+    const kept = d.kept.get(key);
+    const vid = kept || d.versionId;
+    const rows = await rowsOf(vid);
+    if (!rows) continue;
+    const mine = rows.filter(r => r.shipDate === date && r.orderKey === key);
+    const g = stored.get(date).get(key);
+    if (!g || g[1] !== mine.reduce((t, r) => t + r.shippingCostCents, 0) || g[2] !== mine.length) continue;
+    if (!kept && !d.kept.size) {
+      // A date with nothing kept: the owner's own rows must rebuild exactly the stored day.
+      const groups = dayGroups(rows.filter(r => r.shipDate === date)).get(date) || [];
+      if (await dayHash(date, groups) !== d.dayHash) continue;
+    }
+    out.set(`${date}|${key}`, { versionId: vid, rows: mine.map(r => ({ service: r.service, cents: r.shippingCostCents })) });
+  }
+  return (date, key) => out.get(`${date}|${key}`) || null;
+}
+const addDaysIso = (d, n) => { const t = new Date(`${d}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
 function addDaysLocal(d, n) { const t = new Date(`${d}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); }
