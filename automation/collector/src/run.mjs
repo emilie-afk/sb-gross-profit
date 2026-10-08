@@ -54,50 +54,56 @@ const ft = config.pipeline === 'free_tier' ? freeTierPipeline({
 // Recovery start (the task's daily and repeat triggers once the week is marked done on this PC): one cheap
 // question to the Worker first. Nothing unfinished → exit now (no browser, no compute). No budget → exit 42.
 // The check itself failing → exit 40 (bounded retries); it never counts as "nothing to do" or "within budget".
+// The exit code is set, never process.exit(): on the Windows laptop (Node 24) exiting while fetch's sockets are closing
+// aborted the process with a libuv assertion (0xC0000409) right after "nothing unfinished" (Oct 8 recovery start).
+let recoveryExit = null;
 if (args.recovery && ft) {
   let w = null;
   try { w = await ft.work(); } catch { w = null; }
-  if (!w) { console.log('recovery: unfinished-work check unavailable (exit 40)'); process.exit(40); }
-  if (!w.unfinished?.length) { console.log('recovery: nothing unfinished (exit 0)'); process.exit(0); }
-  if (w.budget?.state !== 'ok') { console.log(`recovery: ${w.unfinished.join(', ')}; deferred (${(w.budget?.reasons || []).join(', ')})`); process.exit(w.budget?.state === 'defer' ? 42 : 40); }
-  console.log(`recovery: resuming ${w.unfinished.join(', ')}`);
+  if (!w) { console.log('recovery: unfinished-work check unavailable (exit 40)'); recoveryExit = 40; }
+  else if (!w.unfinished?.length) { console.log('recovery: nothing unfinished (exit 0)'); recoveryExit = 0; }
+  else if (w.budget?.state !== 'ok') { console.log(`recovery: ${w.unfinished.join(', ')}; deferred (${(w.budget?.reasons || []).join(', ')})`); recoveryExit = w.budget?.state === 'defer' ? 42 : 40; }
+  else console.log(`recovery: resuming ${w.unfinished.join(', ')}`);
 }
 
-const r = await runWeeklyCollection({
-  week: { ...w, closed },
-  lockFile: path.join(base, 'collector.lock'), stateFile: path.join(base, 'state.json'),
-  log: m => console.log(scrub(m)),
-  weekPlan: ft ? () => ft.weekPlan() : async () => {
-    const { password } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
-    const url = workerEndpoint(config.workerUrl, '/v1/ingest/week-plan');
-    const res = await fetch(`${url}?at=${encodeURIComponent(new Date().toISOString())}`, { headers: { 'X-Ingest-Secret': password } });
-    if (!res.ok) return null;
-    const j = await res.json();
-    return j.weekStart === weekStart ? j : null;                       // a different week (e.g. --week) → local record decides
-  },
-  shipstation: {
-    collect: () => runShipStationJob({ config: ssConfig, week: w, headed: !!args.headed, deferUpload: true }),
-    upload: pending => finishShipStationUpload(pending, ft ? { uploadImpl: ft.uploadImpl } : {}),
-  },
-  // Air Plant Shop scenario input (free-tier path): the saved line-item export, mapping only. Not configured or
-  // turned off → reported, never a failure of the week.
-  ...(ft ? { apsMapping: {
-    needed: async () => { const cov = await ft.apsCoverage(); return !cov || !cov.coveredTo || cov.coveredTo < w.weekEnd || !cov.coveredFrom || cov.coveredFrom > PUBLICATION_EARLIEST_DATE; },
-    run: async ({ scrText, scrSource }) => {
-      try { assertKindEnabled('shipstation_aps_mapping', ssConfig); } catch (e) { return { status: e.code || 'aps_mapping_off' }; }
-      const apsWindow = apsExportWindow(w, await ft.apsCoverage());
-      const job = await runShipStationJob({ config: ssConfig, week: w, kind: 'shipstation_aps_mapping', headed: !!args.headed, deferUpload: true,
-        apsWindow, scrRows: scrText ? parseCSV(scrText) : null, scrSource: scrText ? scrSource : null, resolveScrRows: pairs => ft.scrRowsFor(pairs) });
-      if (job.status !== 'prepared') return { status: job.status, exitCode: job.exitCode };
-      const up = await finishShipStationUpload(job.pending, { uploadImpl: ft.uploadImpl });
-      const m = up.manifest || {};
-      return { status: up.status, window: `${apsWindow.from}..${apsWindow.to}`, exportMs: m.exportMs ?? null, apsOrders: m.apsOrders ?? null,
-               byStatus: m.byStatus || null, sourceStatus: m.ingest?.sourceStatus || null };
+if (recoveryExit !== null) process.exitCode = recoveryExit;
+else {
+  const r = await runWeeklyCollection({
+    week: { ...w, closed },
+    lockFile: path.join(base, 'collector.lock'), stateFile: path.join(base, 'state.json'),
+    log: m => console.log(scrub(m)),
+    weekPlan: ft ? () => ft.weekPlan() : async () => {
+      const { password } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
+      const url = workerEndpoint(config.workerUrl, '/v1/ingest/week-plan');
+      const res = await fetch(`${url}?at=${encodeURIComponent(new Date().toISOString())}`, { headers: { 'X-Ingest-Secret': password } });
+      if (!res.ok) return null;
+      const j = await res.json();
+      return j.weekStart === weekStart ? j : null;                       // a different week (e.g. --week) → local record decides
     },
-  } } : {}),
-  shopify: { run: ({ onWaiting, onSignInRequired, onSignedIn }) => runShopifyJob({ config: shConfig, week: w, headed: !!args.headed, onWaiting, onSignInRequired, onSignedIn,
-    ...(ft ? { uploadImpl: ft.uploadImpl } : {}) }) },
-  ...(ft ? { compute: () => ft.compute(), signInEvent: (status, detail) => ft.signInEvent(status, detail), budget: () => ft.budget() } : {}),
-});
-console.log(scrub(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}${r.compute ? ` compute ${JSON.stringify(r.compute)}` : ''}${r.aps ? ` aps ${JSON.stringify(r.aps)}` : ''}`));
-process.exitCode = r.exitCode;
+    shipstation: {
+      collect: () => runShipStationJob({ config: ssConfig, week: w, headed: !!args.headed, deferUpload: true }),
+      upload: pending => finishShipStationUpload(pending, ft ? { uploadImpl: ft.uploadImpl } : {}),
+    },
+    // Air Plant Shop scenario input (free-tier path): the saved line-item export, mapping only. Not configured or
+    // turned off → reported, never a failure of the week.
+    ...(ft ? { apsMapping: {
+      needed: async () => { const cov = await ft.apsCoverage(); return !cov || !cov.coveredTo || cov.coveredTo < w.weekEnd || !cov.coveredFrom || cov.coveredFrom > PUBLICATION_EARLIEST_DATE; },
+      run: async ({ scrText, scrSource }) => {
+        try { assertKindEnabled('shipstation_aps_mapping', ssConfig); } catch (e) { return { status: e.code || 'aps_mapping_off' }; }
+        const apsWindow = apsExportWindow(w, await ft.apsCoverage());
+        const job = await runShipStationJob({ config: ssConfig, week: w, kind: 'shipstation_aps_mapping', headed: !!args.headed, deferUpload: true,
+          apsWindow, scrRows: scrText ? parseCSV(scrText) : null, scrSource: scrText ? scrSource : null, resolveScrRows: pairs => ft.scrRowsFor(pairs) });
+        if (job.status !== 'prepared') return { status: job.status, exitCode: job.exitCode };
+        const up = await finishShipStationUpload(job.pending, { uploadImpl: ft.uploadImpl });
+        const m = up.manifest || {};
+        return { status: up.status, window: `${apsWindow.from}..${apsWindow.to}`, exportMs: m.exportMs ?? null, apsOrders: m.apsOrders ?? null,
+                 byStatus: m.byStatus || null, sourceStatus: m.ingest?.sourceStatus || null };
+      },
+    } } : {}),
+    shopify: { run: ({ onWaiting, onSignInRequired, onSignedIn }) => runShopifyJob({ config: shConfig, week: w, headed: !!args.headed, onWaiting, onSignInRequired, onSignedIn,
+      ...(ft ? { uploadImpl: ft.uploadImpl } : {}) }) },
+    ...(ft ? { compute: () => ft.compute(), signInEvent: (status, detail) => ft.signInEvent(status, detail), budget: () => ft.budget() } : {}),
+  });
+  console.log(scrub(`${r.status} (exit ${r.exitCode}) ${JSON.stringify(r.sources)}${r.compute ? ` compute ${JSON.stringify(r.compute)}` : ''}${r.aps ? ` aps ${JSON.stringify(r.aps)}` : ''}`));
+  process.exitCode = r.exitCode;
+}

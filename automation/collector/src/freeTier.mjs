@@ -583,7 +583,11 @@ export async function scrRowsResolver(c, pairs) {
       try {
         const meta = await c.call('GET', `/v1/collect/sources/${v.sourceId}`);
         const csv = [];
-        for (let i = 0; i < (meta.segments || []).length; i++) csv.push(...parseCSV((await (await c.call('GET', `/v1/collect/sources/${v.sourceId}/segments/${i}`, { raw: true })).text()).replace(/^\uFEFF/, '')));
+        // Retained segments are served gzip-compressed (application/gzip), as the verifier reads them.
+        for (let i = 0; i < (meta.segments || []).length; i++) {
+          const res = await c.call('GET', `/v1/collect/sources/${v.sourceId}/segments/${i}`, { raw: true });
+          csv.push(...parseCSV(zlib.gunzipSync(Buffer.from(await res.arrayBuffer())).toString('utf8').replace(/^\uFEFF/, '')));
+        }
         rows = parseShippingCostReport(csv, { requestedFrom: v.from, requestedTo: v.to }).rows;
       } catch { rows = null; }
     }

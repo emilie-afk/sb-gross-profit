@@ -9,6 +9,9 @@ import assert from 'node:assert/strict';
 import { prepareExport, apsExportWindow, apsStepsReady, assertKindEnabled, KINDS } from '../automation/shipstation-export/src/kinds.mjs';
 import { toCsvText } from '../shared/adapters/shopifyCsv.js';
 import { APS_MAPPING_COLUMNS } from '../shared/apsMapping.js';
+import zlib from 'node:zlib';
+/** A fetch Response carrying gzip bytes, like GET /v1/collect/sources/:id/segments/:seq. */
+const gzResponse = text => new Response(zlib.gzipSync(Buffer.from(text, 'utf8')), { headers: { 'Content-Type': 'application/gzip' } });
 
 // The live format's exact header row (Oct 7, 2026): ShipmentID,OrderNumber,ShipDate,SKU,Quantity,Voided.
 const row = (ship, order, sku, date = '9/22/2026 10:31:00 AM') => ({ ShipmentID: ship, OrderNumber: order, ShipDate: date, SKU: sku, Quantity: '1', Voided: 'False' });
@@ -80,7 +83,8 @@ test('split dates holding both kinds of label: rows read from the owning report 
                                                 versions: [[VA, 'src_' + '1'.repeat(20), from, to], [VK, 'src_' + '2'.repeat(20), from, to]] };
     if (p === '/v1/collect/scr/days') return { days: o.json.keys.map(([v, d]) => [v, d, d.endsWith('25') ? h25 : h26, JSON.stringify(d.endsWith('25') ? g25 : g26)]) };
     const src = p.includes('1'.repeat(20)) ? csvA : csvK;
-    if (/segments\/0$/.test(p)) return { text: async () => src };
+    // As the Worker serves them: gzip bytes (application/gzip).
+    if (/segments\/0$/.test(p)) return gzResponse(src);
     return { segments: [{}] };
   } };
   const rowsFor = await scrRowsResolver(c, [['2026-09-25', '3001'], ['2026-09-26', '3002']]);
@@ -88,7 +92,7 @@ test('split dates holding both kinds of label: rows read from the owning report 
   assert.deepEqual(rowsFor('2026-09-26', '3002'), { versionId: VK, rows: [{ service: 'USPS Ground Advantage', cents: 600 }, { service: 'UPS Ground', cents: 500 }] }, 'the kept cost’s own source');
   assert.equal(calls.filter(p => /segments/.test(p)).length, 2, 'each retained source read once');
   // A source whose rows do not rebuild the stored day is not used.
-  const tampered = { call: async (m, p, o) => (/segments\/0$/.test(p) && p.includes('1'.repeat(20)) ? { text: async () => csvA.replace('8.00', '9.00') } : c.call(m, p, o)) };
+  const tampered = { call: async (m, p, o) => (/segments\/0$/.test(p) && p.includes('1'.repeat(20)) ? gzResponse(csvA.replace('8.00', '9.00')) : c.call(m, p, o)) };
   assert.equal((await scrRowsResolver(tampered, [['2026-09-25', '3001']]))('2026-09-25', '3001'), null);
   // An older Worker without version detail: nothing is read, nothing is pinned.
   const old = { call: async () => ({ owners: [] }) };
