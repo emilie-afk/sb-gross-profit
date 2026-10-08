@@ -1,8 +1,10 @@
 /**
  * apsMapping.js — Air Plant Shop shipment mapping (scenario input only)
  * =====================================================================
- * Source: the saved ShipStation line-item export format "SB GP APS mapping" (Shipments → Export Shipments →
- * Export Shipment Line Items; role: mapping only; columns APS_MAPPING_COLUMNS, no customer fields). It says which
+ * Source: the saved ShipStation line-item export format "SB GP APS mapping v2" (Shipments → Export Shipments →
+ * Export Shipment Line Items; role: mapping only; columns APS_MAPPING_COLUMNS, no customer fields). ServiceCode holds
+ * the same values as the Shipping Cost Report's Service (GA, Ground, PM, 3-Day, 2nd Day…), so labels of one order on
+ * one date are told apart by service. The first format (no ServiceCode) is still accepted. It says which
  * shipments carry Air Plant Shop items (SKU prefix AS-). It is never an expense source: shipping expense
  * stays the Shipping Cost Report. The result is a separate scenario input; it never changes a computed
  * week, a catalog or a revision.
@@ -40,8 +42,23 @@ import { canonicalOrderKey, parseShipDate, toCents } from './adapters/shippingCo
 
 export const APS_MAP_SCHEMA = 'aps_map.v1';
 /** The saved export format and its exact columns (as ShipStation writes them; verified on the live export, Oct 7, 2026). */
-export const APS_EXPORT_FORMAT = 'SB GP APS mapping';
-export const APS_MAPPING_COLUMNS = Object.freeze(['ShipmentID', 'OrderNumber', 'ShipDate', 'SKU', 'Quantity', 'Voided']);
+export const APS_EXPORT_FORMAT = 'SB GP APS mapping v2';
+export const APS_MAPPING_COLUMNS = Object.freeze(['ShipmentID', 'OrderNumber', 'ShipDate', 'SKU', 'Quantity', 'Voided', 'ServiceCode']);
+/**
+ * Every accepted saved format, by its exact columns (verified on the live exports, Oct 7–8, 2026). The first format
+ * stays accepted so the collector code and the laptop's recorded steps can change in either order; without ServiceCode
+ * the labels of one order on one date are matched by date alone (ambiguous costs → no cost, as before).
+ */
+export const APS_EXPORT_FORMATS = Object.freeze({
+  [APS_EXPORT_FORMAT]: APS_MAPPING_COLUMNS,
+  'SB GP APS mapping': Object.freeze(['ShipmentID', 'OrderNumber', 'ShipDate', 'SKU', 'Quantity', 'Voided']),
+});
+/** The accepted format whose columns are exactly these headers (any order), or null. */
+export function apsFormatOf(headers) {
+  const h = [...new Set((headers || []).map(x => String(x).trim()))].sort().join('|');
+  for (const [name, cols] of Object.entries(APS_EXPORT_FORMATS)) if ([...cols].sort().join('|') === h && cols.length === (headers || []).length) return name;
+  return null;
+}
 export const isApsSku = s => /^AS-/i.test(String(s || '').trim());
 export const APS_COST_STATUSES = new Set(['aps_only', 'split_matched']);
 

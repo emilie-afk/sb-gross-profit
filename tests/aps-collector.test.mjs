@@ -111,3 +111,34 @@ test('prepareExport lists the split dates whose rows must be read, keeps them ou
   const c = prepareExport('shipstation_aps_mapping', text, { ...o, scrRows: [S('3001', '6.00'), S('3001', '9.00')] });
   assert.equal(c.payload.orders[0].status, 'split_unmatched');
 });
+
+test('v2 format: ServiceCode tells same-date labels apart; ambiguous labels stay excluded; the first format is still accepted', () => {
+  const S = (order, service, cost) => ({ 'Ship Date': '9/25/2026 12:00:00 AM', 'Order #': order, Provider: 'UPS', Service: service, Package: 'Package', Items: '1', Zone: '5',
+    'Shipping Cost': cost, 'Insurance Cost': '0', Weight: '12', 'Weight Unit': 'oz', Store: 'Succulents Box', Duties: '0', Taxes: '0', 'Import Fee': '0' });
+  const r2 = (ship, order, sku, svc) => ({ ...row(ship, order, sku, '9/25/2026 9:00:00 AM'), ServiceCode: svc });
+  const o = { week, exportedAt: 'x', apsWindow: { from: '2026-08-03', to: '2026-10-04' } };
+  // 3001: APS label GA $5.00 and MCG label Ground $9.00 on one date (the report's Service holds the same codes).
+  // 3002: two labels on one date, both GA, $5.00 and $9.00: which one is APS cannot be known.
+  const text = toCsvText([r2('T1', '3001', 'AS-TILL-1', 'GA'), r2('T2', '3001', 'S2KY1048', 'Ground'),
+                          r2('T3', '3002', 'AS-TILL-1', 'GA'), r2('T4', '3002', 'S2KY1048', 'GA')], APS_MAPPING_COLUMNS);
+  const scrRows = [S('3001', 'GA', '5.00'), S('3001', 'Ground', '9.00'), S('3002', 'GA', '5.00'), S('3002', 'GA', '9.00')];
+  const a = prepareExport('shipstation_aps_mapping', text, { ...o, scrRows });
+  assert.equal(a.facts.format, 'SB GP APS mapping v2');
+  assert.equal(a.payload.meta.source.template, 'SB GP APS mapping v2');
+  const by = Object.fromEntries(a.payload.orders.map(x => [x.orderKey, x.status]));
+  assert.deepEqual(by, { 3001: 'split_cost_unverified', 3002: 'split_unmatched' }, '3001 matched by service, waiting for the owning version’s rows; 3002 ambiguous');
+  assert.deepEqual(a.needRows, [['2026-09-25', '3001']]);
+  // With the owning report version's rows, 3001 is costed from exactly those rows; 3002 stays excluded.
+  const vid = 'scr_' + 'a'.repeat(20);
+  const b = prepareExport('shipstation_aps_mapping', text, { ...o, scrRows,
+    rowsFor: (d, k) => (k === '3001' ? { versionId: vid, rows: [{ service: 'GA', cents: 500 }, { service: 'Ground', cents: 900 }] } : null) });
+  const b1 = b.payload.orders.find(x => x.orderKey === '3001');
+  assert.deepEqual([b1.status, b1.apsCostCents, b1.scrPins], ['split_matched', 500, [['2026-09-25', 2, 1400, 1, 500, vid]]]);
+  assert.equal(b.payload.orders.find(x => x.orderKey === '3002').status, 'split_unmatched');
+  // The first format (no ServiceCode) is still accepted; then the same date cannot be told apart (no cost).
+  const v1cols = APS_MAPPING_COLUMNS.filter(c => c !== 'ServiceCode');
+  const c = prepareExport('shipstation_aps_mapping', toCsvText([row('T1', '3001', 'AS-TILL-1', '9/25/2026'), row('T2', '3001', 'S2KY1048', '9/25/2026')], v1cols), { ...o, scrRows });
+  assert.deepEqual([c.facts.format, c.payload.orders[0].status], ['SB GP APS mapping', 'split_unmatched']);
+  // Any other column set is refused.
+  assert.equal(prepareExport('shipstation_aps_mapping', toCsvText([{ ...r2('T1', '3001', 'AS-TILL-1', 'GA'), Carrier: 'UPS' }], [...APS_MAPPING_COLUMNS, 'Carrier']), o).refused, 'refused_customer_columns');
+});

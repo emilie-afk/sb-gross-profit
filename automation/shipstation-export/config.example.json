@@ -124,7 +124,7 @@
       "enabled": false
     },
     "shipstation_aps_mapping": {
-      "_comment": "Air Plant Shop scenario input (mapping only; never an expense source). Shipments → Shipped, ship-date Custom Range {{apsFromUS}}–{{apsToUS}}, Export Shipments → Export Shipment Line Items in the saved format \"SB GP APS mapping\" (ShipmentID, OrderNumber, ShipDate, SKU, Quantity, Voided: no customer fields). ShipStation opens the file in a new tab, so it is taken from the network at the browser-context level (captureScope \"context\"). Recorded and validated on the Windows laptop on Oct 7, 2026 (Aug 10–Oct 4: 30,829 rows, 64 s from browser start). The file is reduced on this PC to per-order classifications. A failure never holds the week. Set enabled to false to turn it off.",
+      "_comment": "Air Plant Shop scenario input (mapping only; never an expense source). Shipments → Shipped, ship-date Custom Range {{apsFromUS}}–{{apsToUS}}, Export Shipments → Export Shipment Line Items in the saved format \"SB GP APS mapping v2\" (ShipmentID, OrderNumber, ShipDate, SKU, Quantity, Voided, ServiceCode: no customer fields; ServiceCode tells labels of one date apart). The first format \"SB GP APS mapping\" (no ServiceCode) is kept in ShipStation and still accepted. ShipStation opens the file in a new tab, so it is taken from the network at the browser-context level (captureScope \"context\"). Recorded and validated on the Windows laptop on Oct 7, 2026 (Aug 10–Oct 4: 30,829 rows, 64 s from browser start). The file is reduced on this PC to per-order classifications. A failure never holds the week. Set enabled to false to turn it off.",
       "enabled": true,
       "exportSteps": [
         {
@@ -184,7 +184,7 @@
         },
         {
           "action": "click",
-          "selector": "[role=\"dialog\"] >> text=\"SB GP APS mapping\""
+          "selector": "[role=\"dialog\"] >> text=\"SB GP APS mapping v2\""
         },
         {
           "action": "download",

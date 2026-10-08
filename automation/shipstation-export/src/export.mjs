@@ -67,9 +67,16 @@ export async function runSteps(page, steps, vars, downloadsDir) {
         catch (e) { settle({ status: 0, error: String(e.message).split('\n')[0].slice(0, 120) }); }
         await route.fulfill({ status: 204, body: '' }).catch(() => {});
       });
-      await page.locator(s.selector).first().click({ timeout: 15000 });
-      const r = await Promise.race([got, new Promise(res => setTimeout(() => res({ status: 0, error: 'capture_timeout' }), s.timeout || 180000))]);
-      await scope.unroute(s.capture).catch(() => {});
+      // The capture deadline is cleared on every path (success, failure, a failed click), so a finished run exits at once
+      // instead of waiting for the timer (up to 5 minutes for the APS export).
+      let timer = null, r;
+      try {
+        await page.locator(s.selector).first().click({ timeout: 15000 });
+        r = await Promise.race([got, new Promise(res => { timer = setTimeout(() => res({ status: 0, error: 'capture_timeout' }), s.timeout || 180000); })]);
+      } finally {
+        clearTimeout(timer);
+        await scope.unroute(s.capture).catch(() => {});
+      }
       if (r.status !== 200 || !r.body?.length) throw new Error(`${at}: report download failed (${r.status} ${r.error || 'empty'})`);
       file = path.join(downloadsDir, `download_${Date.now()}.csv`);
       fs.writeFileSync(file, r.body);

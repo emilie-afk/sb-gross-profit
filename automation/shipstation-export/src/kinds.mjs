@@ -7,7 +7,8 @@
  *                                     Recipient, Shipping Paid and +/- never leave this machine.
  *   shipstation_mapping_export        The saved "SB GP weekly" custom export, uploaded as
  *                                     shipments (rollback diagnostics only; dormant).
- *   shipstation_aps_mapping           The saved line-item format "SB GP APS mapping" (six columns,
+ *   shipstation_aps_mapping           The saved line-item format "SB GP APS mapping v2" (seven columns
+ *                                     incl. ServiceCode; the first six-column format is still accepted;
  *                                     no customer fields): the Air Plant Shop scenario input,
  *                                     mapping only, never an expense source.
  *                                     Reduced on this PC to per-order APS classifications
@@ -23,7 +24,7 @@ import { addDays } from '../../../shared/normalized.js';
 import { toCsvText } from '../../../shared/adapters/shopifyCsv.js';
 import { sanitizeShippingCostReport, parseShippingCostReport, fromCents } from '../../../shared/adapters/shippingCostReport.js';
 import { customerHeaders, csvHeaderNames, invalidExportReason, unexpectedColumns, MAPPING_EXPORT_COLUMNS } from './lib.mjs';
-import { buildApsMap, APS_MAPPING_COLUMNS, APS_EXPORT_FORMAT } from '../../../shared/apsMapping.js';
+import { buildApsMap, APS_MAPPING_COLUMNS, APS_EXPORT_FORMAT, apsFormatOf } from '../../../shared/apsMapping.js';
 import { PUBLICATION_EARLIEST_DATE } from '../../../shared/apsWindow.js';
 
 export const KINDS = Object.freeze({
@@ -78,20 +79,23 @@ export function prepareExport(kind, text, { week, exportedAt, apsWindow = null, 
   if (kind === 'shipstation_aps_mapping') {
     // The saved format's exact columns (an allowlist): anything else means the format changed, and it is refused.
     const headers = csvHeaderNames(text);
-    const bad = [...new Set([...customerHeaders(headers), ...unexpectedColumns(headers, APS_MAPPING_COLUMNS)])];
-    const missing = APS_MAPPING_COLUMNS.filter(c => !headers.includes(c));
-    if (bad.length || missing.length) return { refused: 'refused_customer_columns', reason: `The export must contain exactly the "${APS_EXPORT_FORMAT}" columns`, columns: [...bad, ...missing.map(c => `missing:${c}`)] };
+    const format = apsFormatOf(headers);
+    if (!format || customerHeaders(headers).length) {
+      const bad = [...new Set([...customerHeaders(headers), ...unexpectedColumns(headers, APS_MAPPING_COLUMNS)])];
+      const missing = APS_MAPPING_COLUMNS.filter(c => !headers.includes(c));
+      return { refused: 'refused_customer_columns', reason: `The export must contain exactly the "${APS_EXPORT_FORMAT}" columns`, columns: [...bad, ...missing.map(c => `missing:${c}`)] };
+    }
     const rows = parseCSV(text.replace(/^\uFEFF/, ''));
     if (!rows.length) return { refused: 'invalid_export', reason: 'The export has no rows' };
     if (!apsWindow?.from || !apsWindow?.to) throw new Error('apsWindow is required');
     // Reduced here to per-order APS classifications; only that leaves this PC (no tracking numbers, no rows).
-    const m = buildApsMap(rows, { window: apsWindow, scrRows, scrSource, rowsFor, source: { sanitizedSha256: sha(text), exportedAt } });
+    const m = buildApsMap(rows, { window: apsWindow, scrRows, scrSource, rowsFor, source: { sanitizedSha256: sha(text), exportedAt, template: format } });
     // needRows: split dates holding APS and other labels, whose exact rows come from the owning report version's
     // retained source (the caller reads them and prepares again with rowsFor). Not sent to the Worker.
     const { needRows = [], ...meta } = m.meta;
     return { path: KINDS[kind].path, payload: { meta, orders: m.orders }, needRows,
              facts: { kind, rawSha256, sanitizedSha256: sha(text), rowCount: rows.length, window: apsWindow, apsOrders: m.orders.length,
-                      byStatus: m.meta.byStatus, duplicateRows: m.meta.duplicateRows, voidedShipments: m.meta.voidedShipments, scrRowsAvailable: m.meta.scrRowsAvailable } };
+                      byStatus: m.meta.byStatus, duplicateRows: m.meta.duplicateRows, voidedShipments: m.meta.voidedShipments, scrRowsAvailable: m.meta.scrRowsAvailable, format } };
   }
   if (kind === 'shipstation_mapping_export') {
     const headers = csvHeaderNames(text);

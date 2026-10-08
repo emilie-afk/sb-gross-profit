@@ -201,3 +201,13 @@ test('APS split costs: a published snapshot without pinned rows verifies nothing
   const { by } = await checks(env, [split('4001', [['2026-09-22', 1, 640, 1, 640, null]])]);
   assert.deepEqual(by['4001'], { status: 'unverified', reason: 'snapshot_rows_not_pinned' });
 });
+
+test('APS mapping: the version records which saved format the export came from', async () => {
+  const env = await makeEnv({ DASHBOARD_READER_SECRET: 'r'.repeat(40) });
+  const db = env.DB.db;
+  const up = async (template, sha) => (await call(env, 'POST', '/v1/collect/aps-map', { body: { meta: { ...metaOf(1, '2026-10-05T08:00:00Z', sha), source: { sanitizedSha256: sha.repeat(64), exportedAt: 'x', template } }, orders: many(1, 'aps_only', 6000 + sha.charCodeAt(0)) }, cls: 'ingest' })).status;
+  assert.equal(await up('SB GP APS mapping', 'a'), 200);
+  assert.equal(await up('SB GP APS mapping v2', 'b'), 200);
+  assert.equal(await up('something else', 'c'), 200);
+  assert.deepEqual(db.prepare('SELECT template FROM aps_map_version ORDER BY sanitized_sha256').all().map(r => r.template), ['SB GP APS mapping', 'SB GP APS mapping v2', 'SB GP APS mapping v2']);
+});

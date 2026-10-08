@@ -13,7 +13,7 @@
  */
 import { ApiError, json, readJson, WEEK_RE } from './http.js';
 import { newId, nowIso } from './db.js';
-import { APS_MAP_SCHEMA, APS_STATUS_TEXT, APS_EXPORT_FORMAT } from '../../shared/apsMapping.js';
+import { APS_MAP_SCHEMA, APS_STATUS_TEXT, APS_EXPORT_FORMAT, APS_EXPORT_FORMATS } from '../../shared/apsMapping.js';
 import { addDays } from '../../shared/normalized.js';
 
 const MAX_ORDERS = 5000;
@@ -99,7 +99,7 @@ export async function uploadApsMap(request, env) {
     const scr = meta.scrSource && /^[0-9a-f]{64}$/.test(meta.scrSource.sanitizedSha256 || '') ? meta.scrSource : null;
     await db.prepare(`INSERT INTO aps_map_version (version_id, status, window_from, window_to, exported_at, last_exported_at, received_at, order_count, sanitized_sha256,
         content_sha256, schema_version, template, scr_sha256, scr_from, scr_to, meta) VALUES (?1, 'pending', ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`)
-      .bind(versionId, meta.window.from, meta.window.to, exportedAt, now, orders.length, meta.source.sanitizedSha256, content, APS_MAP_SCHEMA, APS_EXPORT_FORMAT,
+      .bind(versionId, meta.window.from, meta.window.to, exportedAt, now, orders.length, meta.source.sanitizedSha256, content, APS_MAP_SCHEMA, Object.hasOwn(APS_EXPORT_FORMATS, meta.source.template || '') ? meta.source.template : APS_EXPORT_FORMAT,
             scr?.sanitizedSha256 || null, DATE.test(scr?.from || '') ? scr.from : null, DATE.test(scr?.to || '') ? scr.to : null, JSON.stringify(counts)).run();
   }
   const rows = orders.map(o => db.prepare(`INSERT OR IGNORE INTO aps_map_order (version_id, order_key, status, aps_cost_cents, scr_order_cents, scr_pins, first_ship_date, last_ship_date, detail)
