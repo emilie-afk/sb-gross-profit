@@ -147,3 +147,8 @@ export async function markCyclesChanged(db, weeks) {
   await db.prepare('UPDATE schedule_cycle SET sources_changed_at = ?2 WHERE week_start IN (SELECT value FROM json_each(?1))')
     .bind(JSON.stringify(list), nowIso()).run();
 }
+
+/** Source of an audited cost correction's catalog (a pinned base plus the corrected MCG table). */
+export const CORRECTION_SOURCE = 'correction_push';
+/** The catalog new weeks use: the newest accepted push that is not a cost correction's catalog. */
+export const LATEST_ACCEPTED_WHERE = `status = 'accepted' AND COALESCE(source, '') <> '${CORRECTION_SOURCE}'`;

@@ -118,3 +118,50 @@ test('chunked catalog: a week computed with it verifies and reads exactly as wit
   const a = mask(rowsOf(after)).replace(/cat_[0-9a-f]{16}/g, 'cat*'), b = mask(rowsOf(before)).replace(/cat_[0-9a-f]{16}/g, 'cat*');
   if (a !== b) { let i = 0; while (a[i] === b[i]) i++; assert.fail(`differ at …${b.slice(Math.max(0, i - 150), i + 60)}… vs …${a.slice(Math.max(0, i - 150), i + 60)}…`); }
 });
+
+test('correction catalog: validated against its own base, accepted after an ordinary rejection, never the catalog new weeks use', { skip: !HAVE_PY }, async () => {
+  const d = dataset({ n: 60 });
+  const ft = await freeTierRun(d, { verify: false });
+  const env = ft.env;
+  // August's pinned catalog (472 Calathea SKUs), then the sheets grew (734) and today's build pushed that catalog.
+  const aug = bigCatalog();
+  const today = bigCatalog();
+  for (let i = 472; i < 734; i++) today.tables.vendor_costs['Calathea Collective'][`CAL-X${i}`] = { unitCost: 3, product: `Synthetic plant ${i}`, size: '4in', note: null };
+  today.tables.mcg_pack = { 'XAZZ3141-30': 30 };
+  const base = await push(env, aug.tables);
+  const latest = await push(env, today.tables);
+  assert.equal(base.accepted && latest.accepted, true);
+  // The correction: August's tables with only the MCG pack table added.
+  const fix = { ...structuredClone(aug.tables), mcg_pack: { 'XAZZ3141-30': 30 } };
+  // As an ordinary push (Oct 8, production): refused by the comparison with the newest catalog.
+  const plain = await push(env, fix);
+  assert.equal(plain.accepted, false);
+  assert.match(plain.reasons.join(';'), /Calathea Collective: \d+ SKUs, down from \d+ \(more than 10% decrease\)/);
+  // As a correction of its base: accepted (the refused row is upgraded, its parts stored) and not the newest catalog.
+  const pushAs = async (tables, correctionOf) => {
+    const { layout, chunks } = chunk(tables);
+    const opened = await ok(api(env, 'POST', '/v1/ingest/catalog/uploads', { layout, meta: { builtAt: 'x', commit: 'test', correctionOf } }, 'ingest'), 'open');
+    for (const c of chunks) await ok(api(env, 'PUT', `/v1/ingest/catalog/uploads/${opened.uploadId}/chunks/${c.table}/${c.part}`, { entries: c.entries, ...(c.group !== null ? { group: c.group } : {}) }, 'ingest'), 'chunk');
+    return api(env, 'POST', `/v1/ingest/catalog/uploads/${opened.uploadId}/seal`, {}, 'ingest');
+  };
+  const corr = await pushAs(fix, base.catalogRev);
+  assert.deepEqual([corr.status, corr.json.accepted, corr.json.catalogRev], [200, true, plain.catalogRev], JSON.stringify(corr.json));
+  const row = await env.DB.prepare('SELECT status, source, reject_reasons, meta FROM cost_catalog WHERE catalog_rev = ?1').bind(plain.catalogRev).first();
+  assert.deepEqual([row.status, row.source, row.reject_reasons, JSON.parse(row.meta).correctionOf], ['accepted', 'correction_push', '[]', base.catalogRev]);
+  assert.equal(stableStringify(catalogFromParts(plain.catalogRev, await storedParts(env, plain.catalogRev)).tables), stableStringify(fix));
+  // New weeks keep today's catalog, also after another ordinary push of it and another correction push.
+  const newest = () => env.DB.prepare(`SELECT catalog_rev FROM cost_catalog WHERE status = 'accepted' AND COALESCE(source, '') <> 'correction_push' ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1`).first();
+  assert.equal((await newest()).catalog_rev, latest.catalogRev);
+  const fix2 = { ...structuredClone(aug.tables), mcg_pack: { 'XAZZ3141-30': 31 } };
+  assert.equal((await pushAs(fix2, base.catalogRev)).json.accepted, true, 'a new correction catalog');
+  assert.equal((await newest()).catalog_rev, latest.catalogRev);
+  // An ordinary push is still compared with the newest catalog (correction catalogs never become the reference).
+  assert.equal((await push(env, fix)).accepted, true, 'already accepted content is a duplicate');
+  // A correction of an unknown or refused base is refused.
+  assert.equal((await pushAs(fix, 'cat_0000000000000000')).json.error, 'correction_base_unknown');
+  assert.equal((await api(env, 'POST', '/v1/ingest/catalog/uploads', { layout: chunk(fix).layout, meta: { correctionOf: 'nonsense' } }, 'ingest')).status, 400);
+  // Registration accepts the correction catalog for a week on the base.
+  await env.DB.prepare("INSERT INTO snapshot (snapshot_id, week_start, revision, status, computed_at, engine_version, policy, profitability_status, storage, catalog_rev) VALUES ('snp_c1', '2026-08-03', 9, 'published', 't', 'e', '{}', 'ok', 'chunked', ?1)").bind(base.catalogRev).run();
+  const reg = await api(env, 'POST', '/v1/admin/cost-corrections', { reason: 'test: MCG pack costs corrected', weeks: [{ weekStart: '2026-08-03', fromCatalogRev: base.catalogRev, toCatalogRev: plain.catalogRev }] });
+  assert.equal(reg.status, 200, JSON.stringify(reg.json));
+});

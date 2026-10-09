@@ -7,7 +7,7 @@
  * snapshot computed from the original payload.
  */
 import { contentHash, weekStartOf, assertNoCustomerFields } from '../../shared/normalized.js';
-import { jsonInsert, jsonDeleteIn, selectIn, atomic, nowIso } from './db.js';
+import { jsonInsert, jsonDeleteIn, selectIn, atomic, nowIso, LATEST_ACCEPTED_WHERE } from './db.js';
 
 const J = v => JSON.stringify(v ?? null);
 const P = (s, d) => { try { return s === null || s === undefined ? d : JSON.parse(s); } catch { return d; } };
@@ -316,7 +316,7 @@ export async function catalogMeta(db, rev) {
 }
 
 export async function latestAcceptedCatalogMeta(db) {
-  return db.prepare("SELECT * FROM cost_catalog WHERE status = 'accepted' ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1").first();
+  return db.prepare(`SELECT * FROM cost_catalog WHERE ${LATEST_ACCEPTED_WHERE} ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1`).first();
 }
 
 export async function loadCatalog(db, rev) {

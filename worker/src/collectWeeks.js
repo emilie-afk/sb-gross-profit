@@ -22,7 +22,7 @@
  * recomputed it and matched every order and aggregate (verifyRoutes.js).
  */
 import { ApiError, json, jsonText, readJson, WEEK_RE } from './http.js';
-import { newId, nowIso, getSettings, selectIn, atomic, SETTINGS_SQL, settingsFromRows } from './db.js';
+import { newId, nowIso, getSettings, selectIn, atomic, SETTINGS_SQL, settingsFromRows, LATEST_ACCEPTED_WHERE } from './db.js';
 import { signManifest, manifestSignatureValid } from './auth.js';
 import { readBytes, gunzipCapped, sha256Text, HEX64 } from './gz.js';
 import { loadShipmentsForOrders, loadHpdForOrders, shipmentsFromRows, hpdFromRows, SHIPMENTS_SQL, SHIPMENT_ITEMS_SQL, HPD_SQL, HPD_ITEMS_SQL } from './store.js';
@@ -134,7 +134,7 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
     db.prepare(ANCHOR_PUBLISHED_SQL).bind(weekStart),
     db.prepare(ANCHOR_LATEST_SQL).bind(weekStart),
     db.prepare(LATEST_REFRESH_SQL).bind(weekStart, new Date(now).toISOString()),
-    db.prepare("SELECT * FROM cost_catalog WHERE status = 'accepted' ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1"),
+    db.prepare(`SELECT * FROM cost_catalog WHERE ${LATEST_ACCEPTED_WHERE} ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1`),
     db.prepare(PREV_PUBLISHED_SQL).bind(prevWeek),
     db.prepare(PREV_DRAFT_SQL).bind(prevWeek),
     db.prepare('SELECT t.shipping_expense AS e FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1').bind(weekStart),

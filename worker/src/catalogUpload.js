@@ -26,7 +26,7 @@
  * the upload; a repeated seal of a sealed upload replays its stored answer.
  */
 import { ApiError, json, readJson } from './http.js';
-import { newId, nowIso, getSettings, atomic, SETTINGS_SQL, settingsFromRows } from './db.js';
+import { newId, nowIso, getSettings, atomic, SETTINGS_SQL, settingsFromRows, CORRECTION_SOURCE, LATEST_ACCEPTED_WHERE } from './db.js';
 import { REFRESH_ID_RE } from './ingest.js';
 import { REFRESH_TIMEOUT_MINUTES } from './compute.js';
 import { sha256Text } from './gz.js';
@@ -76,6 +76,14 @@ export async function openCatalogUpload(request, env) {
   try { assertNoCustomerFields(mcgExtra); } catch { throw new ApiError(400, 'customer_data_rejected', 'The catalog contains customer fields'); }
   const meta = { builtAt: typeof b.meta?.builtAt === 'string' ? b.meta.builtAt.slice(0, 40) : null, commit: typeof b.meta?.commit === 'string' ? b.meta.commit.slice(0, 64) : null,
                  refreshId: typeof b.meta?.refreshId === 'string' ? b.meta.refreshId.slice(0, 32) : null, source: 'build_push_chunked', mcgExtraCount: Object.keys(mcgExtra).length };
+  // An audited cost correction's catalog (tools/correction-catalog.mjs): a pinned base plus the corrected MCG table.
+  // Validated against that base (not the newest catalog), never resolves a refresh and never becomes the catalog new
+  // weeks use (CORRECTION_SOURCE is excluded from every "latest accepted" choice).
+  if (b.meta?.correctionOf !== undefined) {
+    if (!CATALOG_REV_RE.test(String(b.meta.correctionOf))) throw bad('meta.correctionOf must be a catalog revision');
+    if (meta.refreshId) throw bad('a correction catalog resolves no refresh');
+    meta.correctionOf = b.meta.correctionOf; meta.source = CORRECTION_SOURCE;
+  }
   const id = newId('cup'), at = nowIso();
   const fixed = [['__mcgExtra', stableStringify(mcgExtra)], ['__overrides', '{}']];
   const db = env.DB;
@@ -132,6 +140,7 @@ export const SEAL_STALE_SECONDS = 60;
 // Every write of a seal's commit is conditional on the commit's first statement having sealed
 // the upload with this seal's token (?1 = upload id, ?2 = token).
 const SEALED_BY_ME = "EXISTS (SELECT 1 FROM catalog_upload WHERE upload_id = ?1 AND status = 'sealed' AND seal_token = ?2)";
+const CATALOG_REV_RE = /^cat_[0-9a-f]{16}$/;
 // What was durably stored for an upload: its catalog, that catalog's parts, the refresh it names.
 const STORED = db => [
   db.prepare('SELECT status FROM cost_catalog WHERE catalog_rev = (SELECT catalog_rev FROM catalog_upload WHERE upload_id = ?1)'),
@@ -165,7 +174,7 @@ export async function sealCatalogUpload(request, env, id) {
     db.prepare('SELECT * FROM catalog_upload WHERE upload_id = ?1').bind(id),
     db.prepare('SELECT table_name, part, grp, first_key, last_key, n, sha256 FROM catalog_upload_part WHERE upload_id = ?1').bind(id),
     db.prepare(SETTINGS_SQL),
-    db.prepare("SELECT catalog_rev, table_counts, vendor_counts FROM cost_catalog WHERE status = 'accepted' ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1"),
+    db.prepare(`SELECT catalog_rev, table_counts, vendor_counts FROM cost_catalog WHERE ${LATEST_ACCEPTED_WHERE} ORDER BY COALESCE(last_pushed_at, captured_at) DESC, catalog_rev LIMIT 1`),
   ]);
   const u = ur.results?.[0];
   if (!u) throw new ApiError(404, 'upload_unknown', 'No such catalog upload');
@@ -198,7 +207,14 @@ export async function sealCatalogUpload(request, env, id) {
     const counts = { tableCounts, vendorCounts, vendorTotal: Object.values(vendorCounts).reduce((sum, n) => sum + n, 0) };
     const hashes = rows.map(r => [r.table_name, r.part, r.sha256]);
     const rev = await catalogPartsRevFromHashes(hashes);
-    const settings = settingsFromRows(sr.results || []), prev = lr.results?.[0] || null;
+    const settings = settingsFromRows(sr.results || []);
+    let prev = lr.results?.[0] || null;
+    const correctionOf = meta.correctionOf || null;
+    if (correctionOf) {
+      // Compared with its own base: a correction of an older week must not be refused because the sheets grew since.
+      prev = await db.prepare('SELECT catalog_rev, status, table_counts, vendor_counts FROM cost_catalog WHERE catalog_rev = ?1').bind(correctionOf).first();
+      if (prev?.status !== 'accepted') throw new ApiError(409, 'correction_base_unknown', `${correctionOf} is not an accepted catalog`);
+    }
     const previous = prev ? { tableCounts: JSON.parse(prev.table_counts), vendorCounts: JSON.parse(prev.vendor_counts) } : null;
     const validation = validateCatalogCounts(counts, previous, { shrinkTolerance: Number(settings.catalog_shrink_tolerance) });
     const refreshId = meta.refreshId || null;
@@ -208,12 +224,16 @@ export async function sealCatalogUpload(request, env, id) {
     ]);
     const exists = er.results?.[0] || null;
     const runId = newId('ing');
-    const accepted = exists ? exists.status === 'accepted' : validation.accepted;
-    const status = exists ? exists.status : (validation.accepted ? 'accepted' : 'rejected');
+    // The same content pushed earlier as an ordinary catalog and refused by the newest-catalog comparison: accepted
+    // now as a correction catalog when it passes against its base (the row is updated, its parts stored).
+    const upgrade = !!(correctionOf && exists?.status === 'rejected' && validation.accepted);
+    const accepted = upgrade || (exists ? exists.status === 'accepted' : validation.accepted);
+    const status = upgrade ? 'accepted' : exists ? exists.status : (validation.accepted ? 'accepted' : 'rejected');
     // 3. The refresh this push names: decided here, written only inside the commit, and fulfilled
     //    only if the catalog row is accepted and all its parts are stored in that same commit.
     let refresh, refreshStmts = [];
-    if (!refreshId) refresh = { status: 'none', note: 'no refreshId in this push; no refresh resolved' };
+    if (correctionOf) refresh = { status: 'none', note: `correction catalog of ${correctionOf}; no refresh resolved` };
+    else if (!refreshId) refresh = { status: 'none', note: 'no refreshId in this push; no refresh resolved' };
     else if (!REFRESH_ID_RE.test(refreshId)) refresh = { status: 'invalid', note: 'malformed refreshId; no refresh resolved' };
     else if (!rr.results?.[0]) refresh = { refreshId, status: 'unknown', note: 'no such refresh; nothing resolved' };
     else if (rr.results[0].status !== 'pending') refresh = { refreshId, status: rr.results[0].status, note: 'already resolved; unchanged' };
@@ -248,11 +268,17 @@ export async function sealCatalogUpload(request, env, id) {
             AND NOT EXISTS (SELECT 1 FROM catalog_upload_part p WHERE p.upload_id = ?1 AND NOT EXISTS (
                   SELECT 1 FROM json_each(?7) e WHERE json_extract(e.value, '$[0]') = p.table_name AND json_extract(e.value, '$[1]') = p.part AND json_extract(e.value, '$[2]') = p.sha256))`)
         .bind(id, token, at, rev, JSON.stringify(planned), rows.length, JSON.stringify(hashes)),
-      ...(exists
-        ? (exists.status === 'accepted' ? [db.prepare(`UPDATE cost_catalog SET last_pushed_at = ?4 WHERE catalog_rev = ?3 AND ${SEALED_BY_ME}`).bind(id, token, rev, at)] : [])
+      ...(upgrade
+        ? [db.prepare(`UPDATE cost_catalog SET status = 'accepted', source = ?5, reject_reasons = '[]', meta = ?6 WHERE catalog_rev = ?3 AND status = 'rejected' AND ${SEALED_BY_ME}`)
+             .bind(id, token, rev, at, CORRECTION_SOURCE, JSON.stringify({ builtAt: meta.builtAt, commit: meta.commit, correctionOf, acceptedAsCorrectionAt: at })),
+           db.prepare(`INSERT OR IGNORE INTO cost_catalog_part (catalog_rev, table_name, part, payload)
+              SELECT ?3, table_name, part, payload FROM catalog_upload_part WHERE upload_id = ?1 AND ${SEALED_BY_ME}
+                AND EXISTS (SELECT 1 FROM cost_catalog WHERE catalog_rev = ?3 AND status = 'accepted')`).bind(id, token, rev)]
+        : exists
+        ? (exists.status === 'accepted' && !correctionOf ? [db.prepare(`UPDATE cost_catalog SET last_pushed_at = ?4 WHERE catalog_rev = ?3 AND ${SEALED_BY_ME}`).bind(id, token, rev, at)] : [])
         : [db.prepare(`INSERT OR IGNORE INTO cost_catalog (catalog_rev, captured_at, source, status, reject_reasons, table_counts, vendor_counts, vendor_total, meta)
               SELECT ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11 WHERE ${SEALED_BY_ME}`).bind(id, token, rev, at, meta.source, status, JSON.stringify(validation.reasons),
-                JSON.stringify(counts.tableCounts), JSON.stringify(counts.vendorCounts), counts.vendorTotal, JSON.stringify({ builtAt: meta.builtAt, commit: meta.commit })),
+                JSON.stringify(counts.tableCounts), JSON.stringify(counts.vendorCounts), counts.vendorTotal, JSON.stringify({ builtAt: meta.builtAt, commit: meta.commit, ...(correctionOf ? { correctionOf } : {}) })),
            ...(validation.accepted ? [db.prepare(`INSERT OR IGNORE INTO cost_catalog_part (catalog_rev, table_name, part, payload)
               SELECT ?3, table_name, part, payload FROM catalog_upload_part WHERE upload_id = ?1 AND ${SEALED_BY_ME}
                 AND EXISTS (SELECT 1 FROM cost_catalog WHERE catalog_rev = ?3 AND status = 'accepted')`).bind(id, token, rev)] : [])]),

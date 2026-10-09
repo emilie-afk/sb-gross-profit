@@ -8,7 +8,9 @@
  * `SELECT table_name, part, payload FROM cost_catalog_part WHERE catalog_rev = ?` returns them).
  * <mcg-pack-tab.csv>: the MCG succulent-pack tab exported as CSV (outside the repository).
  * Writes the base's tables unchanged with `mcg_pack` added or replaced (parsed exactly as build.py and
- * the Worker do), ready for the chunked catalog push (catalog_push.py). So a corrected revision changes
+ * the Worker do), ready for the chunked catalog push (catalog_push.py) with meta.correctionOf = the base revision:
+ * the Worker then validates it against that base (not the newest catalog, which may have grown since) and never
+ * makes it the catalog new weeks use. So a corrected revision changes
  * the pack costs only, not whatever else changed in the sheets since the week's catalog was pinned. The
  * Worker checks the same when the correction is registered (POST /v1/admin/cost-corrections refuses a
  * catalog that differs from the week's original outside the MCG table).
