@@ -6,6 +6,9 @@
  *   sb-gp-ingest             Worker INGEST_SECRET (shared with the ShipStation job)
  *   sb-gmail-oauth-client    Google OAuth desktop client (username = client id, password = client secret)
  *   sb-gmail-readonly        Gmail refresh token (written by gmail-authorize.mjs; scope gmail.readonly)
+ *   sb-corporate-ingest      corporate gifting app ingest secret (username = corporate, password = the secret);
+ *                            only read when config.corporateIngestUrl is set. One-time setup:
+ *                            New-StoredCredential -Target sb-corporate-ingest -UserName corporate -Password '<secret>' -Persist LocalMachine
  *
  * Values are read into memory at run time and never written to disk, a log,
  * the manifest or a command line. Writing (gmail-authorize only) passes the

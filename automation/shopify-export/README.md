@@ -19,6 +19,7 @@ The updated-order scan is this same rolling eight-week export. A refund or cance
 | Shopify login, Gmail tokens, Worker secret | Windows Credential Manager only. |
 | Browser session | Persistent profile under `%LOCALAPPDATA%\sb-shopify-export\profile`, outside the repository and any cloud-synced folder (the job refuses otherwise). |
 | Failed uploads | The **sanitized** CSV only, in `quarantine\`, deleted after 72 hours. |
+| Corporate gifting payload (optional) | Built in memory from the same export before the buffer is zeroed, sent once, never written to disk. See below. |
 
 ## Gmail access
 
@@ -63,6 +64,19 @@ The updated-order scan is this same rolling eight-week export. A refund or cance
 - **Required columns:** the Worker minimum plus `Cancelled at`, `Fulfilled at`, `Financial Status` and `Refunded Amount`.
 - **Order dates:** every order's `Created at` must fall inside the rolling window. If any does not, the export filter is wrong (`export_window_mismatch`).
 - **Free text:** any free text outside the approved form, such as an unapproved Source or Channel value, stops the job (`sanitization_failed`). The refusal names columns and rules, never values.
+
+## Corporate gifting orders (optional)
+
+When `corporateIngestUrl` is set in `config.local.json`, each run also sends a minimal orders payload (`sbcg-orders-v1`) to the corporate gifting app (`POST …/api/ingest/shopify-orders`, `Authorization: Bearer <secret>`). It is built by `src/corporateOrders.mjs`, an unchanged copy of `shared/corporateOrders.js` in `sb-corporate-gifts`, from the **same in-memory export**. There is no second download, browser or scheduled task.
+
+- **Kept per order:** name/id, dates, financial status, currency, order-level amounts, line items (SKU, title, quantity, price, discount), Source, Tags and Billing Company. Tags or a company that look like an email, URL or phone number are dropped. Customer names, emails, addresses, phones, notes and discount codes are never read.
+- **Independent of GP:** it is sent after the GP upload, whether that succeeded or failed, and also after a GP refusal for an unapproved Source or a missing GP column. It is not sent after a window mismatch, an empty export or unreadable dates. Its outcome is recorded only as `corporate` in the run manifest (`sent` with counts, `skipped_not_configured`, `refused:<reason>`, `upload_failed`). It never changes the GP status or exit code.
+- **Delivery:** 60 s timeout; network errors and 5xx are retried twice, a 4xx is final. Payloads over 6 MB are not sent (`refused:too_large`). Re-sending the same export is a no-op on the app.
+- **Setup (once):**
+  ```
+  New-StoredCredential -Target sb-corporate-ingest -UserName corporate -Password '<secret>' -Persist LocalMachine
+  ```
+  then set `"corporateIngestUrl": "https://sb-corporate-gifts.netlify.app/api/ingest/shopify-orders"` in `config.local.json`. Check the next run's manifest for `corporate.status = "sent"`; the app shows the run under **Revenue → Import history**.
 
 ## Schedule
 

@@ -20,6 +20,13 @@
  *      sanitized file in quarantine (72 h).
  *   7. Write the run manifest: hashes, window, counts, statuses — never a row,
  *      a link, an email header or body, a token or a secret.
+ *
+ * Corporate gifting orders (optional, independent of GP): when `corporateUpload` is
+ * wired (config.corporateIngestUrl set), step 5 also reduces the same in-memory export
+ * to the minimal "sbcg-orders-v1" payload (corporateOrders.mjs) before the raw bytes are
+ * zeroed. It is sent once, after the GP step, whatever the GP result (also after a GP
+ * refusal for an unapproved Source or a missing GP column). Its outcome goes to
+ * `manifest.corporate` only and never changes the GP status or exit code.
  */
 import { writeRunRecord, registerSecret } from '../../shipstation-export/src/redact.mjs';
 import crypto from 'node:crypto';
@@ -27,11 +34,20 @@ import nodeFs from 'node:fs';
 import nodePath from 'node:path';
 import { EXIT, KIND, rollingWindow, prepareShopifyExport, selectExportMessage, detectExportFormat, safeError, hostAllowed, unzipSingleCsv } from './lib.mjs';
 import { NEEDS_HUMAN } from './authState.mjs';
+import { parseCsvObjects, prepareCorporateOrdersPayload } from './corporateOrders.mjs';
+import { CORPORATE_MAX_BYTES } from './corporateUpload.mjs';
 
 /** Sign-in states only a person can finish: Shopify's two-step code and a human check. */
 export const PERSON_NEEDED = new Set(['two_factor_required', 'captcha']);
 
 const hash16 = s => crypto.createHash('sha256').update(String(s)).digest('hex').slice(0, 16);
+
+/**
+ * GP refusals after which the corporate payload is still sent: the export itself is sound, only GP's
+ * own rules reject it. Any other refusal (wrong window, no orders, unreadable dates) means the export
+ * does not match the coverage it would claim, so nothing is sent.
+ */
+export const CORPORATE_AFTER_GP_REFUSAL = new Set(['sanitization_failed', 'missing_columns']);
 
 /**
  * @param {object} d
@@ -49,6 +65,8 @@ const hash16 = s => crypto.createHash('sha256').update(String(s)).digest('hex').
  * @param {number} [d.signInWaitMinutes]  visible browser only: how long to wait for a person to finish Shopify's sign-in (0 = stop at once)
  * @param {(x: { state, since, waitMinutes }) => Promise<void>} [d.onSignInRequired]  called once when that wait starts
  * @param {(x: { since }) => Promise<void>} [d.onSignedIn]  called when the person finished it; the export continues
+ * @param {(body: string) => Promise<{ ok, httpStatus, counts? }>} [d.corporateUpload]  optional: POST the serialized
+ *        corporate orders payload; absent = not configured (no corporate payload is built)
  */
 export async function runCollector(d) {
   const { config, week, paths, runId, browser } = d;
@@ -76,6 +94,28 @@ export async function runCollector(d) {
   } catch (e) {
     return finish(e.code || 'gmail_auth_failed', EXIT.GMAIL_AUTH, { error: safeError(e) });
   }
+
+  // Corporate gifting orders: built in step 5, sent at most once, recorded in manifest.corporate only.
+  let corp = null, corpPending = false;
+  const sendCorporate = async (gpRefused = null) => {
+    if (!corpPending) return;
+    corpPending = false;
+    const c = corp; corp = null;
+    try {
+      if (!d.corporateUpload) { manifest.corporate = { status: 'skipped_not_configured' }; return; }
+      if (gpRefused && !CORPORATE_AFTER_GP_REFUSAL.has(gpRefused)) { manifest.corporate = { status: `refused:gp_${gpRefused}` }; return; }
+      if (!c || c.refused) { manifest.corporate = { status: `refused:${c?.refused || 'build_failed'}` }; return; }
+      const orders = c.facts?.orderCount ?? 0;
+      if (!orders) { manifest.corporate = { status: 'refused:no_orders' }; return; }
+      const body = JSON.stringify(c.payload);
+      if (Buffer.byteLength(body, 'utf8') > CORPORATE_MAX_BYTES) { manifest.corporate = { status: 'refused:too_large', orders }; return; }
+      const r = await d.corporateUpload(body);
+      manifest.corporate = r?.ok ? { status: 'sent', httpStatus: r.httpStatus ?? null, orders, counts: r.counts ?? null }
+                                 : { status: 'upload_failed', httpStatus: r?.httpStatus ?? null, orders };
+    } catch (e) {
+      manifest.corporate = { status: 'upload_failed', error: safeError(e) };
+    }
+  };
 
   let opened = false;
   try {
@@ -182,8 +222,18 @@ export async function runCollector(d) {
     // 5. Sanitize in memory; the raw bytes are zeroed right after
     const exportedAt = now().toISOString();
     const prep = prepareShopifyExport(file.body.toString('utf8'), { week, exportedAt });
+    corpPending = true;
+    if (d.corporateUpload) {                                               // same bytes, before they are zeroed
+      try {
+        const { headers, rows } = parseCsvObjects(file.body.toString('utf8'));
+        corp = prepareCorporateOrdersPayload(rows, { headers, exportedAt, coverageFrom: win.from, coverageTo: win.to });
+      } catch { corp = { refused: 'build_failed' }; }
+    }
     file.body.fill(0); file = null;
-    if (prep.refused) return finish(prep.refused, EXIT.EXPORT_FAILED, { reason: prep.reason, ...(prep.detail ? { detail: prep.detail } : {}) });
+    if (prep.refused) {
+      await sendCorporate(prep.refused);
+      return finish(prep.refused, EXIT.EXPORT_FAILED, { reason: prep.reason, ...(prep.detail ? { detail: prep.detail } : {}) });
+    }
     Object.assign(manifest, { exportedAt, facts: prep.facts });
 
     // 6. Upload
@@ -192,10 +242,13 @@ export async function runCollector(d) {
       const name = `${KIND}_${week.weekStart}_${runId}.csv`;
       fs.mkdirSync(paths.quarantine, { recursive: true });
       fs.writeFileSync(nodePath.join(paths.quarantine, name), prep.sanitizedText);          // sanitized only; purged after 72 h
+      await sendCorporate();
       return finish('upload_failed', EXIT.UPLOAD_FAILED, { ingest, quarantined: name });
     }
+    await sendCorporate();
     return finish('ok', EXIT.OK, { ingest });
   } catch (e) {
+    await sendCorporate();                                                 // no-op unless step 5 was reached
     return finish('export_failed', EXIT.EXPORT_FAILED, { error: safeError(e) });
   } finally {
     if (opened) { try { await browser.close(); } catch { /* ignore */ } }

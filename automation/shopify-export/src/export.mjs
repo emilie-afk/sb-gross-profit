@@ -21,6 +21,7 @@ import { settleShopifyAuthState } from './authState.mjs';
 import { gmailAccessToken, gmailClient } from './gmail.mjs';
 import { assertCollectorConfig, adminOrigin, localPaths, EXIT, RETENTION_MS, INGEST_PATH, safeError, browserLaunchOptions, calendarDayPattern } from './lib.mjs';
 import { runCollector } from './collect.mjs';
+import { uploadCorporateOrders } from './corporateUpload.mjs';
 
 function argv() {
   const a = process.argv.slice(2), o = {};
@@ -151,6 +152,11 @@ export async function runShopifyJob({ config, week, headed = false, onWaiting = 
       const { password: ingestSecret } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
       return uploadImpl({ workerUrl: config.workerUrl, ingestSecret, path: INGEST_PATH, payload });
     },
+    // Corporate gifting orders: only when configured. The secret is read at send time (and registered for redaction).
+    corporateUpload: config.corporateIngestUrl ? async body => {
+      const { password: secret } = readWindowsCredential(config.corporateIngestCredentialTarget || 'sb-corporate-ingest');
+      return uploadCorporateOrders({ url: config.corporateIngestUrl, secret, body });
+    } : null,
   });
 }
 

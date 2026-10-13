@@ -30,6 +30,7 @@ import {
 } from '../../../shared/adapters/shopifyCsv.js';
 import { assertReducedShopifyOrderRows } from '../../../shared/adapters/shopifyPrivacy.js';
 import { assertSafeLocalDir, assertNoSecretsInConfig } from '../../shipstation-export/src/lib.mjs';
+import { corporateIngestEndpoint } from './corporateUpload.mjs';
 
 export const KIND = 'shopify_orders_export';
 export const INGEST_PATH = '/v1/ingest/shopify';
@@ -255,6 +256,10 @@ export function assertCollectorConfig(config) {
     throw new Error('signInWaitMinutes must be a whole number of minutes, 0–120');
   }
   adminOrigin(config.adminUrl);
+  if (config.corporateIngestUrl != null && config.corporateIngestUrl !== '') corporateIngestEndpoint(config.corporateIngestUrl);
+  if (config.corporateIngestCredentialTarget != null && !/^[\w.-]{1,128}$/.test(String(config.corporateIngestCredentialTarget))) {
+    throw new Error('corporateIngestCredentialTarget must be a Credential Manager target name');
+  }
   return { pollSeconds: poll, timeoutMinutes: timeout };
 }
 

@@ -20,6 +20,9 @@ import {
 import { assertReadonlyScope, gmailAccessToken, gmailClient, decodeBodies } from '../automation/shopify-export/src/gmail.mjs';
 import { runCollector } from '../automation/shopify-export/src/collect.mjs';
 import { uploadToWorker } from '../automation/shipstation-export/src/upload.mjs';
+import { uploadCorporateOrders, corporateIngestEndpoint, CORPORATE_MAX_BYTES } from '../automation/shopify-export/src/corporateUpload.mjs';
+import { registerSecret } from '../automation/shipstation-export/src/redact.mjs';
+import crypto from 'node:crypto';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const week = { weekStart: '2026-09-14', weekEnd: '2026-09-20', weekStartUS: '09/14/2026', weekEndUS: '09/20/2026' };
@@ -235,9 +238,9 @@ function fakes({ auth = ['authenticated'], mailbox = 'exports@example.invalid', 
     upload: async payload => { log.uploads.push(payload); return uploadOk ? { ok: true, httpStatus: 200, sourceStatus: 'source_received', runId: 'ing_x' } : { ok: false, httpStatus: 503, error: 'http_503' }; },
   };
 }
-async function run(opts) {
+async function run(opts, extra = {}) {
   const dir = tmpDir(), config = baseConfig(dir), paths = localPaths(config), f = fakes(opts);
-  const m = await runCollector({ config, week, paths, runId: 'shx_test', ...f });
+  const m = await runCollector({ config, week, paths, runId: 'shx_test', ...f, ...extra });
   const manifestText = fs.readFileSync(path.join(paths.runs, 'shx_test.json'), 'utf8');
   return { m, f, paths, manifestText };
 }
@@ -376,4 +379,162 @@ test('collector: Shopify sign-in that needs a person — a visible run waits in 
   calls.length = 0;
   const headless = await runWith(['two_factor_required'], { signInWaitMinutes: 0 });
   assert.deepEqual([headless.m.status, calls.length], ['needs_2fa', 0]);
+});
+
+// ─── Corporate gifting orders (sbcg-orders-v1), independent of GP ────────────
+
+const CORP_URL = 'https://corp.example/api/ingest/shopify-orders';
+const CORP_COUNTS = { status: 'completed', received: 2, new: 2, updated: 0, unchanged: 0, stale: 0, rejected: 0, warnings: 0 };
+const csvBody = rows => ({ status: 200, contentType: 'text/csv', body: Buffer.from(toCsvText(rows, Object.keys(rows[0]))), finalHost: 'storage.example' });
+/** A fake corporateUpload that records each body and how many GP uploads had happened when it was called. */
+function corpFake(result = { ok: true, httpStatus: 200, counts: CORP_COUNTS }, gpLog = null) {
+  const sent = [];
+  const fn = async body => { sent.push({ body, gpUploadsBefore: gpLog ? gpLog.uploads.length : null }); return typeof result === 'function' ? result() : result; };
+  return { sent, fn };
+}
+
+test('corporate: the copied corporateOrders.mjs is the unchanged sb-corporate-gifts module', () => {
+  const b = fs.readFileSync(path.join(REPO, 'automation/shopify-export/src/corporateOrders.mjs'));
+  assert.equal(crypto.createHash('sha256').update(b).digest('hex'), '836a5bb2ab41bd2c3188f57df9cd50bd76eebb86e376a566c402f190a766fa55');
+});
+
+test('corporate: the same export is reduced to sbcg-orders-v1 and sent once, after the GP upload; no personal data', async () => {
+  const dir = tmpDir(), config = baseConfig(dir), paths = localPaths(config), fk = fakes();
+  const corp = corpFake(undefined, fk.log);
+  const m2 = await runCollector({ config, week, paths, runId: 'shx_test', ...fk, corporateUpload: corp.fn });
+  const text2 = fs.readFileSync(path.join(paths.runs, 'shx_test.json'), 'utf8');
+  assert.deepEqual([m2.status, m2.exitCode, fk.log.uploads.length, corp.sent.length, corp.sent[0].gpUploadsBefore], ['ok', EXIT.OK, 1, 1, 1]);
+  const p = JSON.parse(corp.sent[0].body);
+  assert.deepEqual([p.format, p.store, p.exportedAt, p.coverageFrom, p.coverageTo], ['sbcg-orders-v1', 'succulentsbox', m2.exportedAt, '2026-07-27', '2026-09-20']);
+  assert.deepEqual(p.orders.map(o => o.name).sort(), ['#920001', '#920002']);
+  assert.deepEqual(p.orders.find(o => o.name === '#920001').tags, ['influencer'], 'a personal-looking tag is dropped');
+  noPii(corp.sent[0].body, 'corporate payload');
+  assert.ok(!corp.sent[0].body.includes('SYNTH-INFLUENCER-2026'), 'discount code');
+  assert.deepEqual(m2.corporate, { status: 'sent', httpStatus: 200, orders: 2, counts: CORP_COUNTS });
+  noPii(text2, 'manifest');
+  assert.ok(!text2.includes('#920001'), 'no order in the manifest');
+});
+
+test('corporate: an upload failure, a 401 or a throw never changes the GP status or exit code', async () => {
+  const outcomes = [['http_503', { ok: false, httpStatus: 503 }], ['http_401', { ok: false, httpStatus: 401 }],
+    ['throw', () => { throw new Error('No stored credential named sb-corporate-ingest'); }]];
+  for (const uploadOk of [true, false]) {
+    const base = await run({ uploadOk });
+    for (const [label, result] of outcomes) {
+      const corp = corpFake(result);
+      const { m } = await run({ uploadOk }, { corporateUpload: corp.fn });
+      assert.deepEqual([m.status, m.exitCode, m.quarantined ?? null], [base.m.status, base.m.exitCode, base.m.quarantined ?? null], `${label}, GP upload ok=${uploadOk}`);
+      assert.equal(m.corporate.status, 'upload_failed', label);
+      assert.equal(corp.sent.length, 1);
+    }
+  }
+});
+
+test('corporate: a GP refusal for an unapproved Source still sends the corporate payload; a window mismatch does not', async () => {
+  const bad = rawExportRows({ source: 'synthetic-new-app' });
+  const base = await run({ download: csvBody(bad) });
+  const corp = corpFake();
+  const { m, f } = await run({ download: csvBody(bad) }, { corporateUpload: corp.fn });
+  assert.deepEqual([m.status, m.exitCode, m.reason, f.log.uploads.length], [base.m.status, base.m.exitCode, base.m.reason, 0]);
+  assert.equal(m.status, 'sanitization_failed');
+  assert.equal(corp.sent.length, 1);
+  assert.ok(JSON.parse(corp.sent[0].body).orders.every(o => o.source === 'synthetic-new-app'));
+  assert.equal(m.corporate.status, 'sent');
+  // The export does not match the window it would claim: nothing is sent to the app.
+  const out = rawExportRows({ dates: ['2026-09-15 10:00:00 -0700', '2026-07-20 09:00:00 -0700'] });
+  const corp2 = corpFake();
+  const w = await run({ download: csvBody(out) }, { corporateUpload: corp2.fn });
+  assert.deepEqual([w.m.status, w.m.exitCode, corp2.sent.length, w.m.corporate.status], ['export_window_mismatch', EXIT.EXPORT_FAILED, 0, 'refused:gp_export_window_mismatch']);
+});
+
+test('corporate: not configured → no corporate call and skipped_not_configured; a stop before the download records nothing', async () => {
+  const { m } = await run();
+  assert.deepEqual([m.status, m.corporate], ['ok', { status: 'skipped_not_configured' }]);
+  const corp = corpFake();
+  const early = await run({ auth: ['two_factor_required'] }, { corporateUpload: corp.fn });
+  assert.deepEqual([early.m.status, early.m.corporate, corp.sent.length], ['needs_2fa', undefined, 0]);
+});
+
+test('corporate: the raw buffer is still zeroed and the secret never reaches the manifest or run record', async () => {
+  const secret = 'corp-secret-synthetic-0123456789abcdef';
+  const raw = Buffer.from(rawCsv());
+  const corp = corpFake(() => { registerSecret(secret); throw new Error(`401 for Bearer ${secret}`); });
+  const { m, manifestText } = await run({ direct: raw }, { corporateUpload: corp.fn });
+  assert.equal(m.status, 'ok');
+  assert.ok(raw.every(x => x === 0), 'raw export zeroed');
+  assert.equal(m.corporate.status, 'upload_failed');
+  assert.ok(!JSON.stringify(m).includes(secret) && !manifestText.includes(secret), 'secret in the manifest');
+  assert.ok(!corp.sent[0].body.includes(secret));
+});
+
+test('corporate: sent at most once even when two finishing paths are reached', async () => {
+  // The run record cannot be written the first time: the 'ok' finish throws, the catch path finishes again.
+  const dir = tmpDir(), config = baseConfig(dir), paths = localPaths(config), fk = fakes();
+  const corp = corpFake();
+  let runsFailures = 1;
+  const fsRunsFailsOnce = { ...fs, mkdirSync: (p, ...a) => { if (p === paths.runs && runsFailures-- > 0) throw new Error('disk busy'); return fs.mkdirSync(p, ...a); } };
+  const m = await runCollector({ config, week, paths, runId: 'shx_test', ...fk, fs: fsRunsFailsOnce, corporateUpload: corp.fn });
+  assert.deepEqual([m.status, m.exitCode, fk.log.uploads.length, corp.sent.length, m.corporate.status], ['export_failed', EXIT.EXPORT_FAILED, 1, 1, 'sent']);
+});
+
+test('corporate: a payload over the app limit is not sent', async () => {
+  const rows = [];
+  const long = 'Synthetic plant ' + 'x'.repeat(1500);
+  for (let i = 0; i < 4200; i++) rows.push(...csvOrder({ name: `#93${String(i).padStart(4, '0')}`, createdAt: '2026-09-15 10:00:00 -0700', subtotal: 10, total: 10,
+    lines: [{ sku: 'MG-ALOE', name: long, price: 10, qty: 1, vendor: 'Succulents Box' }] }));
+  const full = rows.map(r => ({ 'Name': r['Name'], ...r, 'Fulfilled at': '' }));
+  const corp = corpFake();
+  const { m } = await run({ direct: Buffer.from(toCsvText(full, Object.keys(full[0]))) }, { corporateUpload: corp.fn });
+  assert.equal(corp.sent.length, 0);
+  assert.equal(m.corporate.status, 'refused:too_large');
+  assert.ok(CORPORATE_MAX_BYTES <= 6 * 1024 * 1024);
+});
+
+test('corporate: config accepts only an https …/api/ingest/shopify-orders URL', () => {
+  const dir = tmpDir();
+  const c = extra => ({ ...baseConfig(dir), ...extra });
+  assert.doesNotThrow(() => assertCollectorConfig(c({ corporateIngestUrl: null })));
+  assert.doesNotThrow(() => assertCollectorConfig(c({ corporateIngestUrl: 'https://sb-corporate-gifts.netlify.app/api/ingest/shopify-orders', corporateIngestCredentialTarget: 'sb-corporate-ingest' })));
+  for (const bad of ['http://sb-corporate-gifts.netlify.app/api/ingest/shopify-orders', 'https://sb-corporate-gifts.netlify.app/api/ingest/orders',
+    'https://sb-corporate-gifts.netlify.app/api/ingest/shopify-orders?x=1', 'https://u:p@corp.example/api/ingest/shopify-orders', 'not a url']) {
+    assert.throws(() => assertCollectorConfig(c({ corporateIngestUrl: bad })), /corporateIngestUrl must be/, bad);
+  }
+  assert.throws(() => assertCollectorConfig(c({ corporateIngestCredentialTarget: 'bad target;' })), /corporateIngestCredentialTarget/);
+  const ex = JSON.parse(fs.readFileSync(path.join(REPO, 'automation/shopify-export/config.example.json'), 'utf8'));
+  assert.deepEqual([ex.corporateIngestUrl, ex.corporateIngestCredentialTarget], [null, 'sb-corporate-ingest']);
+});
+
+test('corporate upload: bearer POST, retries only network errors and 5xx, keeps counts only', async () => {
+  const secret = 'corp-secret-synthetic-abcdef0123456789';
+  const calls = [];
+  const fetchFrom = answers => async (url, init) => {
+    calls.push({ url, method: init.method, auth: init.headers.Authorization, redirect: init.redirect, hasSignal: !!init.signal });
+    const a = answers.shift();
+    if (a === 'net') throw new TypeError('fetch failed');
+    return new Response(JSON.stringify(a.json ?? {}), { status: a.status });
+  };
+  const up = (answers, o = {}) => uploadCorporateOrders({ url: CORP_URL, secret, body: '{}', fetchImpl: fetchFrom(answers), sleep: async () => {}, ...o });
+
+  const ok = await up([{ status: 200, json: { ok: true, ...CORP_COUNTS, warnings: ['w1', 'w2'], import_id: 'imp_x', detail: 'synthetic.buyer@example.invalid' } }]);
+  assert.deepEqual(ok, { ok: true, httpStatus: 200, attempts: 1, counts: { ...CORP_COUNTS, warnings: 2 } });
+  assert.deepEqual(calls[0], { url: CORP_URL, method: 'POST', auth: `Bearer ${secret}`, redirect: 'error', hasSignal: true });
+
+  calls.length = 0;
+  const retried = await up(['net', { status: 502 }, { status: 200, json: { status: 'duplicate', received: 2 } }]);
+  assert.deepEqual([retried.ok, retried.attempts, retried.counts], [true, 3, { status: 'duplicate', received: 2 }]);
+
+  calls.length = 0;
+  const gaveUp = await up([{ status: 503 }, { status: 503 }, { status: 503 }, { status: 200 }]);
+  assert.deepEqual([gaveUp.ok, gaveUp.httpStatus, gaveUp.attempts, calls.length], [false, 503, 3, 3]);
+
+  for (const status of [400, 401, 413, 429]) {
+    calls.length = 0;
+    const r = await up([{ status, json: { error: 'payload_rejected', paths: ['orders[0].tags[0]'] } }, { status: 200 }]);
+    assert.deepEqual([r.ok, r.httpStatus, r.attempts, calls.length, r.error], [false, status, 1, 1, `http_${status}`], `no retry on ${status}`);
+    assert.ok(!JSON.stringify(r).includes('payload_rejected'), 'no response body kept');
+  }
+  assert.ok(!JSON.stringify([ok, retried, gaveUp]).includes(secret));
+  await assert.rejects(uploadCorporateOrders({ url: 'http://corp.example/api/ingest/shopify-orders', secret, body: '{}' }), /corporateIngestUrl must be/);
+  await assert.rejects(uploadCorporateOrders({ url: CORP_URL, secret: '', body: '{}' }), /Missing corporate ingest secret/);
+  assert.equal(corporateIngestEndpoint('https://sb-corporate-gifts.netlify.app/api/ingest/shopify-orders'), 'https://sb-corporate-gifts.netlify.app/api/ingest/shopify-orders');
 });
