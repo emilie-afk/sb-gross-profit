@@ -31,6 +31,7 @@ import { readWindowsCredential } from './credentials.mjs';
 import { writeRunRecord, safeError } from './redact.mjs';
 import { lastCompletedWeek, weekFromStart, render, localPaths, assertNoSecretsInConfig, purgeOlderThan, resolveDelivery, browserLaunchOptions } from './lib.mjs';
 import { uploadToWorker, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
+import { readSignInBlock, writeSignInBlock, clearSignInBlock } from './signinBlock.mjs';
 
 export { safeError };
 export { writeRunRecord };
@@ -113,7 +114,8 @@ export async function runSteps(page, steps, vars, downloadsDir) {
  * can upload it while it waits for Shopify's export email (one browser at a
  * time). finishShipStationUpload() completes it and rewrites the manifest.
  */
-export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, headed = false, deferUpload = false, apsWindow = null, scrRows = null, scrSource = null, resolveScrRows = null }) {
+export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, headed = false, deferUpload = false, apsWindow = null, scrRows = null, scrSource = null, resolveScrRows = null,
+                                         retrySignIn = process.argv.includes('--retry-shipstation') }) {
   assertNoSecretsInConfig(config);
   const paths = localPaths(config);
   for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
@@ -138,6 +140,16 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
     return { status, exitCode, manifest, paths };
   };
 
+  // An earlier run's automated window could not sign in: do not open it again
+  // until a person has signed in through the normal window (npm run login).
+  const block = retrySignIn ? null : readSignInBlock(paths.base);
+  if (retrySignIn) clearSignInBlock(paths.base);
+  if (block) {
+    return finish('signin_blocked', EXIT.LOGIN_FAILED, { note: 'ShipStation sign-in needed since ' + block.since.slice(0, 10) +
+      '; the automated window was not opened. Sign in with: npm run login (automation/shipstation-export)' });
+  }
+  const blocked = (status, code, extra = {}) => { writeSignInBlock(paths.base, status); return finish(status, code, extra); };
+
   const context = await chromium.launchPersistentContext(paths.profile, { headless: !headed, acceptDownloads: true, ...browserLaunchOptions(config) });
   try {
     const page = context.pages()[0] || await context.newPage();
@@ -146,19 +158,27 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
     manifest.authStateAtStart = state;
 
     if (state === 'login_required' || state === 'session_expired') {
-      if (state === 'session_expired' && config.loginUrl) await page.goto(config.loginUrl, { waitUntil: 'domcontentloaded' });
-      const { username, password } = readWindowsCredential(config.credentialTarget || 'sb-shipstation-export');
-      await page.locator(config.loginForm.usernameField).first().fill(username);
-      await page.locator(config.loginForm.passwordField).first().fill(password);
-      await page.locator(config.loginForm.submit).first().click();
-      await page.waitForLoadState('domcontentloaded');
-      await page.waitForTimeout(2000);
+      // One automatic attempt. If the form cannot be completed (a changed
+      // sign-in page, a Cloudflare check that refuses automated browsers), the
+      // run stops and later runs do not reopen the window (signin-block.json).
+      try {
+        if (state === 'session_expired' && config.loginUrl) await page.goto(config.loginUrl, { waitUntil: 'domcontentloaded' });
+        const { username, password } = readWindowsCredential(config.credentialTarget || 'sb-shipstation-export');
+        await page.locator(config.loginForm.usernameField).first().fill(username, { timeout: 15000 });
+        await page.locator(config.loginForm.passwordField).first().fill(password, { timeout: 15000 });
+        await page.locator(config.loginForm.submit).first().click({ timeout: 15000 });
+        await page.waitForLoadState('domcontentloaded');
+        await page.waitForTimeout(2000);
+      } catch (e) {
+        return blocked('login_failed', EXIT.LOGIN_FAILED, { error: safeError(e) });
+      }
       ({ state, evidence } = await settleAuthState(page, config.auth));
-      if (state === 'login_required') return finish('login_failed', EXIT.LOGIN_FAILED);
+      if (state === 'login_required') return blocked('login_failed', EXIT.LOGIN_FAILED);
     }
-    if (state === 'two_factor_required') return finish('needs_2fa', EXIT.NEEDS_2FA, { note: 'Run login.mjs in headed mode once to complete 2FA' });
-    if (state === 'captcha') return finish('needs_human_captcha', EXIT.CAPTCHA);
-    if (NEEDS_HUMAN.has(state) || state !== 'authenticated') return finish('unknown_page', EXIT.UNKNOWN_PAGE, { evidence });
+    if (state === 'two_factor_required') return blocked('needs_2fa', EXIT.NEEDS_2FA, { note: 'Run login.mjs once to complete 2FA' });
+    if (state === 'captcha') return blocked('needs_human_captcha', EXIT.CAPTCHA);
+    if (NEEDS_HUMAN.has(state) || state !== 'authenticated') return blocked('unknown_page', EXIT.UNKNOWN_PAGE, { evidence });
+    clearSignInBlock(paths.base);
 
     const t0 = Date.now();
     const file = await runSteps(page, steps, vars, paths.downloads);
