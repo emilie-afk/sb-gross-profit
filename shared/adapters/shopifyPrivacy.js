@@ -21,7 +21,9 @@
  *
  * An unapproved Source or Channel value is never silently relabelled: the
  * collector refuses the file (sanitization_failed) so the list can be extended
- * deliberately. Parity: engine output on reduced rows equals engine output on
+ * deliberately. So that it can be extended, a refused Source value is reported
+ * when it has the shape of a sales-channel or app identifier (sourceIdToReport);
+ * any other Source text, and every Channel value, is still never reported. Parity: engine output on reduced rows equals engine output on
  * the raw rows (tests/shopify-privacy.test.mjs; verified locally on the real
  * Jul–Sep export: 0 field differences across 8,954 engine lines).
  */
@@ -59,6 +61,18 @@ const URL_RE = /https?:\/\/|www\./i;
 const PHONE = /(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}\b/;
 export const looksPersonal = s => EMAIL.test(s) || URL_RE.test(s) || PHONE.test(s);
 
+/**
+ * A Source value that is safe to name in a refusal: a channel or app identifier ("web", "shopify_draft_order",
+ * numeric app ids such as 294412976129). Only letters, digits, "_" and "-", at most 64 characters; a 10- or
+ * 11-digit number (the shape of a phone number) is not reported. Returns null for anything else.
+ */
+export function sourceIdToReport(value) {
+  const v = String(value ?? '').trim();
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(v)) return null;
+  if (/^\d{10,11}$/.test(v) || looksPersonal(v)) return null;
+  return v;
+}
+
 const NOTE_COLUMNS = ['Note Attributes', 'Note attributes'];
 const SOURCE_COLUMNS = ['Source', 'Source name'];
 
@@ -80,7 +94,8 @@ const reduceCode = c => { const s = String(c ?? '').toLowerCase(); return DISCOU
 /**
  * Windows side. `rows` already hold only allowlisted columns (sanitizeShopifyOrderRows).
  * Returns { rows, problems }. A non-empty `problems` means the file must not be uploaded.
- * Problems name the column and the rule, never the value.
+ * Problems name the column and the rule, never the value — except an unapproved Source that is a channel or
+ * app identifier (sourceIdToReport), so the approved list can be extended.
  */
 export function reduceShopifyOrderRows(rows) {
   const problems = [];
@@ -94,7 +109,11 @@ export function reduceShopifyOrderRows(rows) {
       for (const a of kept) if (!okNote(a)) problems.push({ row: i, column: c, rule: `unapproved ${a.key.toLowerCase()} value` });
       o[c] = kept.filter(okNote).map(a => `${a.key}: ${a.value}`).join('\n');
     }
-    for (const c of SOURCE_COLUMNS) if (c in o && !APPROVED_SOURCES.includes(String(o[c]).trim())) problems.push({ row: i, column: c, rule: 'unapproved source value' });
+    for (const c of SOURCE_COLUMNS) {
+      if (!(c in o) || APPROVED_SOURCES.includes(String(o[c]).trim())) continue;
+      const sourceId = sourceIdToReport(o[c]);
+      problems.push({ row: i, column: c, rule: 'unapproved source value', ...(sourceId ? { sourceId } : {}) });
+    }
     if (looksPersonal(String(o['Lineitem name'] ?? ''))) problems.push({ row: i, column: 'Lineitem name', rule: 'looks like personal data' });
     return o;
   });

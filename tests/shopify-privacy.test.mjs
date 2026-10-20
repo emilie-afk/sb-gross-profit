@@ -9,7 +9,7 @@ import { calculate } from '../shared/calculator.js';
 import { csvOrder } from './fixtures-normalized.mjs';
 import { csvRowsToNormalizedOrders } from '../shared/adapters/legacy.js';
 import { sanitizeShopifyOrderRows, prepareShopifyUpload } from '../shared/adapters/shopifyCsv.js';
-import { reduceShopifyOrderRows, assertReducedShopifyOrderRows, assertReducedNormalizedOrders, APPROVED_SOURCES } from '../shared/adapters/shopifyPrivacy.js';
+import { reduceShopifyOrderRows, assertReducedShopifyOrderRows, assertReducedNormalizedOrders, APPROVED_SOURCES, sourceIdToReport } from '../shared/adapters/shopifyPrivacy.js';
 import { parseCSV } from '../shared/calculator.js';
 
 function rawRows() {
@@ -58,10 +58,16 @@ test('an unapproved Source or Channel is a problem, not a silent relabel', () =>
   rows[0]['Note Attributes'] = 'Channel: SomeNewMarket';
   const { problems } = reduceShopifyOrderRows(rows);
   assert.deepEqual(problems.map(p => p.rule).sort(), ['unapproved channel value', 'unapproved source value']);
-  assert.ok(!JSON.stringify(problems).includes('SomeNewMarket'), 'problems never carry values');
+  assert.ok(!JSON.stringify(problems).includes('SomeNewMarket'), 'channel values are never carried');
+  assert.equal(problems.find(p => p.rule === 'unapproved source value').sourceId, 'new_sales_app', 'an app-id-shaped Source is named');
   assert.ok(APPROVED_SOURCES.includes('294412976129'), 'a 12-digit app id is a valid source, not a phone number');
   for (const id of ['5827291', '88312']) assert.ok(APPROVED_SOURCES.includes(id), `historical app id ${id} (Dec 2025–May 2026 exports) is approved`);
   assert.ok(APPROVED_SOURCES.includes('subscription_contract'), 'the subscription-renewal source (Apr–Jun 2026 export) is approved');
+});
+
+test('sourceIdToReport names only channel/app identifiers', () => {
+  for (const ok of ['web', 'shopify_draft_order', '294412976129', '88312', 'new-app']) assert.equal(sourceIdToReport(ok), ok);
+  for (const no of ['', 'Jane Doe', 'a@b.co', 'www.example.com', '5551234567', '15551234567', 'x'.repeat(65), 'shop/1']) assert.equal(sourceIdToReport(no), null, no);
 });
 
 test('the Worker check rejects raw free text that skipped the reduction', () => {

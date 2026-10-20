@@ -182,9 +182,13 @@ export function prepareShopifyExport(text, { week, exportedAt }) {
 
   const prep = prepareShopifyUpload(rows);
   if (prep.problems.length) {
-    const byRule = {};
-    for (const p of prep.problems) { const k = `${p.column}: ${p.rule}`; byRule[k] = (byRule[k] || 0) + 1; }
-    return { refused: 'sanitization_failed', reason: 'Free text outside the approved form', detail: { problems: byRule } };
+    const byRule = {}, newSources = {};
+    for (const p of prep.problems) {
+      const k = `${p.column}: ${p.rule}`; byRule[k] = (byRule[k] || 0) + 1;
+      if (p.sourceId) newSources[p.sourceId] = (newSources[p.sourceId] || 0) + 1;   // identifier-shaped Source only
+    }
+    return { refused: 'sanitization_failed', reason: 'Free text outside the approved form',
+             detail: { problems: byRule, ...(Object.keys(newSources).length ? { newSources } : {}) } };
   }
   // Belt and braces: the Worker's own checks must pass on what would be uploaded.
   let clean;

@@ -143,7 +143,15 @@ test('C5 Shopify: unknown formats, missing columns, wrong windows and unapproved
   const src = x(rawCsv({ source: 'synthetic-new-app' }));
   assert.equal(src.refused, 'sanitization_failed');
   assert.deepEqual(src.detail.problems, { 'Source: unapproved source value': 2 });
+  assert.deepEqual(src.detail.newSources, { 'synthetic-new-app': 2 }, 'an identifier-shaped Source is named so the list can be extended');
   noPii(JSON.stringify([miss, out, src]), 'refusals');
+  // Source text that is not an identifier is still refused without being named.
+  for (const v of ['Jane Doe', 'jane@example.invalid', '5551234567', 'https://x.example']) {
+    const r = x(rawCsv({ source: v }));
+    assert.equal(r.refused, 'sanitization_failed');
+    assert.equal(r.detail.newSources, undefined, v);
+    assert.ok(!JSON.stringify(r).includes(v), `${v} never appears in the refusal`);
+  }
 });
 
 test('Shopify: an order created the morning after the window is kept and counted; other strays still refuse', () => {
