@@ -145,6 +145,9 @@ test('C5 Shopify: unknown formats, missing columns, wrong windows and unapproved
   assert.deepEqual(src.detail.problems, { 'Source: unapproved source value': 2 });
   assert.deepEqual(src.detail.newSources, { 'synthetic-new-app': 2 }, 'an identifier-shaped Source is named so the list can be extended');
   noPii(JSON.stringify([miss, out, src]), 'refusals');
+  // Once approved, the same kind of order passes (Faire wholesale, Oct 2026).
+  const faire = x(rawCsv({ source: 'faire' }));
+  assert.equal(faire.refused, undefined, JSON.stringify(faire.detail || {}));
   // Source text that is not an identifier is still refused without being named.
   for (const v of ['Jane Doe', 'jane@example.invalid', '5551234567', 'https://x.example']) {
     const r = x(rawCsv({ source: v }));

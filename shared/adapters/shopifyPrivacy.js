@@ -40,13 +40,15 @@ export const DISCOUNT_TOKENS = Object.freeze(['sample', 'influencer']);
 /**
  * Every Source value seen in the Jul 1–Sep 21 export, plus the numeric app ids found in the
  * Dec 22 2025–Feb 15 and May 2026 exports during the production backfill (2026-10-02), and Shopify's
- * subscription-renewal source seen in the Apr 13–Jun 7 2026 export (2026-10-05). Source is
- * a sales-channel / app identifier, never customer text. Extend deliberately.
+ * subscription-renewal source seen in the Apr 13–Jun 7 2026 export (2026-10-05), and the Faire
+ * wholesale channel ("faire"), first seen on one order in the Aug 24–Oct 18 2026 export (named by
+ * the refusal on 2026-10-20). Source is a sales-channel / app identifier, never customer text.
+ * Extend deliberately.
  */
 export const APPROVED_SOURCES = Object.freeze([
   '', 'web', '294517', 'sellbrite', 'subscription_contract_checkout_one', '2329312', '205641',
   '3890849', 'tiktok', 'shopify_draft_order', 'shopify-collective-automatic-payments', '294412976129',
-  '5827291', '88312', 'subscription_contract',
+  '5827291', '88312', 'subscription_contract', 'faire',
 ]);
 /** Channel values the engine maps (Note Attributes "Channel: x"), compared lower-case. */
 export const APPROVED_CHANNELS = Object.freeze([
