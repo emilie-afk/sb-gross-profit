@@ -202,16 +202,30 @@ export async function acceptPinnedCatalog(db, weekStart, { catalogRev, reason },
   return { weekStart, catalogRev: anchor.rev, accepted: true, at, note: 'Recompute and re-verify the week to record the acceptance on a new revision' };
 }
 
+/** The week's newest fulfilled catalog refresh (whatever newer pending or expired requests exist). */
+export const FULFILLED_REFRESH_SQL = "SELECT refresh_id, catalog_rev, resolved_at FROM catalog_refresh WHERE week_start = ?1 AND status = 'fulfilled' AND catalog_rev IS NOT NULL ORDER BY resolved_at DESC, refresh_id DESC LIMIT 1";
+/** Freshness statuses a recompute may inherit from the week's previous revision. */
+export const FRESH_INHERITED = Object.freeze(['current', 'restated', 'reused_accepted', 'intentionally_reused']);
+
 /** Rule 1 or 3. Rule 2 is the caller reusing run.catalog_info; rule 4 is restateCosts(). */
 export async function chooseCatalog(db, weekStart) {
   const anchor = await weekAnchor(db, weekStart);
-  if (anchor) return chooseCatalogFrom({ anchor });
+  if (anchor) return chooseCatalogFrom({ anchor, fulfilled: await db.prepare(FULFILLED_REFRESH_SQL).bind(weekStart).first() });
   const refresh = await latestRefresh(db, weekStart);
   if (refresh?.effective_status === 'fulfilled' && refresh.catalog_rev) return chooseCatalogFrom({ anchor, refresh });
   return chooseCatalogFrom({ anchor, refresh, latest: await latestAcceptedCatalogMeta(db) });
 }
-/** Pure: rules 1 and 3 from the anchor, the week's refresh and the latest accepted catalog. */
-export function chooseCatalogFrom({ anchor, refresh = null, latest = null }) {
+/**
+ * Pure: rules 1 and 3 from the anchor, the week's refresh and the latest accepted catalog.
+ * An UNPUBLISHED week whose previous revision used a catalog that was stale for it takes the week's
+ * fulfilled catalog refresh (`fulfilled`) when there is one: the stale catalog was never pinned by a
+ * publication, and the refresh is the week's own verified-current catalog. A published week keeps its
+ * pinned catalog, and a week whose previous revision was already fresh keeps that catalog.
+ */
+export function chooseCatalogFrom({ anchor, refresh = null, latest = null, fulfilled = null }) {
+  if (anchor && anchor.basis === 'previous_snapshot' && !FRESH_INHERITED.includes(anchor.inheritedFreshness) && fulfilled?.catalog_rev) {
+    return { rev: fulfilled.catalog_rev, basis: 'week_refresh', refreshId: fulfilled.refresh_id };
+  }
   if (anchor) return { rev: anchor.rev, basis: anchor.basis, fromSnapshotId: anchor.fromSnapshotId, refreshId: null,
                       ...(anchor.inheritedFreshness !== undefined ? { inheritedFreshness: anchor.inheritedFreshness } : {}) };
   if (refresh?.effective_status === 'fulfilled' && refresh.catalog_rev) {

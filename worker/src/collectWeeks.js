@@ -26,7 +26,7 @@ import { newId, nowIso, getSettings, selectIn, atomic, SETTINGS_SQL, settingsFro
 import { signManifest, manifestSignatureValid } from './auth.js';
 import { readBytes, gunzipCapped, sha256Text, HEX64 } from './gz.js';
 import { loadShipmentsForOrders, loadHpdForOrders, shipmentsFromRows, hpdFromRows, SHIPMENTS_SQL, SHIPMENT_ITEMS_SQL, HPD_SQL, HPD_ITEMS_SQL } from './store.js';
-import { catalogFreshnessFrom, anchorFromRows, chooseCatalogFrom, refreshFromRow, previousFromRows, ANCHOR_PUBLISHED_SQL, ANCHOR_LATEST_SQL, LATEST_REFRESH_SQL, PREV_PUBLISHED_SQL, PREV_DRAFT_SQL, PINNED_ACCEPTANCE_SQL } from './compute.js';
+import { catalogFreshnessFrom, anchorFromRows, chooseCatalogFrom, refreshFromRow, previousFromRows, ANCHOR_PUBLISHED_SQL, ANCHOR_LATEST_SQL, LATEST_REFRESH_SQL, PREV_PUBLISHED_SQL, PREV_DRAFT_SQL, PINNED_ACCEPTANCE_SQL, FULFILLED_REFRESH_SQL } from './compute.js';
 import { actorFor } from './actor.js';
 import { createRunStatements } from './runs.js';
 import { scrBasisFrom, BASIS_VERSIONS_SQL } from './collectScr.js';
@@ -142,6 +142,7 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
     db.prepare('SELECT aux_n, shipments_hash, hpd_hash, shipments, hpd_orders FROM aux_pin WHERE week_start = ?1').bind(weekStart),
     db.prepare(PINNED_ACCEPTANCE_SQL).bind(weekStart),
     db.prepare(CORRECTION_FOR_WEEK_SQL).bind(weekStart),
+    db.prepare(FULFILLED_REFRESH_SQL).bind(weekStart),
   ]);
   const latestSnapshot = one(b1[11]);
   // The week's aux hashes pinned by POST …/aux-pin while no aux table has changed since (same
@@ -157,7 +158,8 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
   const ordersText = /^[\x20-\x5b\x5d-\x7e]*$/.test(ow.j) ? ow.j : null;
   const ordersList = () => JSON.parse(ow.j);
   const anchor = anchorFromRows(one(b1[4]), one(b1[5]));
-  let info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[6]), now), latest: one(b1[7]) });
+  const fulfilled = one(b1[15]);
+  let info = chooseCatalogFrom({ anchor, refresh: refreshFromRow(one(b1[6]), now), latest: one(b1[7]), fulfilled });
   // An audited cost correction naming this week (migration 0022): applied while the week is still on the
   // correction's original catalog; the correction id travels with the corrected catalog after that.
   info = correctedCatalog(info, { anchor, correction: one(b1[14]) });
@@ -233,6 +235,9 @@ async function assemble(env, weekStart, { rawOrders = false } = {}) {
     shippingReportBasis: basis, publicationAllowedEnv: env.PUBLICATION_ALLOWED === 'true',
     ...(reportingStart && weekStart < reportingStart ? { reportingStart } : {}),
     ...(catalogAcceptance ? { catalogAcceptance } : {}),
+    // The week's fulfilled catalog refresh is an input whatever the anchor (like catalogAcceptance): a refresh
+    // fulfilled after a stale revision makes the week recompute on it, and publishing changes nothing here.
+    ...(fulfilled ? { catalogRefresh: { refreshId: fulfilled.refresh_id, rev: fulfilled.catalog_rev } } : {}),
   } };
 }
 /**

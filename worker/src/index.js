@@ -16,6 +16,7 @@
  */
 import { ApiError, json, errorResponse, withCors, preflight } from './http.js';
 import { openCatalogUpload, putCatalogChunk, sealCatalogUpload } from './catalogUpload.js';
+import { collectCatalogRefresh } from './catalogRefreshCollect.js';
 import { requireSecret, requireReader, login, logout, sessionInfo } from './auth.js';
 import { ingestShopify, ingestShipStation, ingestHpd, ingestCatalog } from './ingest.js';
 import { ingestShippingCostReport, listVersions, getVersion, acceptVersion, rejectVersion, rollbackActivation, getSegments, getEffectiveSummary } from './shippingCost.js';
@@ -108,6 +109,7 @@ async function route(request, env) {
     if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/parts\/(orderindex|sections|orders:\d{1,4}|lines:\d{1,4}|scenario:\d{1,4})$/)) && m === 'PUT') return putResultPart(request, env, g[1], g[2]);
     if ((g = p.match(/^\/v1\/collect\/results\/(snp_[0-9a-f]{20})\/finalize$/)) && m === 'POST') return finalizeResults(request, env, g[1]);
     if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/publish$`))) && m === 'POST') return json(await publishLatestVerified(env, g[1]));
+    if ((g = p.match(new RegExp(`^/v1/collect/weeks/${W}/catalog-refresh$`))) && m === 'POST') return collectCatalogRefresh(env, g[1]);
     throw new ApiError(404, 'not_found', 'No such route');
   }
 

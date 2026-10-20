@@ -336,11 +336,23 @@ npx wrangler secret put ADMIN_SECRET               # admin/compute routes (diffe
 npx wrangler secret put SESSION_SIGNING_KEY        # session HMAC key (different value)
 cd .. && node tools/hash-password.mjs | npx wrangler secret put DASHBOARD_PASSWORD_HASH --config worker/wrangler.toml
 npx wrangler secret put DASHBOARD_READER_SECRET --config worker/wrangler.toml   # dashboard proxy reads (different value; also Netlify's SB_WORKER_READER_SECRET)
+npx wrangler secret put NETLIFY_BUILD_HOOK_URL --config worker/wrangler.toml    # sb-profit build hook (weekly catalog refresh; see below)
 cd worker && npx wrangler deploy
 # C8, MANDATORY: bind the D1 database to this Worker's SB_ENVIRONMENT once (audited);
 # until then only the read-only allowlist is served (login included in the refusals):
 #   POST /v1/admin/environment/bind { "environment": "production", "reason": "…" }
 ```
+
+**Weekly catalog refresh (Free tier, no cron).** Each week's figures need a cost catalog verified current for
+that week, or the gate holds the week (`catalog_stale`). Before computing, the collector asks
+`POST /v1/collect/weeks/:w/catalog-refresh` for every closed, unpublished week in its window. A week that needs
+one gets a `catalog_refresh` and the Worker calls the `sb-profit` build hook (`NETLIFY_BUILD_HOOK_URL`, Netlify →
+Site configuration → Build & deploy → Build hooks, branch `main`) with `{ refreshId, weekStart }`; the build
+rebuilds the catalog from the Products Master sheets and pushes it with that id (`build.py` reads
+`INCOMING_HOOK_BODY`), which fulfils it. The collector waits up to 12 minutes, then computes; an unpublished
+week computed on a stale catalog recomputes on its fulfilled refresh at the next run. Published weeks keep
+their pinned catalogs. Without the secret the route answers `build_hook_unconfigured` and weeks stay held
+until an owner accepts the pinned catalog (`POST /v1/admin/weeks/:w/accept-pinned-catalog`).
 
 The full, ordered checklist (staging first, shadow run, rollback, control
 enablement) is `docs/c8-deployment-package.md`. Staging and production are

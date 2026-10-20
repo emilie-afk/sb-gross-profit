@@ -322,6 +322,37 @@ const VERIFICATION_FINISHED = new Set(['verified', 'mismatch']);
  * any earlier week whose inputs this run touched. Each check is one manifest request; a week
  * whose newest revision already has exactly these inputs is skipped (0 rows written).
  */
+/**
+ * Each closed, unpublished week needs a cost catalog verified current for it. Asks the Worker once per week
+ * (POST /v1/collect/weeks/:w/catalog-refresh): a week that needs one gets a refresh answered by a Netlify
+ * build (it rebuilds the catalog from the sheets and pushes it with the refresh id). Then waits, bounded,
+ * for the requested builds, so this run computes on the refreshed catalog; a refresh still pending is used
+ * by the next run. An older Worker without the route (404) is reported as 'unsupported'. Never throws.
+ * → { [week]: 'not_needed' | 'fulfilled' | 'pending' | 'requested' | 'hook_failed' | 'unsupported' | code }
+ */
+export async function ensureCatalogRefreshes(c, weeks, { waitMs = 12 * 60_000, pollMs = 30_000, sleep = sleepMs, now = () => Date.now() } = {}) {
+  const out = {};
+  const ask = async w => {
+    try { const r = await c.call('POST', `/v1/collect/weeks/${w}/catalog-refresh`, { json: {} }); out[w] = r.status; return r.status; }
+    catch (e) {
+      out[w] = e instanceof WorkerCallError && e.status === 404 && e.code === 'not_found' ? 'unsupported'
+        : (e instanceof WorkerCallError ? e.code : 'network_error');
+      return out[w];
+    }
+  };
+  let waiting = [];
+  for (const w of weeks) if (['requested', 'pending'].includes(await ask(w))) waiting.push(w);
+  const deadline = now() + waitMs;
+  while (waiting.length && now() < deadline) {
+    await sleep(pollMs);
+    const still = [];
+    for (const w of waiting) if (['requested', 'pending'].includes(await ask(w))) still.push(w);
+    waiting = still;
+  }
+  for (const w of waiting) out[w] = 'pending';
+  return out;
+}
+
 export function weeksToCompute({ closedWeek, windowFrom, touched = [] }) {
   const out = new Set(touched.filter(w => w <= closedWeek));
   for (let w = weekStartOf(windowFrom); w <= closedWeek; w = addDaysLocal(w, 7)) out.add(w);
@@ -352,7 +383,7 @@ export const publicationOutcome = p => (p.published ? (p.alreadyPublished ? 'alr
  * Returns codes and counts only.
  */
 export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, triggerSecret = null, closedWeek, fetchImpl = fetch, sleep, verifyWaitMs,
-                                   maxRefreshesPerRun = 12, maxCorrectionWeeksPerRun = 12 }) {
+                                   maxRefreshesPerRun = 12, maxCorrectionWeeksPerRun = 12, catalogRefreshWaitMs = 12 * 60_000, catalogRefreshPollMs = 30_000 }) {
   const base = collectClient({ workerUrl, ingestSecret, fetchImpl, ...(sleep ? { sleep } : {}) });
   // The first deferral answer of this run (quota): every later step stops, and the run reports 'deferred'.
   let deferredBy = null;
@@ -419,6 +450,8 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
     const correctionWeeks = corrections.weeks.map(x => x.weekStart).filter(w => w <= closedWeek);
     const capped = correctionWeeks.slice(0, maxCorrectionWeeksPerRun);
     const weeks = [...new Set([...weeksToCompute({ closedWeek, windowFrom, touched: [...seen.touched] }), ...capped])].sort();
+    // The weeks' catalog refreshes first, so their revisions are computed on a catalog current for them.
+    const catalogRefresh = await ensureCatalogRefreshes(c, weeks, { waitMs: catalogRefreshWaitMs, pollMs: catalogRefreshPollMs, ...(sleep ? { sleep } : {}) });
     const cache = newCache(seen.bodies), results = [];
     for (const w of weeks) {
       if (deferredBy) break;
@@ -533,7 +566,9 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
              ...(correctionWeeks.length ? { correctedWeeks: capped, ...(capped.length < correctionWeeks.length ? { correctionWeeksLeft: correctionWeeks.length - capped.length } : {}) } : {}),
              ...(corrections.status === 'ok' ? {} : { correctionBacklog: { status: corrections.status, ...(corrections.code ? { code: corrections.code } : {}) } }),
              ...(backlog.otherEngine ? { otherEngineDrafts: backlog.otherEngine } : {}), publication,
-             ...(publishRetry ? { publicationRetry: publishRetry } : {}), requests: c.stats.requests, retries: c.stats.retries };
+             ...(publishRetry ? { publicationRetry: publishRetry } : {}),
+             catalogRefresh: Object.fromEntries(Object.entries(catalogRefresh).filter(([, s]) => s !== 'not_needed')),
+             requests: c.stats.requests, retries: c.stats.retries };
   }
   /** The orchestrator's week plan on this path: what the Worker already holds for the closed week. */
   async function weekPlan() {
