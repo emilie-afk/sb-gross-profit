@@ -323,34 +323,33 @@ const VERIFICATION_FINISHED = new Set(['verified', 'mismatch']);
  * whose newest revision already has exactly these inputs is skipped (0 rows written).
  */
 /**
- * Each closed, unpublished week needs a cost catalog verified current for it. Asks the Worker once per week
- * (POST /v1/collect/weeks/:w/catalog-refresh): a week that needs one gets a refresh answered by a Netlify
- * build (it rebuilds the catalog from the sheets and pushes it with the refresh id). Then waits, bounded,
- * for the requested builds, so this run computes on the refreshed catalog; a refresh still pending is used
- * by the next run. An older Worker without the route (404) is reported as 'unsupported'. Never throws.
- * → { [week]: 'not_needed' | 'fulfilled' | 'pending' | 'requested' | 'hook_failed' | 'unsupported' | code }
+ * Each closed, unpublished week needs a cost catalog verified current for it. One request for all the
+ * run's weeks (POST /v1/collect/catalog-refresh): the Worker answers the weeks that need nothing and puts the
+ * rest into ONE batch refresh answered by ONE Netlify build (it rebuilds the catalog from the sheets and pushes
+ * it with the refresh id). Then the run waits, bounded, by polling the refresh's status
+ * (GET /v1/collect/catalog-refresh/:id), which never starts a build; a refresh still pending is used by the next
+ * run. An older Worker without the route (404) is reported as 'unsupported'. Never throws.
+ * → { status, refreshId?, weeks: { [week]: status } }
  */
 export async function ensureCatalogRefreshes(c, weeks, { waitMs = 12 * 60_000, pollMs = 30_000, sleep = sleepMs, now = () => Date.now() } = {}) {
-  const out = {};
-  const ask = async w => {
-    try { const r = await c.call('POST', `/v1/collect/weeks/${w}/catalog-refresh`, { json: {} }); out[w] = r.status; return r.status; }
-    catch (e) {
-      out[w] = e instanceof WorkerCallError && e.status === 404 && e.code === 'not_found' ? 'unsupported'
-        : (e instanceof WorkerCallError ? e.code : 'network_error');
-      return out[w];
-    }
-  };
-  let waiting = [];
-  for (const w of weeks) if (['requested', 'pending'].includes(await ask(w))) waiting.push(w);
+  if (!weeks.length) return { status: 'not_needed', weeks: {} };
+  const codeOf = e => (e instanceof WorkerCallError ? (e.status === 404 && e.code === 'not_found' ? 'unsupported' : e.code) : 'network_error');
+  let r;
+  try { r = await c.call('POST', '/v1/collect/catalog-refresh', { json: { weeks } }); }
+  catch (e) { const code = codeOf(e); return { status: code, weeks: Object.fromEntries(weeks.map(w => [w, code])) }; }
+  const out = Object.fromEntries(Object.entries(r.weeks || {}).map(([w, v]) => [w, v.status]));
+  if (!['requested', 'pending'].includes(r.status) || !r.refreshId) return { status: r.status, ...(r.refreshId ? { refreshId: r.refreshId } : {}), weeks: out };
+  const inBatch = Object.keys(out).filter(w => ['requested', 'pending'].includes(out[w]));
+  let state = 'pending';
   const deadline = now() + waitMs;
-  while (waiting.length && now() < deadline) {
+  while (now() < deadline) {
     await sleep(pollMs);
-    const still = [];
-    for (const w of waiting) if (['requested', 'pending'].includes(await ask(w))) still.push(w);
-    waiting = still;
+    try { state = (await c.call('GET', `/v1/collect/catalog-refresh/${r.refreshId}`)).status; }
+    catch (e) { state = codeOf(e); break; }
+    if (state !== 'pending') break;
   }
-  for (const w of waiting) out[w] = 'pending';
-  return out;
+  for (const w of inBatch) out[w] = state;
+  return { status: state, refreshId: r.refreshId, weeks: out };
 }
 
 export function weeksToCompute({ closedWeek, windowFrom, touched = [] }) {
@@ -567,7 +566,8 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
              ...(corrections.status === 'ok' ? {} : { correctionBacklog: { status: corrections.status, ...(corrections.code ? { code: corrections.code } : {}) } }),
              ...(backlog.otherEngine ? { otherEngineDrafts: backlog.otherEngine } : {}), publication,
              ...(publishRetry ? { publicationRetry: publishRetry } : {}),
-             catalogRefresh: Object.fromEntries(Object.entries(catalogRefresh).filter(([, s]) => s !== 'not_needed')),
+             ...(catalogRefresh.status === 'not_needed' ? {} : { catalogRefresh: { status: catalogRefresh.status,
+                 weeks: Object.fromEntries(Object.entries(catalogRefresh.weeks).filter(([, s]) => s !== 'not_needed')) } }),
              requests: c.stats.requests, retries: c.stats.retries };
   }
   /** The orchestrator's week plan on this path: what the Worker already holds for the closed week. */

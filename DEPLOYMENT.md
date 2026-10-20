@@ -344,15 +344,25 @@ cd worker && npx wrangler deploy
 ```
 
 **Weekly catalog refresh (Free tier, no cron).** Each week's figures need a cost catalog verified current for
-that week, or the gate holds the week (`catalog_stale`). Before computing, the collector asks
-`POST /v1/collect/weeks/:w/catalog-refresh` for every closed, unpublished week in its window. A week that needs
-one gets a `catalog_refresh` and the Worker calls the `sb-profit` build hook (`NETLIFY_BUILD_HOOK_URL`, Netlify →
-Site configuration → Build & deploy → Build hooks, branch `main`) with `{ refreshId, weekStart }`; the build
-rebuilds the catalog from the Products Master sheets and pushes it with that id (`build.py` reads
-`INCOMING_HOOK_BODY`), which fulfils it. The collector waits up to 12 minutes, then computes; an unpublished
-week computed on a stale catalog recomputes on its fulfilled refresh at the next run. Published weeks keep
-their pinned catalogs. Without the secret the route answers `build_hook_unconfigured` and weeks stay held
-until an owner accepts the pinned catalog (`POST /v1/admin/weeks/:w/accept-pinned-catalog`).
+that week, or the gate holds the week (`catalog_stale`). Before computing, the collector sends one
+`POST /v1/collect/catalog-refresh { weeks: [...] }` listing every closed, unpublished week in its window (at
+most 26). The Worker answers per week (`not_needed` with a reason, `pending`, or `queued`) and, for the weeks that
+need it, atomically claims a single batch `catalog_refresh` (`detail.weeks` lists them; the claim is one
+`INSERT … WHERE NOT EXISTS` on in-flight collector batches, so simultaneous requests start at most one build).
+It then calls the `sb-profit` build hook (`NETLIFY_BUILD_HOOK_URL`, Netlify → Site configuration → Build & deploy →
+Build hooks, branch `main`) once, with `{ refreshId, weekStart }` and a 15-second timeout; the build rebuilds the
+catalog from the Products Master sheets and pushes it with that id (`build.py` reads `INCOMING_HOOK_BODY`), which
+fulfils the batch for every listed week. Weeks that become stale while a batch is in flight are reported `queued`
+and go in the next batch. A batch not fulfilled within 45 minutes (a queued, cancelled or failed build) is
+closed as `expired` on the next request, so a late push resolves nothing and a new batch can start.
+The collector polls `GET /v1/collect/catalog-refresh/:id`, which only reads status and never starts a build,
+for up to 12 minutes, then computes; an unpublished week computed on a stale catalog recomputes on its fulfilled
+refresh at the next run. A failed or timed-out hook call marks the batch `rejected` (`build_hook_failed` /
+`build_hook_timeout`) and starts a persisted backoff (15 min, doubling to 6 h); after 5 failures in 24 hours the
+route answers `retry_limit` until the window passes or a hook call succeeds. Published weeks keep their pinned
+catalogs and the publication gates are unchanged. Without the secret the route answers
+`build_hook_unconfigured` and weeks stay held until an owner accepts the pinned catalog
+(`POST /v1/admin/weeks/:w/accept-pinned-catalog`).
 
 The full, ordered checklist (staging first, shadow run, rollback, control
 enablement) is `docs/c8-deployment-package.md`. Staging and production are

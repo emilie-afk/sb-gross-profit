@@ -268,6 +268,7 @@ export async function resolveRefresh(db, refreshId, { rev, accepted, reasons }) 
   const u = await db.prepare('UPDATE catalog_refresh SET status = ?2, catalog_rev = ?3, resolved_at = ?4, detail = ?5 WHERE refresh_id = ?1 AND status = ?6 RETURNING week_start')
     .bind(refreshId, status, accepted ? rev : null, nowIso(), JSON.stringify({ ...prior, reasons: reasons || [], candidateRev: rev }), 'pending').all();
   const won = (u.results || []).length === 1;
-  if (won) await markCyclesChanged(db, [u.results[0].week_start]);
+  // A collector batch answers every week it names (detail.weeks).
+  if (won) await markCyclesChanged(db, [u.results[0].week_start, ...(Array.isArray(prior.weeks) ? prior.weeks : [])]);
   return { refreshId, status: won ? status : 'already_resolved' };
 }

@@ -202,8 +202,14 @@ export async function acceptPinnedCatalog(db, weekStart, { catalogRev, reason },
   return { weekStart, catalogRev: anchor.rev, accepted: true, at, note: 'Recompute and re-verify the week to record the acceptance on a new revision' };
 }
 
-/** The week's newest fulfilled catalog refresh (whatever newer pending or expired requests exist). */
-export const FULFILLED_REFRESH_SQL = "SELECT refresh_id, catalog_rev, resolved_at FROM catalog_refresh WHERE week_start = ?1 AND status = 'fulfilled' AND catalog_rev IS NOT NULL ORDER BY resolved_at DESC, refresh_id DESC LIMIT 1";
+/**
+ * The week's newest fulfilled catalog refresh — its own, or a collector batch naming it in detail.weeks —
+ * whatever newer pending or expired requests exist.
+ */
+export const FULFILLED_REFRESH_SQL = `SELECT refresh_id, catalog_rev, resolved_at FROM catalog_refresh r
+  WHERE r.status = 'fulfilled' AND r.catalog_rev IS NOT NULL
+    AND (r.week_start = ?1 OR EXISTS (SELECT 1 FROM json_each(r.detail, '$.weeks') j WHERE j.value = ?1))
+  ORDER BY r.resolved_at DESC, r.refresh_id DESC LIMIT 1`;
 /** Freshness statuses a recompute may inherit from the week's previous revision. */
 export const FRESH_INHERITED = Object.freeze(['current', 'restated', 'reused_accepted', 'intentionally_reused']);
 
@@ -213,7 +219,7 @@ export async function chooseCatalog(db, weekStart) {
   if (anchor) return chooseCatalogFrom({ anchor, fulfilled: await db.prepare(FULFILLED_REFRESH_SQL).bind(weekStart).first() });
   const refresh = await latestRefresh(db, weekStart);
   if (refresh?.effective_status === 'fulfilled' && refresh.catalog_rev) return chooseCatalogFrom({ anchor, refresh });
-  return chooseCatalogFrom({ anchor, refresh, latest: await latestAcceptedCatalogMeta(db) });
+  return chooseCatalogFrom({ anchor, refresh, latest: await latestAcceptedCatalogMeta(db), fulfilled: await db.prepare(FULFILLED_REFRESH_SQL).bind(weekStart).first() });
 }
 /**
  * Pure: rules 1 and 3 from the anchor, the week's refresh and the latest accepted catalog.
@@ -231,6 +237,8 @@ export function chooseCatalogFrom({ anchor, refresh = null, latest = null, fulfi
   if (refresh?.effective_status === 'fulfilled' && refresh.catalog_rev) {
     return { rev: refresh.catalog_rev, basis: 'week_refresh', refreshId: refresh.refresh_id };
   }
+  // A week with no revision yet that a fulfilled collector batch names (its own latest row may be another refresh).
+  if (fulfilled?.catalog_rev) return { rev: fulfilled.catalog_rev, basis: 'week_refresh', refreshId: fulfilled.refresh_id };
   return { rev: latest?.catalog_rev || null, basis: 'latest_accepted', refreshId: refresh?.refresh_id || null,
            refreshStatus: refresh?.effective_status || 'none' };
 }
