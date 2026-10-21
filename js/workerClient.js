@@ -30,8 +30,10 @@ export async function workerApi(path, { method = 'GET', body, fetchImpl = global
 export const login = (password, o) => workerApi('/auth/login', { method: 'POST', body: { password }, ...o });
 export const logout = o => workerApi('/auth/logout', { method: 'POST', body: {}, ...o });
 export const session = o => workerApi('/auth/session', o);
-export const weeks = o => workerApi('/weeks', o);
-export const snapshot = (weekStart, o) => workerApi(`/snapshot/${weekStart}`, o);
+/** Published weeks; with { provisional: true }, also each unpublished week's latest verified revision (marked provisional). */
+export const weeks = ({ provisional = false, ...o } = {}) => workerApi(`/weeks${provisional ? '?provisional=1' : ''}`, o);
+const pq = (provisional, sep = '?') => (provisional ? `${sep}provisional=1` : '');
+export const snapshot = (weekStart, { provisional = false, ...o } = {}) => workerApi(`/snapshot/${weekStart}${pq(provisional)}`, o);
 /** A week's orders, one page at a time (the Worker serves at most 100 per page). */
 export const orders = (weekStart, { offset = 0, limit = 100, sort = 'date_asc' } = {}, o) =>
   workerApi(`/snapshot/${weekStart}/orders?offset=${Number(offset) || 0}&limit=${Math.min(100, Number(limit) || 100)}&sort=${encodeURIComponent(sort)}`, o);
@@ -45,7 +47,7 @@ export const automationStatus = (weekStart, o) => workerApi(`/automation/status$
  * Part k of a week's stored results (≤ 40 orders and their lines, rows as stored), for the report view.
  * `snapshotId` pins the revision the report started from (409 snapshot_changed if it moved).
  */
-export const reportPart = (weekStart, k, snapshotId, o) =>
-  workerApi(`/snapshot/${weekStart}/report-part/${Number(k) || 0}${snapshotId ? `?snapshot=${encodeURIComponent(snapshotId)}` : ''}`, o);
+export const reportPart = (weekStart, k, snapshotId, { provisional = false, ...o } = {}) =>
+  workerApi(`/snapshot/${weekStart}/report-part/${Number(k) || 0}${snapshotId ? `?snapshot=${encodeURIComponent(snapshotId)}${pq(provisional, '&')}` : pq(provisional)}`, o);
 /** Air Plant Shop scenario input for a published week (the line-item export's per-order mapping; separate from results). */
 export const apsInput = (weekStart, o) => workerApi(`/aps/${weekStart}`, o);

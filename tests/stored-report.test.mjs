@@ -357,3 +357,129 @@ test('switching saved reports: neighbours and the full list of published months 
   assert.equal(SRm.adjacentPeriod('week', '2026-08-10', list, 1), '2026-08-24');
   assert.equal(SRm.adjacentPeriod('week', '2026-08-24', list, -1), '2026-08-10');
 });
+
+test('custom dates: any days, orders by their own date, both ends split, margin recomputed; a full week equals the week', () => {
+  const all = rows.flatMap(w => w.orders);
+  const weekList = rows.map(w => ({ weekStart: w.weekStart, revisions: [{ revision: w.revision, status: 'published' }] }));
+  const sum = (os, f) => os.reduce((s, o) => s + Math.round((o[f] || 0) * 100), 0);
+  // Friday of one week to Thursday of the next: two weeks, each split.
+  const from = SR.addDays(rows[1].weekStart, 4), to = SR.addDays(rows[2].weekStart, 3);
+  const c = SR.checkRange(from, to, weekList, EARLY);
+  assert.ok(c.ok, c.message);
+  const plan = SR.periodPlan('range', c.key, weekList, EARLY);
+  assert.deepEqual(plan.weeks.map(w => [w.weekStart, w.days]), [[rows[1].weekStart, { from, to: SR.addDays(rows[1].weekStart, 6) }], [rows[2].weekStart, { from: rows[2].weekStart, to }]]);
+  assert.deepEqual(plan.gaps, []);
+  const used = rows.filter(w => plan.weeks.some(p => p.weekStart === w.weekStart));
+  const a = SR.aggregate(used, plan.period, EARLY);
+  const mine = all.filter(o => o.business_date >= from && o.business_date <= to);
+  assert.ok(mine.length > 0 && mine.length < used.reduce((n, w) => n + w.orders.length, 0), 'the fixture has orders on both sides of each end');
+  assert.equal(a.totals.orders, mine.length);
+  const gp = sum(mine, 'operating_revenue') - sum(mine, 'known_product_cogs') - sum(mine, 'ship_paid');
+  assert.equal(Math.round(a.totals.operatingRevenue * 100), sum(mine, 'operating_revenue'));
+  assert.equal(Math.round(a.totals.operatingGpAfterShipping * 100), gp);
+  assert.equal(a.totals.operatingGpMargin, Math.round(gp / sum(mine, 'operating_revenue') * 1000) / 10, 'margin from the chosen days');
+  const d = SR.disclosures({ plan, totals: a.totals });
+  assert.ok(d.items.some(i => i.kind === 'split_weeks' && /date range boundary/.test(i.text)));
+  assert.equal(d.complete, true);
+  // Adjacent ranges partition the orders: the same number of days before and after.
+  const prev = SR.adjacentPeriod('range', c.key, weekList, -1, EARLY), next = SR.adjacentPeriod('range', c.key, weekList, 1, EARLY);
+  assert.deepEqual(SR.rangeOf(prev), { from: SR.addDays(from, -7), to: SR.addDays(from, -1) });
+  assert.deepEqual(SR.rangeOf(next), { from: SR.addDays(to, 1), to: SR.addDays(to, 7) });
+  // A range that is exactly a week gives the week's own stored totals.
+  const w = rows[2], k = SR.rangeKey(w.weekStart, SR.addDays(w.weekStart, 6));
+  const aw = SR.aggregate([w], SR.periodPlan('range', k, weekList, EARLY).period, EARLY);
+  for (const f of ['operatingRevenue', 'operatingGpAfterShipping', 'operatingGpMargin', 'knownProductCogs', 'shippingExpense', 'missingCostRevenue', 'shipStationExpenseCoverage']) assert.equal(aw.totals[f], w.head.totals[f], f);
+  assert.equal(aw.totals.orders, w.orders.length);
+});
+
+test('custom dates: Oct 10–16 opens Oct 10–11 and discloses the held week; refusals are explained; labels', () => {
+  const pub = w => ({ weekStart: w, revisions: [{ revision: 4, status: 'published' }] });
+  const list = [pub('2026-09-28'), pub('2026-10-05'), { weekStart: '2026-10-12', revisions: [{ revision: 2, status: 'blocked' }] }];
+  const c = SR.checkRange('2026-10-10', '2026-10-16', list);
+  assert.deepEqual(c, { ok: true, key: '2026-10-10_2026-10-16', range: { from: '2026-10-10', to: '2026-10-16' } });
+  const plan = SR.periodPlan('range', c.key, list);
+  assert.deepEqual(plan.weeks.map(w => [w.weekStart, w.days]), [['2026-10-05', { from: '2026-10-10', to: '2026-10-11' }]]);
+  assert.deepEqual(plan.gaps, [{ from: '2026-10-12', to: '2026-10-16', weekStart: '2026-10-12', reason: 'not_published' }]);
+  const d = SR.disclosures({ plan, totals: { profitabilityStatus: 'complete', missingCostLines: 0 },
+    weekInfo: [{ weekStart: '2026-10-05', revision: 4, verification: 'verified' }] });
+  assert.deepEqual([d.complete, d.status, d.provisional], [false, 'Partial date range', true]);
+  assert.ok(d.items.some(i => i.kind === 'partial_period' && /Partial date range: published weeks cover 2 of 7 days \(Oct 10–Oct 11\)/.test(i.text)));
+  assert.ok(d.items.some(i => i.kind === 'not_published' && /Oct 12–Oct 16 not included/.test(i.text)));
+  // Neighbours: the 7 days before have published days; the 7 after do not.
+  assert.equal(SR.adjacentPeriod('range', c.key, list, -1), '2026-10-03_2026-10-09');
+  assert.equal(SR.adjacentPeriod('range', c.key, list, 1), null);
+  // Refusals in words.
+  const msg = (f, t) => SR.checkRange(f, t, list).message;
+  assert.match(msg('', '2026-10-16'), /Choose a start and an end date/);
+  assert.match(msg('2026-02-30', '2026-03-02'), /Choose a start and an end date/, 'impossible dates refused');
+  assert.match(msg('2026-10-16', '2026-10-10'), /start date is after the end date/);
+  assert.match(msg('2025-10-01', '2026-10-10'), /at most 366 days/);
+  assert.match(msg('2026-07-01', '2026-07-31'), /GP is reported from Aug 3, 2026/);
+  assert.match(msg('2026-10-13', '2026-10-20'), /No published week covers these dates\. Published reports cover Sep 28–Oct 11, 2026/);
+  assert.match(SR.checkRange('2026-10-01', '2026-10-02', []).message, /No published reports yet/);
+  // Days before Aug 3 inside a range are listed, never counted.
+  const early = SR.periodPlan('range', '2026-07-30_2026-08-05', [pub('2026-07-27'), pub('2026-08-03')]);
+  assert.deepEqual(early.weeks.map(w => [w.weekStart, w.days]), [['2026-08-03', { from: '2026-08-03', to: '2026-08-05' }]]);
+  assert.equal(early.gaps[0].reason, 'before_reporting');
+  // Keys and labels.
+  assert.throws(() => SR.rangeOf('2026-10-16_2026-10-10'), /starts on or before/);
+  assert.throws(() => SR.periodPlan('range', 'nonsense', list), /YYYY-MM-DD_YYYY-MM-DD/);
+  assert.equal(SR.rangeLabel({ from: '2026-10-10', to: '2026-10-16' }), 'Oct 10–16, 2026');
+  assert.equal(SR.rangeLabel({ from: '2026-09-28', to: '2026-10-04' }), 'Sep 28–Oct 4, 2026');
+  assert.equal(SR.rangeLabel({ from: '2026-12-28', to: '2027-01-03' }), 'Dec 28, 2026–Jan 3, 2027');
+  assert.equal(SR.rangeLabel({ from: '2026-10-10', to: '2026-10-10' }), 'Oct 10, 2026');
+  assert.deepEqual(SR.publishedSpan(list), { from: '2026-09-28', to: '2026-10-11' });
+});
+
+test('provisional data: published weeks keep their published revision; unpublished weeks use the verified one; missing days stay missing', () => {
+  const list = [
+    { weekStart: '2026-09-28', revisions: [{ revision: 5, status: 'published' }] },
+    // Published week: even if a provisional entry were listed, the published revision is used (never both).
+    { weekStart: '2026-10-05', revisions: [{ revision: 4, status: 'published' }, { revision: 5, status: 'draft', provisional: true }] },
+    { weekStart: '2026-10-12', revisions: [{ revision: 2, status: 'blocked', provisional: true, hold: [{ code: 'ss_coverage', message: 'ShipStation expense coverage 73.6% is below the 95% threshold' }] }] },
+    { weekStart: '2026-10-19', revisions: [{ revision: 1, status: 'blocked' }] },              // not verified: not offered
+  ];
+  const key = '2026-10-03_2026-10-23';
+  const off = SR.periodPlan('range', key, list);
+  assert.deepEqual(off.weeks.map(w => [w.weekStart, w.published.revision, w.provisional]), [['2026-09-28', 5, false], ['2026-10-05', 4, false]]);
+  assert.deepEqual(off.gaps.map(g => [g.from, g.to]), [['2026-10-12', '2026-10-18'], ['2026-10-19', '2026-10-23']]);
+  const on = SR.periodPlan('range', key, list, { provisional: true });
+  assert.deepEqual(on.weeks.map(w => [w.weekStart, w.published.revision, w.provisional, w.days.from, w.days.to]),
+    [['2026-09-28', 5, false, '2026-10-03', '2026-10-04'], ['2026-10-05', 4, false, '2026-10-05', '2026-10-11'], ['2026-10-12', 2, true, '2026-10-12', '2026-10-18']]);
+  assert.deepEqual(on.gaps, [{ from: '2026-10-19', to: '2026-10-23', weekStart: '2026-10-19', reason: 'not_published' }], 'no usable data: still missing, never zero');
+  // Weeks and months never use provisional data.
+  assert.equal(SR.periodPlan('month', '2026-10', list, { provisional: true }).weeks.some(w => w.provisional), false);
+  // A week given twice (published and provisional) is refused by the aggregation.
+  const o = { order_name: '1', business_date: '2026-10-12', operating_revenue: 10, shopify_net_revenue: 10, route_collected: 0, known_product_cogs: 1, ship_collected: 0, ship_paid: 1, ship_paid_ss: 1, ship_paid_hp: 0, requires_ss_rate: 1, has_valid_ss_rate: 1 };
+  assert.throws(() => SR.aggregate([{ weekStart: '2026-10-12', orders: [o], lines: [] }, { weekStart: '2026-10-12', orders: [o], lines: [] }], SR.rangeOf(key)), /given twice/);
+  // Disclosures: Provisional, with dates, coverage, missing costs and the hold; missing days still listed.
+  const weekInfo = on.weeks.map(w => ({ weekStart: w.weekStart, revision: w.published.revision, verification: 'verified', days: w.days, provisional: w.provisional,
+    hold: w.published.hold, coverage: w.provisional ? { ordersRequiringShipStationRate: 200, ordersWithValidShipStationRate: 150, missingCostLines: 2, missingCostRevenue: 31.5 } : null }));
+  const d = SR.disclosures({ plan: on, totals: { profitabilityStatus: 'complete', missingCostLines: 0 }, weekInfo });
+  assert.equal(d.status, 'Provisional: includes unpublished data · partial date range');
+  assert.deepEqual([d.provisional, d.includesUnpublished, d.complete, d.provisionalDays], [true, true, false, [{ from: '2026-10-12', to: '2026-10-18' }]]);
+  assert.match(d.items.find(i => i.kind === 'provisional_week').text,
+    /^Oct 12–Oct 18 \(week of Oct 12, revision 2, verified, not published\) · shipping cost on 150 of 200 orders \(75%\) · product cost missing on 2 lines \(\$31\.50\) · held by: ShipStation expense coverage 73\.6% is below the 95% threshold$/);
+  assert.equal(d.items.find(i => i.kind === 'partial_period').text,
+    'Usable reports cover 16 of 21 days, including published and verified provisional data. Dates without usable data are listed below and excluded from totals.');
+  assert.equal(d.items.find(i => i.kind === 'not_published').text, 'Oct 19–Oct 23 not included: the week of Oct 19 has no published or verified report.');
+  // Published-only: the existing wording.
+  const dOff = SR.disclosures({ plan: off, totals: { profitabilityStatus: 'complete', missingCostLines: 0 }, weekInfo: [] });
+  assert.match(dOff.items.find(i => i.kind === 'partial_period').text, /^Partial date range: published weeks cover 9 of 21 days \(Oct 3–Oct 4, Oct 5–Oct 11\)\. Figures are for those days only\.$/);
+  assert.match(dOff.items.find(i => i.kind === 'not_published').text, /has no published report\.$/);
+  assert.match(SR.exportPreamble({ label: 'x', plan: off, disc: dOff }), /Oct 12–Oct 18 \(not published\); Oct 19–Oct 23 \(not published\)/);
+  // Exports carry the status, the dates and the warnings.
+  const pre = SR.exportPreamble({ label: SR.rangeLabel(SR.rangeOf(key)), plan: on, disc: d });
+  const rows = pre.trimEnd().split('\r\n');
+  assert.deepEqual(rows.slice(0, 5), ['Report,"Oct 3–23, 2026 (Los Angeles dates)"', 'Status,Provisional: includes unpublished data · partial date range',
+    'Included dates,Oct 3–Oct 4; Oct 5–Oct 11; Oct 12–Oct 18', 'Provisional dates (unpublished),Oct 12–Oct 18', 'Missing dates (no usable data; not counted),Oct 19–Oct 23 (no published or verified report)']);
+  assert.ok(rows.includes('Note,"Usable reports cover 16 of 21 days, including published and verified provisional data. Dates without usable data are listed below and excluded from totals."'));
+  assert.ok(!rows.some(r => /published weeks cover/.test(r)), 'no CSV note implies only published data');
+  assert.ok(rows.some(r => r.startsWith('Note,') && /held by: ShipStation expense coverage/.test(r)));
+  assert.ok(pre.endsWith('\r\n\r\n'));
+  // Published-only range: Complete-style status, no provisional rows.
+  const pubOnly = SR.disclosures({ plan: SR.periodPlan('range', '2026-10-05_2026-10-11', list), totals: { profitabilityStatus: 'complete', missingCostLines: 0 },
+    weekInfo: [{ weekStart: '2026-10-05', revision: 4, verification: 'verified', days: { from: '2026-10-05', to: '2026-10-11' } }] });
+  assert.equal(pubOnly.status, 'Complete');
+  assert.match(SR.exportPreamble({ label: 'Oct 5–11, 2026', plan: SR.periodPlan('range', '2026-10-05_2026-10-11', list), disc: pubOnly }), /Provisional dates \(unpublished\),none/);
+});

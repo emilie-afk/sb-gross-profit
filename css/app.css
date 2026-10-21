@@ -457,6 +457,13 @@ a { color: var(--gp-accent); text-decoration: none; }
 .gp-period-switch .gp-btn-ghost:disabled { opacity: .35; cursor: default; background: none; }
 .gp-period-switch select { border: none; background: none; font: inherit; font-size: 13px; font-weight: 600;
   color: var(--gp-text); padding: 4px 2px; max-width: 220px; cursor: pointer; }
+.gp-range-pick[hidden] { display: none; }
+/* The picker takes its own row under the switcher, so the toolbar never grows sideways. */
+.gp-header-actions:has(.gp-range-pick:not([hidden])) { flex-wrap: wrap; justify-content: flex-end; }
+.gp-range-pick { order: 10; flex-basis: 100%; justify-content: flex-end; }
+.gp-range-pick label { white-space: nowrap; font-weight: 600; }
+.gp-range-pick input[type=date] { min-width: 0; }
+.gp-range-prov { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; white-space: nowrap; color: var(--gp-text2); }
 .gp-switch-msg { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--gp-warn); text-align: right; }
 @media (max-width: 900px) {
   .gp-header-actions { flex-wrap: wrap; }

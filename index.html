@@ -82,6 +82,8 @@ button{cursor:pointer;font-family:inherit}
 .wl-card p{color:var(--wl-muted);font-size:1rem;margin-bottom:12px}
 .wl-btn{width:100%;padding:14px 18px;border-radius:9px;font-size:1rem;font-weight:600;border:1px solid #64748b;background:#1e2a42;color:var(--wl-text)}
 .wl-btn:hover{border-color:var(--wl-em2)}
+.wl-link{margin-top:10px;background:none;border:0;padding:4px;color:var(--wl-muted);font:inherit;font-size:.95rem;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
+.wl-link:hover,.wl-link:focus-visible{color:var(--wl-text)}
 .wl-btn.primary{background:var(--wl-em);border-color:var(--wl-em);color:#fff}
 .wl-btn.primary:hover{background:var(--wl-em2);color:var(--wl-em-ink)}
 .wl-btn:focus-visible,.wl-account:focus-visible,.wl-back:focus-visible{outline:3px solid var(--wl-em2);outline-offset:3px}
@@ -319,6 +321,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <h2 id="wl-weekly">Weekly reports</h2>
           <p>Open saved reports by week.</p>
           <button type="button" class="wl-btn primary" onclick="openSaved('week')">View weekly reports</button>
+          <button type="button" class="wl-link" onclick="openSaved('range')">Or choose your own dates</button>
         </section>
         <section class="wl-card" aria-labelledby="wl-monthly">
           <div class="wl-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4"/><path d="M7.5 13.5h1M11.5 13.5h1M15.5 13.5h1M7.5 17h1M11.5 17h1M15.5 17h1" stroke-width="2.2"/></svg></div>
@@ -344,7 +347,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     <!-- Saved reports: read from the production Worker; nothing is uploaded. -->
     <div class="upload-card wide" id="auto-reports-card">
       <h2 id="saved-title" tabindex="-1">Saved reports</h2>
-      <p>Weeks collected, computed and independently verified by the weekly automation, by week or by calendar month (Los Angeles time). Saved reports update automatically; no upload needed.</p>
+      <p>Weeks collected, computed and independently verified by the weekly automation, by week, by calendar month or for dates you choose (Los Angeles time). Saved reports update automatically; no upload needed.</p>
       <div id="auto-reports"><p class="meta">Loading…</p></div>
     </div>
     <div class="upload-card" id="upload-card">
@@ -462,6 +465,15 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <select id="stored-period" onchange="switchStored(this.value)" aria-label="Saved report period"></select>
             <button type="button" class="gp-btn-ghost" id="stored-next" onclick="stepStored(1)" aria-label="Next period">&rsaquo;</button>
           </div>
+          <form class="gp-period gp-range-pick" id="stored-range" hidden onsubmit="openStoredRange(); return false">
+            <label for="stored-range-from">Custom dates</label>
+            <input type="date" id="stored-range-from" required aria-label="Custom report, from">
+            <span class="t3" aria-hidden="true">&rarr;</span>
+            <input type="date" id="stored-range-to" required aria-label="Custom report, to">
+            <label class="gp-range-prov" title="Weeks calculated and independently verified but not yet published"><input type="checkbox" id="stored-range-prov"> Include provisional data</label>
+            <button type="submit" class="gp-btn" style="padding:4px 10px">Open</button>
+            <button type="button" class="gp-btn-ghost" onclick="closeStoredRange()" aria-label="Close custom dates" style="font-size:12px;padding:2px 6px">&times;</button>
+          </form>
           <div class="gp-period">
             <label for="filter-date-from" title="Filters the order and SKU tables only">Order-table filter</label>
             <input type="date" id="filter-date-from" onchange="onPeriodInput('from')" aria-label="Order-table date filter, from" aria-describedby="date-filter-note">
@@ -1483,7 +1495,7 @@ import { toCsvText } from './shared/adapters/shopifyCsv.js';
 import { unmatchedShippingOrders, exportPeriodOf, shippingCostBridge, filterUnmatched, unmatchedCsv, UNMATCHED_REASON, EXCLUDED_PENDING_MATCH } from './js/unmatchedShipping.js';
 import { catalogRevOf } from './shared/catalog.js';
 import { initScenarioView, renderScenarioView, scenarioCurrentActual } from './js/scenarioUI.js';
-import { automationStatus, snapshot as apiSnapshot, reportPart as apiReportPart, weekStatus as apiWeekStatus, apsInput as apiApsInput } from './js/workerClient.js';
+import { automationStatus, snapshot as apiSnapshot, reportPart as apiReportPart, weekStatus as apiWeekStatus, apsInput as apiApsInput, weeks as apiWeeks } from './js/workerClient.js';
 import { apsOrders, apsCoverage, mergeApsInputs, apsProjection, apsExclusions, apsDiscount, csvApsCosts } from './js/apsModel.js';
 import { buildApsMap } from './shared/apsMapping.js';
 import { createWeeklyReports, reportFlagsText, failureMessage as reportFailure } from './js/weeklyReports.js';
@@ -1507,7 +1519,7 @@ window.loadAutomationStatus = async () => {
 };
 // Automated weekly reports (read-only, same-origin Worker proxy).
 // Created now, loaded only when someone opens the weekly or monthly list (the welcome screen fetches nothing).
-{ const el = document.getElementById('auto-reports'); if (el) window.weeklyReports = createWeeklyReports(el, undefined, { onOpen: (k, key, list) => openStoredReport(k, key, list) }); }
+{ const el = document.getElementById('auto-reports'); if (el) window.weeklyReports = createWeeklyReports(el, undefined, { onOpen: (k, key, list, opts) => openStoredReport(k, key, list, opts) }); }
 
 // ─── Welcome screen and navigation: Home → Weekly / Monthly lists → report; Home → Upload → CSV report ──
 const SCREEN_IDS = ['welcome-screen', 'upload-screen', 'dashboard'];
@@ -1579,28 +1591,63 @@ function syncStoredSwitch(st) {
   const box = document.getElementById('stored-switch');
   if (!box) return;
   box.hidden = !st;
-  if (!st) { switchMsg(''); return; }
+  if (!st) { switchMsg(''); const f = document.getElementById('stored-range'); if (f) f.hidden = true; return; }
   const months = SR.monthsOf(st.weekList), weeks = SR.weeksOf(st.weekList);
   const opt = (v, label) => `<option value="${v}"${v === `${st.kind}:${st.key}` ? ' selected' : ''}>${esc(label)}</option>`;
   document.getElementById('stored-period').innerHTML =
-    `<optgroup label="Monthly">${months.map(m => opt(`month:${m}`, SR.monthLabel(m))).join('')}</optgroup>`
+    `<optgroup label="Custom dates">${st.kind === 'range' ? opt(`range:${st.key}`, SR.rangeLabel(SR.rangeOf(st.key)) + (st.plan.provisional ? ' · with provisional data' : '')) : ''}<option value="range:pick">Choose dates…</option></optgroup>`
+    + `<optgroup label="Monthly">${months.map(m => opt(`month:${m}`, SR.monthLabel(m))).join('')}</optgroup>`
     + `<optgroup label="Weekly">${weeks.map(w => opt(`week:${w}`, `Week of ${SR.fmtRange(SR.weekRange(w))}`)).join('')}</optgroup>`;
-  const prev = SR.adjacentPeriod(st.kind, st.key, st.weekList, -1), next = SR.adjacentPeriod(st.kind, st.key, st.weekList, 1);
-  const label = k => !k ? '' : (st.kind === 'month' ? SR.monthLabel(k) : `week of ${SR.fmtRange(SR.weekRange(k))}`);
+  const ao = { provisional: !!st.plan.provisional };
+  const prev = SR.adjacentPeriod(st.kind, st.key, st.weekList, -1, ao), next = SR.adjacentPeriod(st.kind, st.key, st.weekList, 1, ao);
   for (const [id, k, word] of [['stored-prev', prev, 'Previous'], ['stored-next', next, 'Next']]) {
     const b = document.getElementById(id); b.disabled = !k; b.dataset.key = k || '';
-    b.title = k ? `${word}: ${label(k)}` : `No ${word.toLowerCase()} ${st.kind === 'month' ? 'month' : 'week'} with a published report`;
+    b.title = k ? `${word}: ${periodLabel(st.kind, k)}` : `No ${word.toLowerCase()} ${SR.PERIOD_NOUN[st.kind]} with a published report`;
   }
+}
+/** Custom-date reports: every export starts with the report's status, included, provisional and missing dates and its warnings. */
+function gpCsvWithProvenance(csv) {
+  const st = storedState;
+  return st?.kind === 'range' ? SR.exportPreamble({ label: SR.rangeLabel(SR.rangeOf(st.key)), plan: st.plan, disc: st.disc }) + csv : csv;
+}
+window.gpCsvWithProvenance = gpCsvWithProvenance;
+function periodLabel(kind, key) {
+  return kind === 'month' ? SR.monthLabel(key) : kind === 'range' ? SR.rangeLabel(SR.rangeOf(key)) : `week of ${SR.fmtRange(SR.weekRange(key))}`;
 }
 window.switchStored = v => {
   const st = storedState; if (!st) return;
   const [kind, key] = String(v).split(':');
-  if ((kind === 'month' || kind === 'week') && key && !(kind === st.kind && key === st.key)) openStoredReport(kind, key, st.weekList);
+  if (kind === 'range' && key === 'pick') { syncStoredSwitch(st); return showStoredRange(); }   // the select goes back to the open report
+  if ((kind === 'month' || kind === 'week' || kind === 'range') && key && !(kind === st.kind && key === st.key)) openStoredReport(kind, key, st.weekList);
+};
+/** Custom dates from inside a saved report: prefilled with the open report's days, limited to published days. */
+function showStoredRange() {
+  const st = storedState, form = document.getElementById('stored-range'); if (!st || !form) return;
+  const p = st.plan.period;
+  const from = document.getElementById('stored-range-from'), to = document.getElementById('stored-range-to');
+  // No min/max on the inputs: checkRange explains a refusal in words; days without a published week are disclosed.
+  from.value = p.from; to.value = p.to;
+  document.getElementById('stored-range-prov').checked = !!st.plan.provisional;
+  form.hidden = false; switchMsg(''); from.focus();
+}
+window.closeStoredRange = () => { const f = document.getElementById('stored-range'); if (f) f.hidden = true; switchMsg(''); };
+window.openStoredRange = async () => {
+  const st = storedState; if (!st) return;
+  const provisional = document.getElementById('stored-range-prov').checked;
+  let list = st.weekList;
+  if (provisional) {
+    try { list = (await apiWeeks({ provisional: true })).weeks || []; }
+    catch (e) { switchMsg(reportFailure(e)); return; }
+  }
+  const c = SR.checkRange(document.getElementById('stored-range-from').value, document.getElementById('stored-range-to').value, list, { provisional });
+  if (!c.ok) { switchMsg(c.message); return; }
+  if (c.key === st.key && st.kind === 'range' && provisional === !!st.plan.provisional) { window.closeStoredRange(); return; }
+  openStoredReport('range', c.key, list, { provisional });
 };
 window.stepStored = dir => {
   const st = storedState; if (!st) return;
-  const k = SR.adjacentPeriod(st.kind, st.key, st.weekList, dir);
-  if (k) openStoredReport(st.kind, k, st.weekList);
+  const k = SR.adjacentPeriod(st.kind, st.key, st.weekList, dir, { provisional: !!st.plan.provisional });
+  if (k) openStoredReport(st.kind, k, st.weekList, { provisional: !!st.plan.provisional });
 };
 /**
  * Order-table date filter. It narrows the order and SKU tables only; summary cards, charts, the Provisional
@@ -1629,7 +1676,7 @@ window.onPeriodInput = which => {
     const p = st.plan.period, el = which === 'to' ? toEl : fromEl;
     if (el.value && (el.value < p.from || el.value > p.to)) {
       el.value = el.value < p.from ? p.from : p.to;
-      switchMsg('That date is outside this report. Use the period selector to open another week or month.');
+      switchMsg('That date is outside this report. Use the period selector to open another week, month or custom dates.');
     } else switchMsg('');
   }
   filterTable();
@@ -1639,17 +1686,17 @@ const GAP_TEXT = { gate_failed: 'held by the publication checks', compute_pendin
   verification_mismatch: 'verification found a difference', shipping_report_partial: 'shipping cost report incomplete', week_open: 'week not finished',
   shopify_export_pending: 'orders not collected yet' };
 
-async function openStoredReport(kind, key, weekList) {
+async function openStoredReport(kind, key, weekList, { provisional = false } = {}) {
   const switching = !!storedState;
-  showLoading(kind === 'month' ? `Loading ${SR.monthLabel(key)}…` : `Loading the week of ${key}…`);
+  showLoading(kind === 'week' ? `Loading the week of ${key}…` : `Loading ${periodLabel(kind, key)}…`);
   try {
-    const plan = SR.periodPlan(kind, key, weekList);
-    if (!plan.weeks.length) throw Object.assign(new Error('No published week covers this period.'), { status: 0 });
+    const plan = SR.periodPlan(kind, key, weekList, { provisional });
+    if (!plan.weeks.length) throw Object.assign(new Error(plan.provisional ? 'No published or verified week covers these dates.' : 'No published week covers this period.'), { status: 0 });
     // Why each missing week is missing (codes only), and each included week's report flags.
     await Promise.all(plan.gaps.filter(g => g.reason === 'not_published').map(async g => {
       try { const st = await apiWeekStatus(g.weekStart); const code = (st.pending || []).map(p => p.code || p)[0]; if (code) g.detail = GAP_TEXT[code] || String(code).replace(/_/g, ' '); } catch { /* reason unknown: stays generic */ }
     }));
-    const client = { snapshot: w => apiSnapshot(w), reportPart: (w, k, id) => apiReportPart(w, k, id) };
+    const client = { snapshot: (w, p) => apiSnapshot(w, { provisional: p }), reportPart: (w, k, id, p) => apiReportPart(w, k, id, { provisional: p }) };
     const data = await SR.loadPeriod(client, plan);
     const statuses = await Promise.all(data.weeks.map(w => apiWeekStatus(w.weekStart).catch(() => null)));
     const agg = SR.aggregate(data.weeks, plan.period);
@@ -1660,6 +1707,7 @@ async function openStoredReport(kind, key, weekList) {
         { refundsNotPerOrder: w.head?.revenueBridge?.components?.refundsBeyondProductRevenue || 0 });
     });
     const weekInfo = data.weeks.map((w, i) => ({ weekStart: w.weekStart, revision: w.revision, verification: w.head?.verification?.status,
+      days: w.days, provisional: w.provisional, hold: w.hold, coverage: w.provisional ? SR.weekCoverage(w, w.days) : null,
       catalog: w.head?.catalog, partialWeek: w.head?.totals?.labels?.partialWeek || null, flagsText: reportFlagsText(statuses[i]) }));
     const disc = SR.disclosures({ plan, totals: agg.totals, weekInfo });
     // Air Plant Shop scenario input: the line-item export's per-order mapping, stored apart from results (one bounded
@@ -1687,8 +1735,8 @@ async function openStoredReport(kind, key, weekList) {
     _costTables = { mcgCosts: mcgT, productCosts: prodT, additionalCosts: { ...hpSupp, ...sbT }, hpByName: hpByNameT, skuAlias: aliasT, mcgExtra: mcgExtraT,
                     vendorCosts: Object.keys(vcT).length ? vcT : null, vendorIndex: Object.keys(viT).length ? viT : null, mcgPack: packT };
     initScenarioView(document.getElementById('view-scenario'), () => allLines);
-    showReportShell(kind === 'month' ? `${SR.monthLabel(key)} (Los Angeles time)` : `Week of ${key} (Mon–Sun, Los Angeles time)`, plan.period);
-    switchMsg('');
+    showReportShell(kind === 'week' ? `Week of ${key} (Mon–Sun, Los Angeles time)` : `${periodLabel(kind, key)} (Los Angeles time)`, plan.period);
+    window.closeStoredRange();
   } catch (e) {
     const msg = e.status === 0 ? e.message : (e.status === 409 ? 'A week got a newer revision while loading. Open the report again.' : reportFailure(e));
     if (switching && storedState) { switchMsg(msg); syncStoredSwitch(storedState); }   // the current report stays open
@@ -1759,11 +1807,11 @@ function renderStoredDisclosure(st) {
   card.hidden = false;
   document.getElementById('c3-disclosure-title').textContent = st.disc.provisional ? 'Provisional result' : 'Result';
   document.getElementById('c3-disclosure-meta').textContent =
-    `Automatic report · ${st.disc.status} · ${st.disc.covered} of ${st.disc.periodDays} days · latest published revision of each week`;
+    `Automatic report · ${st.disc.status} · ${st.disc.covered} of ${st.disc.periodDays} days · ${st.disc.includesUnpublished ? 'published revision of each week, else its latest verified revision' : 'latest published revision of each week'}`;
   const tone = t => t === 'neg' ? 'var(--gp-neg)' : t === 'warn' ? 'var(--gp-warn)' : 'inherit';
   document.getElementById('c3-disclosure-body').style.cssText = 'padding:12px 18px;font-size:13px;line-height:1.6;display:flex;flex-direction:column;gap:6px';
   document.getElementById('c3-disclosure-body').innerHTML =
-    `<div><strong>${esc(st.disc.headline)}.</strong> Computed weekly from the collected sources, independently verified and published; nothing was uploaded here. ${st.kind === 'month' ? 'Monthly totals count the orders dated in the month; margins are recomputed from the month’s amounts.' : ''}</div>`
+    `<div><strong>${esc(st.disc.headline)}.</strong> ${st.disc.includesUnpublished ? 'Computed from collected sources and independently verified. Published and unpublished dates are identified below.' : 'Computed weekly from the collected sources, independently verified and published; nothing was uploaded here.'} ${st.kind === 'month' ? 'Monthly totals count the orders dated in the month; margins are recomputed from the month’s amounts.' : st.kind === 'range' ? 'Totals count the orders dated in the chosen days; margins are recomputed from those days’ amounts.' : ''}</div>`
     + st.disc.items.map(i => `<div data-tone="${esc(i.tone || '')}" style="color:${tone(i.tone)}">${esc(i.text)}</div>`).join('');
   syncDisclosure();
   card.style.borderColor = st.disc.provisional ? 'var(--gp-warn)' : '';
@@ -1845,7 +1893,7 @@ function renderRefundsCard() {
   if (!refundKnownInSource) notes.push('The Shopify export has no Refunded Amount column: refund status is unknown for every order.');
   if (s.unknown) notes.push(`${s.unknown} order${s.unknown === 1 ? '' : 's'} with no product revenue cannot be shown to be without a refund (a refund beyond product revenue in that week is not stored per order); they are not counted as refunded or as without refunds.`);
   if (allocated) notes.push('Automatic reports store each order\'s refund as its line shares (product and Route), so per-order amounts are allocated refunds. A refund beyond an order\'s lines (shipping, other) is kept per week, not per order: it is added once as "Not allocated to an order" and not spread over orders, channels or vendors.');
-  for (const b of s.boundaryNotAssigned) notes.push(`Week of ${b.weekStart} crosses this ${storedState.kind}'s boundary: its ${fmt(b.amount)} refunded beyond order lines is not assigned to this ${storedState.kind} or the next (the order dates are not stored), so the total below leaves it out.`);
+  for (const b of s.boundaryNotAssigned) notes.push(`Week of ${b.weekStart} crosses this ${SR.PERIOD_NOUN[storedState.kind]}'s boundary: its ${fmt(b.amount)} refunded beyond order lines is not assigned to this ${SR.PERIOD_NOUN[storedState.kind]} or the next (the order dates are not stored), so the total below leaves it out.`);
   if (!s.hasDates || !s.hasReasons) notes.push(`Refund ${!s.hasDates && !s.hasReasons ? 'dates and reasons are' : !s.hasDates ? 'dates are' : 'reasons are'} not in the source data, so they are not shown.`);
   el.innerHTML = `<div class="gp-card-head"><h3>Refunds</h3><span class="meta">${s.refundedOrders.toLocaleString()} of ${s.orders.toLocaleString()} orders · already included in revenue and GP</span>
       <div class="right"><button class="gp-btn gp-btn-sm" onclick="gotoScreen('orders');setRefundFilter('refunded')">Refunded orders</button></div></div>
@@ -2614,7 +2662,7 @@ window.downloadUnmatchedCSV = () => {
   if (!c3Preview?.unmatchedList) return;
   const csv = unmatchedCsv(filterUnmatched(c3Preview.unmatchedList.orders, _unmatchedState));
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+  a.href = URL.createObjectURL(new Blob([gpCsvWithProvenance(csv)], { type: 'text/csv' }));
   a.download = 'unmatched_shipping_orders.csv';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
@@ -2650,7 +2698,7 @@ function renderDashboard(lines) {
   gpEl.textContent = fmt(s.totalGp);
   gpEl.style.color = s.totalGp >= 0 ? 'var(--gp-pos)' : 'var(--gp-neg)';
   document.getElementById('c-gpm').textContent = st
-    ? `${st.agg.totals.operatingGpMargin === null ? '—' : st.agg.totals.operatingGpMargin.toFixed(1) + '%'} margin${st.kind === 'month' ? ' (from the month’s amounts)' : ''}`
+    ? `${st.agg.totals.operatingGpMargin === null ? '—' : st.agg.totals.operatingGpMargin.toFixed(1) + '%'} margin${st.kind === 'month' ? ' (from the month’s amounts)' : st.kind === 'range' ? ' (from these days’ amounts)' : ''}`
     : `${s.gpPct.toFixed(1)}% GP margin`;
 
   document.getElementById('c-revenue').textContent     = fmt(s.totalRevenue);
@@ -2703,8 +2751,14 @@ function storedAlerts(lines, s, st) {
   const t = st.agg.totals, need = t.ordersRequiringShipStationRate, have = t.ordersWithValidShipStationRate;
   if (need && have / need < 0.95) out.push({ kicker: 'Shipping cost coverage', tone: 'var(--gp-neg)', value: `${(have / need * 100).toFixed(1)}%`,
     body: `${need - have} of ${need} orders have no ShipStation cost yet; their shipping is not in GP, so GP after shipping is overstated.`, action: 'Open shipping', onClick: "gotoScreen('shipping')" });
-  if (!st.disc.complete) out.push({ kicker: `Partial ${st.kind}`, tone: 'var(--gp-warn)', value: `${st.disc.covered} of ${st.disc.periodDays} days`,
-    body: 'Some days have no published weekly report; the figures cover the published days only.', action: 'See coverage', onClick: "toggleDisclosure(true);document.getElementById('c3-disclosure').scrollIntoView({behavior:'smooth'})" });
+  if (st.disc.includesUnpublished) {
+    const n = st.disc.provisionalDays.reduce((k, d) => k + SR.daysBetween(d.from, d.to), 0);
+    out.push({ kicker: 'Unpublished data included', tone: 'var(--gp-warn)', value: `${n} of ${st.disc.periodDays} days`,
+      body: `${st.disc.provisionalDays.map(SR.fmtRange).join(', ')}: verified but not published yet, so these figures can still change. Viewing or exporting this report publishes nothing.`,
+      action: 'See why', onClick: "toggleDisclosure(true);document.getElementById('c3-disclosure').scrollIntoView({behavior:'smooth'})" });
+  }
+  if (!st.disc.complete) out.push({ kicker: `Partial ${SR.PERIOD_NOUN[st.kind]}`, tone: 'var(--gp-warn)', value: `${st.disc.covered} of ${st.disc.periodDays} days`,
+    body: st.disc.includesUnpublished ? 'Some days have no usable report. Figures include only the published and verified provisional dates listed below.' : 'Some days have no published weekly report; the figures cover the published days only.', action: 'See coverage', onClick: "toggleDisclosure(true);document.getElementById('c3-disclosure').scrollIntoView({behavior:'smooth'})" });
   return out;
 }
 
@@ -3069,7 +3123,7 @@ window.downloadMissingCosts = () => {
   }
   const csv = rows.map(r => r.map(v => `"${(v||'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = 'missing_costs.csv';
   a.click();
 };
@@ -3099,7 +3153,7 @@ window.downloadOrderViewCSV = () => {
   }
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = `orders_${suffix ? suffix + '_' : ''}${from}_to_${to}.csv`;
   a.click();
 };
@@ -3126,7 +3180,7 @@ window.downloadDetailCSV = () => {
   const from = document.getElementById('filter-date-from').value || 'all';
   const to   = document.getElementById('filter-date-to').value   || 'all';
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = `order_detail_${from}_to_${to}.csv`;
   a.click();
 };
@@ -3156,7 +3210,7 @@ window.downloadSubCSV = () => {
   const from = document.getElementById('filter-date-from').value || 'all';
   const to   = document.getElementById('filter-date-to').value   || 'all';
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = `subscriptions_${from}_to_${to}.csv`;
   a.click();
 };
@@ -3627,7 +3681,7 @@ window.downloadSubPLCSV = () => {
   })];
   const csv = csvRows.map(row => row.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = `sub_pl_by_type.csv`;
   a.click();
 };
@@ -3957,7 +4011,7 @@ window.downloadLowMarginCSV = () => {
   }
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = `low_margin_below_${threshold}pct.csv`;
   a.click();
 };
@@ -4038,7 +4092,7 @@ window.downloadLowSkuCSV = function() {
   ])];
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = `low_margin_sku_below_${threshold}pct.csv`;
   a.click();
 };
@@ -4096,7 +4150,7 @@ window.downloadGiftCardCSV = function() {
   ])];
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = 'gift_cards.csv';
   a.click();
 };
@@ -4256,7 +4310,7 @@ window.downloadInfluencerCSV = () => {
   }
   const csv = rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = 'influencer_orders.csv';
   a.click();
 };
@@ -4410,7 +4464,7 @@ window.downloadFreeShipCSV = () => {
   }
   const csv = rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = 'free_ship_orders.csv';
   a.click();
 };
@@ -4670,7 +4724,7 @@ window.downloadHpdCsv = () => {
   }
   const csv = rows.map(r=>r.map(v=>`"${String(v??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = 'hpd_shipping_pl.csv';
   a.click();
 };
@@ -4783,7 +4837,7 @@ function shipCsv(rows, name, cols) {
   const out = [hdr, ...rows.map(o => [o.orderNum, o.date, ...cols.map(c => c.raw(o)), -o.revenueLost, o.profitDelta ?? '',
     o.gp === null || o.profitDelta === null ? '' : o.gp, o.gp === null || o.profitDelta === null ? '' : Math.round((o.gp + o.profitDelta) * 100) / 100])];
   const csv = out.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
-  Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv), download: name }).click();
+  Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv)), download: name }).click();
 }
 
 const FS_COLS = [{ h: 'MCG subtotal', v: o => fmt(o.mcgSubtotal), raw: o => o.mcgSubtotal }];
@@ -5133,7 +5187,7 @@ window.downloadApsCsv = function() {
       o.apsCogs != null ? o.apsCogs.toFixed(2) : '', o.apsShipCost != null ? o.apsShipCost.toFixed(2) : '', o.apsGp != null ? o.apsGp.toFixed(2) : '',
       o.included ? 'yes' : 'no', o.reason || ''])];
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
-  Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv), download: 'aps_orders.csv' }).click();
+  Object.assign(document.createElement('a'), { href: 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv)), download: 'aps_orders.csv' }).click();
 };
 
 // ─── APS Shipping Surcharge Projection ───────────────────────────
@@ -5632,7 +5686,7 @@ window.downloadProjCsv = function() {
   }
   const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
-  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = 'projection.csv';
   a.click();
 };

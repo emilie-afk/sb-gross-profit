@@ -1150,7 +1150,7 @@ function exportSkuCsv() {
     s.missingCostLines,
   ]);
   const csv = [head, ...rows].map(r => r.map(v => `"${String(v ?? '')}"`).join(',')).join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
+  const blob = new Blob([globalThis.gpCsvWithProvenance ? globalThis.gpCsvWithProvenance(csv) : csv], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = `scenario_sku_analysis_${new Date().toISOString().slice(0, 10)}.csv`;

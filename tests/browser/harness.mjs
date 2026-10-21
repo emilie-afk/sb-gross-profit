@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 const R = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const PLAYWRIGHT = path.join(R, 'automation/shopify-export/node_modules/playwright/index.mjs');
 
-export async function start() {
+export async function start({ unpublished = [] } = {}) {
   const { dataset, freeTierRun } = await import(`${R}/worker/test/freeTierHarness.mjs`);
   const { shopifyRows } = await import(`${R}/tests/fixtures-free-tier.mjs`);
   const { toCsvText } = await import(`${R}/shared/adapters/shopifyCsv.js`);
@@ -23,7 +23,8 @@ export async function start() {
   const run = await freeTierRun(d, { verify: true });
   const env = run.env;
   env.DASHBOARD_READER_SECRET = crypto.randomBytes(30).toString('base64url');
-  env.DB.db.prepare("UPDATE snapshot SET status = 'published', published_at = computed_at WHERE storage = 'chunked'").run();
+  // Every week is published, except `unpublished` ones (left as computed and verified, for provisional reports).
+  env.DB.db.prepare("UPDATE snapshot SET status = 'published', published_at = computed_at WHERE storage = 'chunked' AND week_start NOT IN (SELECT value FROM json_each(?))").run(JSON.stringify(unpublished));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sbgp-browser-'));
   const days = (Date.parse(d.win.to) - Date.parse(d.win.from)) / 864e5 + 1;
   const { rows } = shopifyRows({ n: 400, from: d.win.from, days, prefix: '7' });
@@ -50,6 +51,6 @@ export async function start() {
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${server.address().port}`;
-  return { url, gateCookie: crypto.createHash('sha256').update(SITE_PW).digest('hex'), csvFile,
+  return { url, gateCookie: crypto.createHash('sha256').update(SITE_PW).digest('hex'), csvFile, env,
            close: () => new Promise(r => { server.close(() => r()); fs.rmSync(dir, { recursive: true, force: true }); }) };
 }

@@ -10,7 +10,7 @@
  * Every value is escaped; money is shown as stored.
  */
 import * as api from './workerClient.js';
-import { monthsOf, periodPlan, monthLabel, fmtRange, daysBetween } from './storedReport.js';
+import { monthsOf, periodPlan, monthLabel, fmtRange, daysBetween, addDays, checkRange, publishedSpan, rangeLabel } from './storedReport.js';
 
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = n => (typeof n === 'number' && Number.isFinite(n)) ? (n < 0 ? '−$' : '$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
@@ -99,7 +99,31 @@ export function renderMonthList(weeks) {
 
 export function renderSelector(mode) {
   const b = (m, label) => `<button type="button" aria-pressed="${mode === m}" onclick="weeklyReports.setMode('${m}')">${label}</button>`;
-  return `<div class="gp-seg" role="group" aria-label="Report period" style="margin-bottom:10px">${b('week', 'Weekly')}${b('month', 'Monthly')}</div>`;
+  return `<div class="gp-seg" role="group" aria-label="Report period" style="margin-bottom:10px">${b('week', 'Weekly')}${b('month', 'Monthly')}${b('range', 'Custom dates')}</div>`;
+}
+
+/**
+ * Custom dates: any start and end day (Los Angeles), opened like a month: orders count by their own date, weeks
+ * crossing either end are split, margins are recomputed from the range's amounts, and days no published week
+ * covers are listed. `value` keeps what was typed; `error` is shown above the button.
+ */
+export function renderRangeForm(weeks, { from = '', to = '', error = '', provisional = false } = {}) {
+  const list = Array.isArray(weeks) ? weeks : [];
+  const span = publishedSpan(list);
+  if (!span) return '<p class="meta">No published reports yet: custom dates open once a week is published.</p>';
+  const f = from || addDays(span.to, -6), t = to || span.to;
+  return `<form class="gp-range-form" onsubmit="weeklyReports.openRange(); return false" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem">From
+        <input type="date" id="wr-range-from" value="${esc(f)}" required></label>
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem">To
+        <input type="date" id="wr-range-to" value="${esc(t)}" required></label>
+      <label style="display:flex;gap:6px;align-items:center;font-size:.85rem;padding-bottom:6px" title="Weeks calculated and independently verified but not yet published">
+        <input type="checkbox" id="wr-range-prov"${provisional ? ' checked' : ''}> Include provisional data</label>
+      <button type="submit" class="logout-btn">Open report</button>
+    </form>
+    ${error ? `<p class="error-msg" role="alert" style="margin-top:8px">${esc(error)}</p>` : ''}
+    <p class="meta" style="margin-top:10px">Published reports cover ${esc(rangeLabel(span))} (Los Angeles dates). Orders count by their own date: weeks crossing either end are split and margins are recomputed from the chosen days. Days without a published week are listed in the report and left out of its figures.
+      <strong>Include provisional data</strong> adds weeks that are calculated and independently verified but not yet published; the report is then marked Provisional and lists those days, their coverage and why each week is held. Viewing or exporting it publishes nothing.</p>`;
 }
 
 function breakdownTable(title, rows) {
@@ -194,15 +218,29 @@ export function createWeeklyReports(root, client = api, { onOpen = null } = {}) 
   let orders = [], weekList = null, mode = 'week';
   const show = html => { root.innerHTML = html; };
   const fail = e => show(`<p class="meta">${esc(failureMessage(e))}</p>`);
-  const list = () => show(renderSelector(mode) + (mode === 'month' ? renderMonthList(weekList) : renderWeekList(weekList)));
+  const list = (form = {}) => show(renderSelector(mode) + (mode === 'month' ? renderMonthList(weekList) : mode === 'range' ? renderRangeForm(weekList, form) : renderWeekList(weekList)));
   const ctl = {
     async load() {
       try { weekList = (await client.weeks()).weeks || []; list(); } catch (e) { fail(e); }
     },
-    setMode(m) { mode = m === 'month' ? 'month' : 'week'; if (weekList) list(); },
-    /** Open the full report (the CSV report's screens, fed by stored results) for a week or an LA calendar month. */
-    async openReport(kind, key) {
-      if (onOpen) return onOpen(kind, key, weekList || []);
+    setMode(m) { mode = m === 'month' || m === 'range' ? m : 'week'; if (weekList) list(); },
+    /** Custom dates: validate the form, then open the range (or show why it cannot open). */
+    async openRange() {
+      const from = root.querySelector('#wr-range-from')?.value || '', to = root.querySelector('#wr-range-to')?.value || '';
+      const provisional = !!root.querySelector('#wr-range-prov')?.checked;
+      let src = weekList || [];
+      if (provisional) {
+        // Published weeks plus each unpublished week's latest verified revision (marked provisional by the Worker).
+        try { src = (await client.weeks({ provisional: true })).weeks || []; }
+        catch (e) { list({ from, to, provisional, error: failureMessage(e) }); return null; }
+      }
+      const c = checkRange(from, to, src, { provisional });
+      if (!c.ok) { list({ from, to, provisional, error: c.message }); root.querySelector('#wr-range-from')?.focus(); return null; }
+      return ctl.openReport('range', c.key, provisional ? { provisional: true, weekList: src } : {});
+    },
+    /** Open the full report (the CSV report's screens, fed by stored results) for a week, an LA calendar month or a date range. */
+    async openReport(kind, key, { provisional = false, weekList: src = null } = {}) {
+      if (onOpen) return onOpen(kind, key, src || weekList || [], { provisional });
       if (kind === 'week') return ctl.openWeek(key);
     },
     get weekList() { return weekList; },

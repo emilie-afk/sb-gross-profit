@@ -9,14 +9,20 @@
  *   storedLines(orders, lines)      → line items in the calculator's shape (for the shared screens)
  *   aggregate(weeks, period)        → period totals, breakdowns and a summarize()-shaped summary,
  *                                     from the orders whose business date (Los Angeles) is in the period
- *   periodPlan(kind, key, weekList) → which weeks a week or a calendar month needs, and its gaps
+ *   periodPlan(kind, key, weekList) → which weeks a week, a calendar month or a date range needs, and its gaps
  *   monthsOf(weekList)              → the calendar months that published weeks touch
+ *   rangeKey / rangeOf / checkRange → a custom date range ('YYYY-MM-DD_YYYY-MM-DD'), parsed and validated
  *
  * Rules (automatic reports):
+ *   - A custom date range (any days, at most MAX_RANGE_DAYS) follows the month rules exactly.
  *   - A month is a calendar month in Los Angeles time. Orders are assigned by their own business date,
  *     so a week that crosses a month boundary is split; whole weekly totals are never added and
  *     margins are never averaged: every margin is recomputed from the period's amounts.
  *   - Each week contributes its latest published revision only (one snapshot per week).
+ *   - Custom dates with "Include provisional data": a week with NO published revision contributes its latest
+ *     independently verified revision instead (the Worker marks it provisional). Never both: a week with a
+ *     published revision is always read at it. The report is then Provisional, and every provisional day,
+ *     its week's shipping-cost coverage, missing costs and publication holds are listed. Reading it publishes nothing.
  *   - A missing cost is never $0: product GP is known-cost GP, and the revenue without a cost is
  *     disclosed. Days not covered by a published week are disclosed; a partial period is never complete.
  *   - Orders dated before PUBLICATION_EARLIEST (the first week with period-accurate costs) are never
@@ -54,6 +60,51 @@ export function monthRange(month) {
   return { from: `${month}-01`, to: iso(Date.UTC(y, m, 0)) };
 }
 export const weekRange = w => ({ from: w, to: addDays(w, 6) });
+
+/** Custom date ranges: inclusive Los Angeles days, keyed 'YYYY-MM-DD_YYYY-MM-DD'. */
+export const MAX_RANGE_DAYS = 366;
+export const PERIOD_NOUN = { week: 'week', month: 'month', range: 'date range' };
+const realDate = s => isDate(s) && iso(ms(s)) === s;
+export const rangeKey = (from, to) => `${from}_${to}`;
+export function rangeOf(key) {
+  const [from, to] = String(key || '').split('_');
+  if (!realDate(from) || !realDate(to)) throw new Error('a date range is YYYY-MM-DD_YYYY-MM-DD');
+  if (from > to) throw new Error('a date range starts on or before its end');
+  if (daysBetween(from, to) > MAX_RANGE_DAYS) throw new Error(`a date range is at most ${MAX_RANGE_DAYS} days`);
+  return { from, to };
+}
+/** "Oct 10–16, 2026" (years shown once, or on both ends across a new year). */
+export function rangeLabel(r) {
+  const y = d => d.slice(0, 4), md = d => fmtDay(d);
+  if (r.from === r.to) return `${md(r.from)}, ${y(r.from)}`;
+  if (y(r.from) !== y(r.to)) return `${md(r.from)}, ${y(r.from)}–${md(r.to)}, ${y(r.to)}`;
+  const sameMonth = r.from.slice(0, 7) === r.to.slice(0, 7);
+  return `${md(r.from)}–${sameMonth ? Number(r.to.slice(8)) : md(r.to)}, ${y(r.to)}`;
+}
+/** Days that published weeks cover (from the earliest reporting day), or null when none. */
+export function publishedSpan(weekList, { earliest = PUBLICATION_EARLIEST } = {}) {
+  const w = weeksOf(weekList, { earliest }).slice().sort();
+  if (!w.length) return null;
+  return { from: w[0] < earliest ? earliest : w[0], to: addDays(w[w.length - 1], 6) };
+}
+/**
+ * Can this range be opened? → { ok: true, key, range } or { ok: false, message } (plain words for the form).
+ * It needs at least one day a published week covers; other days are opened as gaps and disclosed.
+ */
+export function checkRange(from, to, weekList, { earliest = PUBLICATION_EARLIEST, provisional = false } = {}) {
+  if (!realDate(from) || !realDate(to)) return { ok: false, message: 'Choose a start and an end date.' };
+  if (from > to) return { ok: false, message: 'The start date is after the end date.' };
+  if (daysBetween(from, to) > MAX_RANGE_DAYS) return { ok: false, message: `Choose at most ${MAX_RANGE_DAYS} days.` };
+  if (to < earliest) return { ok: false, message: `GP is reported from ${fmtDay(earliest)}, ${earliest.slice(0, 4)}; choose dates from then on.` };
+  const key = rangeKey(from, to);
+  const plan = periodPlan('range', key, weekList, { earliest, provisional });
+  if (!plan.weeks.length) {
+    const span = publishedSpan(weekList, { earliest });
+    const what = provisional ? 'No published or verified week covers these dates.' : 'No published week covers these dates.';
+    return { ok: false, message: span ? `${what} Published reports cover ${rangeLabel(span)}.` : 'No published reports yet.' };
+  }
+  return { ok: true, key, range: { from, to } };
+}
 const overlap = (a, b) => { const from = a.from > b.from ? a.from : b.from, to = a.to < b.to ? a.to : b.to; return from <= to ? { from, to } : null; };
 const fmtDay = d => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 export const fmtRange = r => (r.from === r.to ? fmtDay(r.from) : `${fmtDay(r.from)}–${fmtDay(r.to)}`);
@@ -61,6 +112,8 @@ export const monthLabel = m => new Date(`${m}-01T00:00:00Z`).toLocaleDateString(
 
 /** The latest published revision of a week in /v1/weeks (revisions listed newest first), or null. */
 export const publishedOf = w => (w?.revisions || []).find(r => r.status === 'published') || null;
+/** The revision a report reads for a week: the published one; with `provisional`, else the Worker's provisional one. */
+export const usableOf = (w, { provisional = false } = {}) => publishedOf(w) || (provisional ? (w?.revisions || []).find(r => r.provisional) || null : null);
 
 /** Calendar months (YYYY-MM, newest first) that published weeks touch, never before PUBLICATION_EARLIEST. */
 export function monthsOf(weekList, { earliest = PUBLICATION_EARLIEST } = {}) {
@@ -82,6 +135,13 @@ export function weeksOf(weekList, { earliest = PUBLICATION_EARLIEST } = {}) {
 
 /** The neighbouring period of the same kind that has a report (dir -1 = earlier, +1 = later), or null. */
 export function adjacentPeriod(kind, key, weekList, dir, opts) {
+  if (kind === 'range') {
+    // The same number of days right before or after, when a published week covers any of them.
+    const r = rangeOf(key), n = daysBetween(r.from, r.to);
+    const next = dir > 0 ? { from: addDays(r.to, 1), to: addDays(r.to, n) } : { from: addDays(r.from, -n), to: addDays(r.from, -1) };
+    const k = rangeKey(next.from, next.to);
+    return periodPlan('range', k, weekList, opts).weeks.length ? k : null;   // opts.provisional: verified weeks count too
+  }
   const list = (kind === 'month' ? monthsOf(weekList, opts) : weeksOf(weekList, opts)).slice().sort();   // oldest first
   const i = list.indexOf(key);
   if (i < 0) { const later = list.filter(k => (dir > 0 ? k > key : k < key)); return later.length ? (dir > 0 ? later[0] : later[later.length - 1]) : null; }
@@ -89,13 +149,13 @@ export function adjacentPeriod(kind, key, weekList, dir, opts) {
 }
 
 /**
- * What a period needs. kind 'week' (key = Monday) or 'month' (key = YYYY-MM).
+ * What a period needs. kind 'week' (key = Monday), 'month' (key = YYYY-MM) or 'range' (key = 'YYYY-MM-DD_YYYY-MM-DD').
  * → { kind, key, period, weeks: [{ weekStart, days: {from,to} (inside the period), published }],
  *     gaps: [{ from, to, weekStart, reason }] (days of the period no published week covers) }
  */
-export function periodPlan(kind, key, weekList, { earliest = PUBLICATION_EARLIEST } = {}) {
-  const period = kind === 'month' ? monthRange(key) : weekRange(key);
-  if (kind !== 'month' && kind !== 'week') throw new Error('kind must be week or month');
+export function periodPlan(kind, key, weekList, { earliest = PUBLICATION_EARLIEST, provisional = false } = {}) {
+  if (kind !== 'month' && kind !== 'week' && kind !== 'range') throw new Error('kind must be week, month or range');
+  const period = kind === 'month' ? monthRange(key) : kind === 'range' ? rangeOf(key) : weekRange(key);
   if (kind === 'week' && mondayOf(key) !== key) throw new Error('a week starts on a Monday');
   const byWeek = new Map((weekList || []).map(w => [w.weekStart, w]));
   const weeks = [], gaps = [];
@@ -105,11 +165,11 @@ export function periodPlan(kind, key, weekList, { earliest = PUBLICATION_EARLIES
     if (early) gaps.push({ ...early, weekStart: w, reason: 'before_reporting' });
     const counted = overlap(days, { from: earliest, to: '9999-12-31' });
     if (!counted) continue;
-    const published = publishedOf(byWeek.get(w));
-    if (published) weeks.push({ weekStart: w, days: counted, published });
+    const published = usableOf(byWeek.get(w), { provisional: provisional && kind === 'range' });
+    if (published) weeks.push({ weekStart: w, days: counted, published, provisional: !!published.provisional });
     else gaps.push({ ...counted, weekStart: w, reason: 'not_published' });
   }
-  return { kind, key, period, weeks, gaps, earliest };
+  return { kind, key, period, weeks, gaps, earliest, provisional: !!provisional && kind === 'range' };
 }
 
 /**
@@ -315,16 +375,19 @@ export function aggregate(weeks, period, { earliest = PUBLICATION_EARLIEST } = {
  */
 export function disclosures({ plan, totals, weekInfo = [] }) {
   const out = [];
+  const noun = PERIOD_NOUN[plan.kind] || plan.kind;
   const periodDays = daysBetween(plan.period.from, plan.period.to);
   const covered = plan.weeks.reduce((n, w) => n + daysBetween(w.days.from, w.days.to), 0);
   const complete = covered === periodDays;
   if (!complete) out.push({ kind: 'partial_period', tone: 'warn',
-    text: `Partial ${plan.kind}: published weeks cover ${covered} of ${periodDays} days (${plan.weeks.map(w => fmtRange(w.days)).join(', ') || 'none'}). Figures are for those days only.` });
+    text: plan.provisional
+      ? `Usable reports cover ${covered} of ${periodDays} days, including published and verified provisional data. Dates without usable data are listed below and excluded from totals.`
+      : `Partial ${noun}: published weeks cover ${covered} of ${periodDays} days (${plan.weeks.map(w => fmtRange(w.days)).join(', ') || 'none'}). Figures are for those days only.` });
   for (const g of plan.gaps) out.push({ kind: g.reason, tone: 'warn', text: g.reason === 'before_reporting'
     ? `${fmtRange(g)} not included: GP is not reported before ${fmtDay(plan.earliest || PUBLICATION_EARLIEST)} (costs before then are not period-accurate).`
-    : `${fmtRange(g)} not included: the week of ${fmtDay(g.weekStart)} has no published report${g.detail ? ` (${g.detail})` : ''}.` });
+    : `${fmtRange(g)} not included: the week of ${fmtDay(g.weekStart)} has no ${plan.provisional ? 'published or verified' : 'published'} report${g.detail ? ` (${g.detail})` : ''}.` });
   if (plan.weeks.some(w => w.days.from !== w.weekStart || w.days.to !== addDays(w.weekStart, 6)))
-    out.push({ kind: 'split_weeks', tone: 'info', text: `Weeks crossing the ${plan.kind} boundary are split by order date; only orders dated inside the ${plan.kind} count.` });
+    out.push({ kind: 'split_weeks', tone: 'info', text: `Weeks crossing the ${noun} boundary are split by order date; only orders dated inside the ${noun} count.` });
   if (totals.missingCostLines) out.push({ kind: 'missing_cost', tone: 'warn',
     text: `Product cost missing on ${totals.missingCostLines} line${totals.missingCostLines === 1 ? '' : 's'} (${money(totals.missingCostRevenue)} of revenue; ${totals.costCoverageByRevenue ?? '—'}% of product revenue has a cost). Operating GP includes that revenue but deducts no cost for it, so it is overstated by the missing costs. Product GP in the channel and vendor tables counts only lines with a known cost.` });
   const need = totals.ordersRequiringShipStationRate, have = totals.ordersWithValidShipStationRate;
@@ -332,18 +395,53 @@ export function disclosures({ plan, totals, weekInfo = [] }) {
     text: `Shipping cost missing on ${need - have} of ${need} orders (${pct(have, need)}% covered). Their shipping expense is not in GP (not counted as $0), so GP after shipping is overstated.` });
   if (totals.hpdOrdersPassThrough) out.push({ kind: 'hpd_pass_through', tone: 'info',
     text: `HP Dropship shipping assumed equal to Shopify shipping collected on ${totals.hpdOrdersPassThrough} order${totals.hpdOrdersPassThrough === 1 ? '' : 's'} (pass-through; HPD actuals not received).` });
+  const unpublished = weekInfo.filter(w => w.provisional);
+  if (unpublished.length) {
+    out.push({ kind: 'provisional_data', tone: 'warn', text: `Includes unpublished data: ${unpublished.map(w => fmtRange(w.days || weekRange(w.weekStart))).join(', ')} ${unpublished.length === 1 ? 'comes' : 'come'} from ${unpublished.length === 1 ? 'a week' : 'weeks'} not yet published (the latest independently verified revision). These figures can still change; the weekly publication checks are unchanged.` });
+    for (const w of unpublished) {
+      const c = w.coverage || {};
+      const bits = [`${fmtRange(w.days || weekRange(w.weekStart))} (week of ${fmtDay(w.weekStart)}, revision ${w.revision}, verified, not published)`];
+      if (c.ordersRequiringShipStationRate) bits.push(`shipping cost on ${c.ordersWithValidShipStationRate} of ${c.ordersRequiringShipStationRate} orders (${pct(c.ordersWithValidShipStationRate, c.ordersRequiringShipStationRate)}%)`);
+      if (c.missingCostLines) bits.push(`product cost missing on ${c.missingCostLines} line${c.missingCostLines === 1 ? '' : 's'} (${money(c.missingCostRevenue)})`);
+      bits.push(w.hold?.length ? `held by: ${w.hold.map(h => h.message || h.code).join('; ')}` : 'not published yet');
+      out.push({ kind: 'provisional_week', tone: 'warn', text: bits.join(' · ') });
+    }
+  }
   for (const w of weekInfo) {
-    const bits = [`week of ${fmtDay(w.weekStart)}: revision ${w.revision}`, w.verification === 'verified' ? 'independently verified' : `verification ${String(w.verification || 'pending').replace(/_/g, ' ')}`];
+    const bits = [`week of ${fmtDay(w.weekStart)}: revision ${w.revision}${w.provisional ? ' (provisional, not published)' : ''}`, w.verification === 'verified' ? 'independently verified' : `verification ${String(w.verification || 'pending').replace(/_/g, ' ')}`];
     if (w.catalog?.basis === 'cost_restatement') bits.push('costs corrected (audited cost correction)');
     if (w.catalog?.freshness?.status === 'reused_accepted') bits.push('pinned cost catalog accepted for this period');
     if (w.partialWeek) bits.push(`partial week (orders from ${w.partialWeek.from})`);
     if (w.flagsText) bits.push(w.flagsText);
     out.push({ kind: 'week', tone: 'info', text: bits.join(' · ') });
   }
-  const provisional = !complete || totals.profitabilityStatus !== PROFITABILITY_STATUS.COMPLETE || weekInfo.some(w => w.verification !== 'verified');
-  return { items: out, complete, covered, periodDays, provisional,
+  const provisional = !complete || totals.profitabilityStatus !== PROFITABILITY_STATUS.COMPLETE || weekInfo.some(w => w.verification !== 'verified') || unpublished.length > 0;
+  const unpubText = 'Provisional: includes unpublished data';
+  return { items: out, complete, covered, periodDays, provisional, includesUnpublished: unpublished.length > 0,
+    provisionalDays: unpublished.map(w => w.days || weekRange(w.weekStart)),
     headline: provisional ? 'Provisional operating GP after shipping' : 'Operating GP after shipping',
-    status: !complete ? `Partial ${plan.kind}` : (provisional ? 'Provisional' : 'Complete') };
+    status: unpublished.length ? (complete ? unpubText : `${unpubText} · partial ${noun}`) : (!complete ? `Partial ${noun}` : (provisional ? 'Provisional' : 'Complete')) };
+}
+
+/** One week's shipping-cost coverage and missing costs over the days it contributes (for provisional notes). */
+export function weekCoverage(week, days, opts) {
+  const t = aggregate([week], days, opts).totals;
+  return { ordersRequiringShipStationRate: t.ordersRequiringShipStationRate, ordersWithValidShipStationRate: t.ordersWithValidShipStationRate,
+    missingCostLines: t.missingCostLines, missingCostRevenue: t.missingCostRevenue };
+}
+
+/**
+ * The rows a custom-date report's exports start with: what the figures are, which days they cover, which days
+ * are provisional or missing, and every warning. → CSV text ending in a blank line (prepended to the export).
+ */
+export function exportPreamble({ label, plan, disc }) {
+  const q = v => { const t = String(v ?? ''); return /[",\n\r]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const rows = [['Report', `${label} (Los Angeles dates)`], ['Status', disc.status],
+    ['Included dates', plan.weeks.map(w => fmtRange(w.days)).join('; ') || 'none'],
+    ['Provisional dates (unpublished)', disc.provisionalDays?.length ? disc.provisionalDays.map(fmtRange).join('; ') : 'none'],
+    ['Missing dates (no usable data; not counted)', plan.gaps.length ? plan.gaps.map(g => `${fmtRange(g)} (${g.reason === 'before_reporting' ? 'before reporting starts' : g.detail || (plan.provisional ? 'no published or verified report' : 'not published')})`).join('; ') : 'none'],
+    ...disc.items.filter(i => i.tone !== 'info' || i.kind === 'week').map(i => ['Note', i.text])];
+  return rows.map(r => r.map(q).join(',')).join('\r\n') + '\r\n\r\n';
 }
 
 const money = n => (n === null || n === undefined || Number.isNaN(n)) ? '—'
@@ -357,13 +455,17 @@ const money = n => (n === null || n === undefined || Number.isNaN(n)) ? '—'
 export async function loadPeriod(client, plan, { concurrency = 4 } = {}) {
   const weeks = [];
   for (const w of plan.weeks) {
-    const head = await client.snapshot(w.weekStart);
-    const first = await client.reportPart(w.weekStart, 0, head.snapshotId);
+    // A provisional plan reads unpublished weeks with ?provisional=1; the Worker still answers a published
+    // revision whenever the week has one (it may have been published since the list was read).
+    const prov = !!plan.provisional;
+    const head = await client.snapshot(w.weekStart, prov);
+    const first = await client.reportPart(w.weekStart, 0, head.snapshotId, prov);
     const parts = [first];
     const ks = Array.from({ length: Math.max(0, first.parts - 1) }, (_, i) => i + 1);
     for (let i = 0; i < ks.length; i += concurrency)
-      parts.push(...await Promise.all(ks.slice(i, i + concurrency).map(k => client.reportPart(w.weekStart, k, head.snapshotId))));
-    weeks.push({ weekStart: w.weekStart, snapshotId: head.snapshotId, revision: head.revision, head,
+      parts.push(...await Promise.all(ks.slice(i, i + concurrency).map(k => client.reportPart(w.weekStart, k, head.snapshotId, prov))));
+    weeks.push({ weekStart: w.weekStart, snapshotId: head.snapshotId, revision: head.revision, head, days: w.days,
+      provisional: head.status !== 'published' && !!head.provisional, hold: head.provisional ? (head.hold || []) : [],
       orders: parts.flatMap(p => p.o?.orders || []), lines: parts.flatMap(p => p.l?.lines || []), skuVendors: first.skuVendors || {} });
   }
   return { plan, weeks };

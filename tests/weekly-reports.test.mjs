@@ -98,3 +98,41 @@ test('weekly reports: coverage disclosures say what is missing (never as $0), th
                    'cost catalog pinned to this week', 'unusually large shipping rows', 'Late cost corrections on 2026-09-22']) assert.ok(html.includes(t), t);
   assert.equal(reportFlagsText({ sources: { shippingReport: { flags: [], changedDates: [] } } }), null);
 });
+
+test('custom dates: the selector offers it; the form defaults to the last published week, says what is covered and escapes errors', async () => {
+  const { renderSelector, renderRangeForm } = await import('../js/weeklyReports.js');
+  assert.match(renderSelector('range'), /aria-pressed="true"[^>]*>Custom dates</);
+  const pub = w => ({ weekStart: w, revisions: [{ revision: 1, status: 'published' }] });
+  const list = [pub('2026-09-28'), pub('2026-10-05'), { weekStart: '2026-10-12', revisions: [{ revision: 1, status: 'blocked' }] }];
+  const html = renderRangeForm(list);
+  assert.match(html, /id="wr-range-from" value="2026-10-05"/);
+  assert.match(html, /id="wr-range-to" value="2026-10-11"/);
+  assert.match(html, /Published reports cover Sep 28–Oct 11, 2026/);
+  assert.doesNotMatch(html, /\bmax="/, 'later days can be chosen; they are disclosed, not blocked');
+  const err = renderRangeForm(list, { from: '2026-10-16', to: '2026-10-10', error: '<b>bad</b>' });
+  assert.match(err, /value="2026-10-16"/);
+  assert.match(err, /role="alert"[^>]*>&lt;b&gt;bad&lt;\/b&gt;/);
+  assert.match(renderRangeForm([]), /No published reports yet/);
+});
+
+test('custom dates: "Include provisional data" is off by default, kept on re-render, and explained', async () => {
+  const { renderRangeForm } = await import('../js/weeklyReports.js');
+  const list = [{ weekStart: '2026-10-05', revisions: [{ revision: 1, status: 'published' }] }];
+  assert.match(renderRangeForm(list), /<input type="checkbox" id="wr-range-prov">/);
+  assert.match(renderRangeForm(list, { provisional: true }), /id="wr-range-prov" checked/);
+  assert.match(renderRangeForm(list), /verified but not yet published; the report is then marked Provisional.*Viewing or exporting it publishes nothing/);
+});
+
+test('custom dates: with the toggle, the provisional week list is read and passed on; without it, never', async () => {
+  const calls = [], opened = [];
+  const pub = { weekStart: '2026-10-05', revisions: [{ revision: 4, status: 'published' }] };
+  const prov = { weekStart: '2026-10-12', revisions: [{ revision: 2, status: 'blocked', provisional: true }] };
+  const fake = { weeks: async (o = {}) => { calls.push(!!o.provisional); return { weeks: o.provisional ? [prov, pub] : [pub] }; } };
+  const root = { innerHTML: '', querySelector: sel => ({ '#wr-range-from': { value: '2026-10-10' }, '#wr-range-to': { value: '2026-10-16' }, '#wr-range-prov': { checked: root.prov } }[sel] || null) };
+  const ctl = createWeeklyReports(root, fake, { onOpen: (...a) => opened.push(a) });
+  await ctl.load(); ctl.setMode('range');
+  root.prov = false; await ctl.openRange();
+  root.prov = true; await ctl.openRange();
+  assert.deepEqual(calls, [false, true]);
+  assert.deepEqual(opened.map(([k, key, l, o]) => [k, key, l.length, o.provisional]), [['range', '2026-10-10_2026-10-16', 1, false], ['range', '2026-10-10_2026-10-16', 2, true]]);
+});
