@@ -3,6 +3,10 @@
  * =========================
  * Dashboard sessions see PUBLISHED snapshots only. Admin callers may add
  * ?includeDrafts=1 to review drafts and blocked revisions before go-live.
+ * ?provisional=1 (custom-date reports, "Include provisional data"): for a week with NO published
+ * revision, its latest independently VERIFIED revision is readable too, marked provisional and with the
+ * publication checks that hold it. Read only: nothing here publishes, writes or changes a gate; a week
+ * with a published revision is always read at that revision; weeks before PUBLICATION_EARLIEST_WEEK never.
  * Nothing here returns raw source rows in bulk: order detail is paginated or
  * fetched one order at a time.
  */
@@ -21,7 +25,19 @@ function statuses(url, reader) {
   return drafts ? ['published', 'draft', 'blocked', 'superseded'] : ['published'];
 }
 
-async function pickSnapshot(db, weekStart, url, reader) {
+/** Provisional reads: requested explicitly, never for weeks before the publication start. */
+const provisionalWanted = url => url.searchParams.get('provisional') === '1';
+const earliestOf = env => (WEEK_RE.test(env?.PUBLICATION_EARLIEST_WEEK || '') ? env.PUBLICATION_EARLIEST_WEEK : '0000-00-00');
+/** The latest verified collector revision of a week no revision of which is published. */
+export const PROVISIONAL_WHERE = `s.storage = 'chunked' AND s.status IN ('draft', 'blocked')
+    AND EXISTS (SELECT 1 FROM verify_report vv WHERE vv.snapshot_id = s.snapshot_id AND vv.status = 'verified')
+    AND NOT EXISTS (SELECT 1 FROM snapshot p WHERE p.week_start = s.week_start AND p.status = 'published')
+    AND NOT EXISTS (SELECT 1 FROM snapshot n JOIN verify_report nv ON nv.snapshot_id = n.snapshot_id
+      WHERE n.week_start = s.week_start AND n.revision > s.revision AND n.storage = 'chunked' AND n.status IN ('draft', 'blocked') AND nv.status = 'verified')`;
+/** The publication checks that hold a revision (codes and plain messages from its gate). */
+const holdOf = gate => (P(gate, {})?.failures || []).map(f => ({ code: String(f.code || ''), message: String(f.message || '') }));
+
+async function pickSnapshot(db, weekStart, url, reader, env = null) {
   if (!WEEK_RE.test(weekStart)) throw new ApiError(400, 'bad_query', 'week must be YYYY-MM-DD');
   const allowed = statuses(url, reader);
   const rev = url.searchParams.get('revision');
@@ -32,7 +48,12 @@ async function pickSnapshot(db, weekStart, url, reader) {
     ? db.prepare(`SELECT s.*${V} WHERE s.week_start = ?1 AND s.revision = ?2 AND s.status IN (SELECT value FROM json_each(?3))`).bind(weekStart, parseInt(rev, 10), JSON.stringify(allowed))
     : db.prepare(`SELECT s.*${V} WHERE s.week_start = ?1 AND s.status IN (SELECT value FROM json_each(?2))
         ORDER BY CASE s.status WHEN 'published' THEN 0 ELSE 1 END, s.revision DESC LIMIT 1`).bind(weekStart, JSON.stringify(allowed));
-  const row = await q.first();
+  let row = await q.first();
+  if (!row && provisionalWanted(url) && weekStart >= earliestOf(env)) {
+    row = await db.prepare(`SELECT s.*, r.gate AS _gate${V} LEFT JOIN reporting_run r ON r.run_id = s.run_id
+        WHERE s.week_start = ?1 AND ${PROVISIONAL_WHERE}${rev ? ' AND s.revision = ?2' : ''} LIMIT 1`).bind(...(rev ? [weekStart, parseInt(rev, 10)] : [weekStart])).first();
+    if (row) { const { _gate, ...rest } = row; row = { ...rest, _provisional: { hold: holdOf(_gate) } }; }
+  }
   if (!row) throw new ApiError(404, reader.admin ? 'week_unknown' : 'not_published', `No ${allowed.length > 1 ? '' : 'published '}snapshot for ${weekStart}`);
   const { _v_status, _v_report, _v_diff, _v_attempts, _v_at, ...s } = row;
   if (s.storage !== 'chunked') return s;
@@ -53,7 +74,8 @@ function catalogView(s, reader) {
 const header = (s, reader = null) => ({ weekStart: s.week_start, revision: s.revision, status: s.status, snapshotId: s.snapshot_id,
   computedAt: s.computed_at, publishedAt: s.published_at, engineVersion: s.engine_version, catalogRev: s.catalog_rev,
   catalog: catalogView(s, reader), policy: P(s.policy, {}), profitabilityStatus: s.profitability_status,
-  ...(s.storage === 'chunked' ? { computedBy: 'collector', verification: s._verification || { status: 'pending' } } : {}) });
+  ...(s.storage === 'chunked' ? { computedBy: 'collector', verification: s._verification || { status: 'pending' } } : {}),
+  ...(s._provisional ? { provisional: true, hold: s._provisional.hold } : {}) });
 
 // ─── Free-tier (collector-computed) snapshots: the same rows, read from gzip parts ──
 
@@ -103,12 +125,29 @@ export async function listWeeks(request, env, reader) {
       ...(r.partial_week ? { partialWeek: P(r.partial_week, null) } : {}),
       ...(r.storage === 'chunked' ? { computedBy: 'collector', verification: r.verification || 'pending' } : {}) });
   }
-  return json({ weeks: [...weeks.values()] });
+  if (provisionalWanted(url)) {
+    // Weeks with no published revision: their latest verified revision, marked provisional, with its holds.
+    const prov = (await env.DB.prepare(`SELECT s.week_start, s.revision, s.status, s.profitability_status, s.computed_at, r.gate,
+        t.operating_revenue, t.operating_gp_after_shipping, t.operating_gp_margin, t.cost_coverage_by_revenue, t.missing_cost_lines, t.missing_cost_revenue,
+        t.orders_requiring_shipstation_rate, t.orders_with_valid_shipstation_rate, json_extract(t.labels, '$.partialWeek') AS partial_week
+      FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id LEFT JOIN reporting_run r ON r.run_id = s.run_id
+      WHERE s.week_start >= ?1 AND ${PROVISIONAL_WHERE} ORDER BY s.week_start DESC`).bind(earliestOf(env)).all()).results || [];
+    for (const r of prov) {
+      if (!weeks.has(r.week_start)) weeks.set(r.week_start, { weekStart: r.week_start, revisions: [] });
+      weeks.get(r.week_start).revisions.push({ revision: r.revision, status: r.status, provisional: true, hold: holdOf(r.gate),
+        profitabilityStatus: r.profitability_status, computedAt: r.computed_at, operatingRevenue: r.operating_revenue,
+        operatingGpAfterShipping: r.operating_gp_after_shipping, operatingGpMargin: r.operating_gp_margin, costCoverageByRevenue: r.cost_coverage_by_revenue,
+        missingCostLines: r.missing_cost_lines, missingCostRevenue: r.missing_cost_revenue,
+        shippingCoverage: { ordersWithCost: r.orders_with_valid_shipstation_rate, ordersRequiringCost: r.orders_requiring_shipstation_rate },
+        ...(r.partial_week ? { partialWeek: P(r.partial_week, null) } : {}), computedBy: 'collector', verification: 'verified' });
+    }
+  }
+  return json({ weeks: [...weeks.values()].sort((a, b) => (a.weekStart < b.weekStart ? 1 : -1)) });
 }
 
 export async function getSnapshot(request, env, reader, weekStart) {
   const url = new URL(request.url);
-  const s = await pickSnapshot(env.DB, weekStart, url, reader);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
   const t = await env.DB.prepare('SELECT * FROM snapshot_totals WHERE snapshot_id = ?1').bind(s.snapshot_id).first();
   const top = intParam(url, 'breakdownLimit', 50, { min: 1, max: 500 });
   const sections = s.storage === 'chunked' ? await part(env.DB, s, 'sections') : null;
@@ -152,7 +191,7 @@ const ORDER_SORT_FNS = {
 
 export async function listOrders(request, env, reader, weekStart) {
   const url = new URL(request.url);
-  const s = await pickSnapshot(env.DB, weekStart, url, reader);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
   // Pages are capped at 100 orders (Workers Free: bounded CPU per request); page with offset.
   const limit = intParam(url, 'limit', 50, { min: 1, max: ORDER_PAGE_MAX });
   const offset = intParam(url, 'offset', 0, { min: 0 });
@@ -226,7 +265,7 @@ const lineOut = l => ({ lineIndex: l.line_index, sku: l.sku, product: l.product,
 
 export async function getOrder(request, env, reader, weekStart, orderName) {
   const url = new URL(request.url);
-  const s = await pickSnapshot(env.DB, weekStart, url, reader);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
   let o, lines;
   if (s.storage === 'chunked') {
     // Parts stored with their text (migration 0019): D1 finds the order and its lines; nothing is gunzipped.
@@ -259,7 +298,7 @@ export async function getOrder(request, env, reader, weekStart, orderName) {
 
 export async function listIssues(request, env, reader, weekStart) {
   const url = new URL(request.url);
-  const s = await pickSnapshot(env.DB, weekStart, url, reader);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
   const limit = intParam(url, 'limit', 100, { min: 1, max: 1000 });
   const offset = intParam(url, 'offset', 0, { min: 0 });
   const kind = url.searchParams.get('kind');
@@ -286,7 +325,7 @@ export async function listIssues(request, env, reader, weekStart) {
  */
 export async function scenarioInput(request, env, reader, weekStart) {
   const url = new URL(request.url);
-  const s = await pickSnapshot(env.DB, weekStart, url, reader);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
   const page = intParam(url, 'page', 0, { min: 0, max: 9999 });
   if (s.storage === 'chunked') {
     const [cnt, row] = await env.DB.batch([
@@ -329,7 +368,7 @@ export async function compare(request, env, reader) {
   const url = new URL(request.url);
   const a = url.searchParams.get('from'), b = url.searchParams.get('to');
   if (!WEEK_RE.test(a || '') || !WEEK_RE.test(b || '')) throw new ApiError(400, 'bad_query', 'from and to must be YYYY-MM-DD week starts');
-  const [sa, sb] = [await pickSnapshot(env.DB, a, url, reader), await pickSnapshot(env.DB, b, url, reader)];
+  const [sa, sb] = [await pickSnapshot(env.DB, a, url, reader, env), await pickSnapshot(env.DB, b, url, reader, env)];
   const [ta, tb] = await Promise.all([sa, sb].map(async s => totalsFromRow(await env.DB.prepare('SELECT * FROM snapshot_totals WHERE snapshot_id = ?1').bind(s.snapshot_id).first())));
   const keys = ['operatingRevenue', 'operatingGpAfterShipping', 'knownCostProductRevenue', 'knownCostProductGp', 'shippingExpense',
                 'shippingCollected', 'routeCollected', 'missingCostRevenue'];
@@ -354,7 +393,7 @@ export async function compare(request, env, reader) {
  */
 export async function reportPart(request, env, reader, weekStart, k) {
   const url = new URL(request.url);
-  const s = await pickSnapshot(env.DB, weekStart, url, reader);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
   const pin = url.searchParams.get('snapshot');
   if (pin && pin !== s.snapshot_id) throw new ApiError(409, 'snapshot_changed', 'The week has a newer readable revision; reload the report');
   const head = (n) => `{"snapshotId":${JSON.stringify(s.snapshot_id)},"weekStart":${JSON.stringify(s.week_start)},"revision":${Number(s.revision)},"part":${k},"parts":${n}`;
