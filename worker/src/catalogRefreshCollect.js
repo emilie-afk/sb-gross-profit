@@ -83,6 +83,31 @@ async function classify(env, weeks, now) {
   return { out, need };
 }
 
+/** Failed hook calls in the last 24 h since the last successful one (persisted in the rejected rows). */
+async function hookFailures(db, now) {
+  const since = new Date(now - DAY_MS).toISOString();
+  return first(await db.prepare(`SELECT COUNT(*) AS n, MAX(resolved_at) AS last FROM catalog_refresh
+      WHERE status = 'rejected' AND json_extract(detail, '$.via') = '${VIA}' AND json_extract(detail, '$.hookFailed') = 1 AND resolved_at > ?1
+        AND resolved_at > COALESCE((SELECT MAX(requested_at) FROM catalog_refresh WHERE json_extract(detail, '$.via') = '${VIA}' AND json_extract(detail, '$.hookOk') = 1), '')`)
+    .bind(since).all()) || { n: 0, last: null };
+}
+
+/**
+ * Would a refresh request act now? Reads only (used by the recovery work check):
+ *   'ok' (a build can be requested) | 'pending' (a collector build is in flight) | 'backoff' | 'retry_limit' | 'unconfigured'.
+ */
+export async function refreshGate(env, { now = Date.now() } = {}) {
+  const db = env.DB;
+  const cutoff = new Date(now - timeoutMs()).toISOString();
+  if (first(await db.prepare(`SELECT 1 AS x FROM catalog_refresh WHERE ${INFLIGHT_WHERE} LIMIT 1`).bind(cutoff).all())) return { state: 'pending' };
+  const f = await hookFailures(db, now);
+  if (f.n >= HOOK_FAILURE_LIMIT) return { state: 'retry_limit' };
+  const notBefore = f.n ? Date.parse(f.last) + backoffMs(f.n) : 0;
+  if (notBefore > now) return { state: 'backoff', retryAfter: new Date(notBefore).toISOString() };
+  if (!HOOK_RE.test(String(env.NETLIFY_BUILD_HOOK_URL || '').trim())) return { state: 'unconfigured' };
+  return { state: 'ok' };
+}
+
 export async function requestCatalogRefresh(request, env, { fetchImpl = fetch, now = Date.now(), hookTimeoutMs = HOOK_TIMEOUT_MS } = {}) {
   const body = await readJson(request);
   const weeks = [...new Set(Array.isArray(body?.weeks) ? body.weeks : [])];
@@ -111,11 +136,7 @@ export async function requestCatalogRefresh(request, env, { fetchImpl = fetch, n
   if (inflight) return reportInflight(inflight);
 
   // Failed hook calls in the last 24 h (persisted in the rejected rows): backoff and limit.
-  const since = new Date(now - DAY_MS).toISOString();
-  const f = first(await db.prepare(`SELECT COUNT(*) AS n, MAX(resolved_at) AS last FROM catalog_refresh
-      WHERE status = 'rejected' AND json_extract(detail, '$.via') = '${VIA}' AND json_extract(detail, '$.hookFailed') = 1 AND resolved_at > ?1
-        AND resolved_at > COALESCE((SELECT MAX(requested_at) FROM catalog_refresh WHERE json_extract(detail, '$.via') = '${VIA}' AND json_extract(detail, '$.hookOk') = 1), '')`)
-    .bind(since).all()) || { n: 0, last: null };
+  const f = await hookFailures(db, now);
   if (f.n >= HOOK_FAILURE_LIMIT) {
     for (const w of need) out[w] = { status: 'retry_limit' };
     return answer({ status: 'retry_limit', failures: f.n });

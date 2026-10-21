@@ -359,7 +359,9 @@ The collector polls `GET /v1/collect/catalog-refresh/:id`, which only reads stat
 for up to 12 minutes, then computes; an unpublished week computed on a stale catalog recomputes on its fulfilled
 refresh at the next run. A failed or timed-out hook call marks the batch `rejected` (`build_hook_failed` /
 `build_hook_timeout`) and starts a persisted backoff (15 min, doubling to 6 h); after 5 failures in 24 hours the
-route answers `retry_limit` until the window passes or a hook call succeeds. Published weeks keep their pinned
+route answers `retry_limit` until the window passes or a hook call succeeds. The daily and repeat starts (`/v1/collect/work`) count such weeks as work (`catalog_refresh_due`) only while a
+request would act (hook set, no backoff or limit, or a batch in flight) or a fulfilled refresh still needs its recompute, so a
+week held by `catalog_stale` is refreshed the same day rather than at the next Monday run. Published weeks keep their pinned
 catalogs and the publication gates are unchanged. Without the secret the route answers
 `build_hook_unconfigured` and weeks stay held until an owner accepts the pinned catalog
 (`POST /v1/admin/weeks/:w/accept-pinned-catalog`).

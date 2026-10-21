@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import * as FT from '../../automation/collector/src/freeTier.mjs';
 import { dataset, freeTierRun, api, ok, runVerifier } from './freeTierHarness.mjs';
 import { chooseCatalogFrom } from '../src/compute.js';
-import { requestCatalogRefresh, HOOK_FAILURE_LIMIT, backoffMs } from '../src/catalogRefreshCollect.js';
+import { requestCatalogRefresh, refreshGate, HOOK_FAILURE_LIMIT, backoffMs } from '../src/catalogRefreshCollect.js';
 
 const HOOK = 'https://api.netlify.com/build_hooks/abcdef0123456789abcdef01';
 const gateOf = async (env, w) => JSON.parse((await env.DB.prepare('SELECT r.gate FROM snapshot s JOIN reporting_run r ON r.run_id = s.run_id WHERE s.week_start = ?1 ORDER BY s.revision DESC LIMIT 1').bind(w).first()).gate);
@@ -211,6 +211,45 @@ test('collector: one request, read-only polling, bounded wait, recovery after an
   // An older Worker without the route.
   const old = { async call() { throw new FT.WorkerCallError(404, 'not_found'); } };
   assert.deepEqual(await FT.ensureCatalogRefreshes(old, [w1], { waitMs: 0 }), { status: 'unsupported', weeks: { [w1]: 'unsupported' } });
+});
+
+test('recovery work check: stale unpublished weeks are work only while a refresh can act or awaits its recompute', async () => {
+  const { d, env, c } = await stale();
+  const closed = d.weeks.at(-1), [, w1, w2] = d.weeks;
+  const due = async () => (await api(env, 'GET', `/v1/collect/work?week=${closed}`, undefined, 'ingest')).json.unfinished.includes('catalog_refresh_due');
+  assert.equal(await due(), true, 'stale weeks, hook configured: the daily start resumes and asks for the refresh');
+  // No hook: nothing a start could do, so it exits at once.
+  const hook = env.NETLIFY_BUILD_HOOK_URL; delete env.NETLIFY_BUILD_HOOK_URL;
+  assert.deepEqual([await due(), (await refreshGate(env)).state], [false, 'unconfigured']);
+  env.NETLIFY_BUILD_HOOK_URL = hook;
+  // A failed hook call: backoff, not work; past the backoff, work again.
+  const failed = await withHook(() => ask(env, d.weeks), async () => new Response('', { status: 502 }));
+  assert.equal(failed.result.json.status, 'hook_failed');
+  assert.deepEqual([await due(), (await refreshGate(env)).state], [false, 'backoff']);
+  for (const x of await rows(env)) await age(env, x.refresh_id, backoffMs(1) / 60_000 + 1);
+  assert.equal(await due(), true, 'backoff over');
+  // At the retry limit: not work.
+  for (let n = 0; n < HOOK_FAILURE_LIMIT; n++) await env.DB.prepare(`INSERT INTO catalog_refresh (refresh_id, week_start, requested_at, requested_by_class, requested_by_label, status, resolved_at, detail)
+      VALUES (?1, ?2, ?3, 'ingest_secret', 'collector', 'rejected', ?3, ?4)`).bind(`crf_${String(n).padStart(20, '9')}`, w1, new Date(Date.now() - 60_000).toISOString(), JSON.stringify({ via: 'collector_build_hook', weeks: [w1], hookFailed: 1 })).run();
+  assert.deepEqual([await due(), (await refreshGate(env)).state], [false, 'retry_limit']);
+  await env.DB.prepare("DELETE FROM catalog_refresh").run();
+  // A batch in flight: work (an interrupted run's successor waits for it).
+  const { result } = await withHook(() => ask(env, [w1, w2]));
+  assert.deepEqual([await due(), (await refreshGate(env)).state], [true, 'pending']);
+  // Fulfilled but not yet recomputed: work even with the hook gone.
+  await buildPush(env, d, result.json.refreshId);
+  delete env.NETLIFY_BUILD_HOOK_URL;
+  assert.equal(await due(), true, 'the fulfilled refresh still needs its recompute');
+  // Recomputed on the refresh: the batch weeks are current; other stale weeks need a hook to be work.
+  for (const w of [w1, w2]) assert.equal((await FT.computeAndUploadWeek(c, w, FT.newCache())).status, 'computed');
+  const stillStale = [];
+  for (const w of d.weeks) if (JSON.parse((await newest(env, w)).catalog_info).freshness?.status === 'stale') stillStale.push(w);
+  assert.ok(!stillStale.includes(w1) && !stillStale.includes(w2));
+  assert.equal(await due(), false, 'nothing left a start can do');
+  // Published weeks are never work.
+  env.NETLIFY_BUILD_HOOK_URL = hook;
+  for (const w of stillStale) await env.DB.prepare("UPDATE snapshot SET status = 'published' WHERE week_start = ?1 AND revision = (SELECT MAX(revision) FROM snapshot WHERE week_start = ?1)").bind(w).run();
+  assert.equal(await due(), false, 'published catalogs stay pinned');
 });
 
 test('chooseCatalogFrom: a fulfilled refresh replaces only a stale unpublished anchor (or supplies a new week)', () => {
