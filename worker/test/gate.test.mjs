@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import nodeCrypto from 'node:crypto';
 import worker from '../src/index.js';
 import { createLogin } from '../../netlify/edge-functions/auth-login.js';
-import { createGate, isSensitivePath } from '../../netlify/edge-functions/auth.js';
+import { createGate, isSensitivePath, classifyPath } from '../../netlify/edge-functions/auth.js';
 import { createProxy } from '../../netlify/edge-functions/api-proxy.js';
 import { config as loginConfig } from '../../netlify/edge-functions/auth-login.js';
 import { config as gateFnConfig } from '../../netlify/edge-functions/auth.js';
@@ -270,4 +270,37 @@ test('review fix: a "not revoked" answer is reused for at most 10 seconds on ano
   await s.get('/__logout', cookie);                 // revoked through another instance
   t += 9_000; assert.equal(await read(), true, 'within the 10-second reuse window (documented)');
   t += 2_000; assert.equal(await read(), false, 'refused after it');
+});
+
+test('review fix 2: encoded slashes, backslashes and dot segments are refused before anything else, for every cookie', async () => {
+  const AMBIGUOUS = ['/x%2f..%2fdata/costs.json', '/x%2F..%2Fdata/costs.json', '/x%252f..%252fdata/costs.json', '/x%25252f..%25252fdata/costs.json',
+                     '/x%5c..%5cdata/costs.json', '/x/..%2fdata/costs.json', '/x/%2e%2e/data/costs.json', '/x/%252e%252e/data/costs.json',
+                     '/data%2fcosts.json', '/%2e/data/costs.json', '/x/..%5Cdata/costs.json', '/%zz', '/data/%00costs.json'];
+  for (const p of AMBIGUOUS) assert.equal(classifyPath(p), 'ambiguous', p);
+  for (const [p, want] of [['/data/costs.json', 'sensitive'], ['/DATA/costs.json', 'sensitive'], ['/data//costs.json', 'sensitive'],
+                           ['/data/costs.js%6Fn', 'sensitive'], ['/index.html', 'public'], ['/a%20b.html', 'public'], ['/datafile.json', 'public']])
+    assert.equal(classifyPath(p), want, p);
+
+  const s = await site();
+  const live = s.cookieOf(await s.signIn(s.g.sitePassword));
+  const revoked = s.cookieOf(await s.signIn(s.g.sitePassword));
+  await s.get('/__logout', revoked);
+  // The reported case: the plain path blocks the revoked session, and the encoded form no longer skips the check.
+  assert.notEqual(await (await s.get('/data/costs.json', revoked)).text(), 'STATIC-FILE');
+  // `/x/%2e%2e/…` and `/%2e/…` are resolved by the URL parser itself to `/data/costs.json`, so they arrive as the plain,
+  // checked path: a revoked session is refused there like on the plain path.
+  for (const p of AMBIGUOUS.filter(p => new URL(`${SITE}${p}`).pathname === '/data/costs.json'))
+    assert.notEqual(await (await s.get(p, revoked)).text(), 'STATIC-FILE', p);
+  for (const p of AMBIGUOUS.filter(p => new URL(`${SITE}${p}`).pathname !== '/data/costs.json')) {
+    for (const cookie of [revoked, live, undefined]) {
+      let reachedDownstream = false;
+      const r = await s.gate(new Request(`${SITE}${p}`, { headers: cookie ? { cookie } : {} }), { ip: '198.51.100.20', next: async () => { reachedDownstream = true; return new Response('STATIC-FILE'); } });
+      assert.equal(r.status, 400, `${p} ${cookie === revoked ? 'revoked' : cookie ? 'live' : 'none'}`);
+      assert.equal(reachedDownstream, false, p);
+      assert.equal(r.headers.get('cache-control'), 'private, no-store');
+      assert.equal(await r.text(), 'Bad request');
+    }
+  }
+  // A live session still reads the plain path.
+  assert.equal(await (await s.get('/data/costs.json', live)).text(), 'STATIC-FILE');
 });

@@ -22,21 +22,32 @@ import { GATE_COOKIE, readCookie, verifyGateToken, gateConfigProblem, gateWorker
 import { loginPage, unavailable, GATE_MESSAGES } from '../../shared/gatePage.js';
 
 /**
- * Paths that carry private data: checked against the revocation list, never cached. Matched on the
- * DECODED, lower-cased path (Netlify's static server decodes before it serves), so `/data/x.js%6Fn`,
- * `/DATA/x.json` or `/data/x.json/` cannot slip past; a path that cannot be decoded counts as sensitive.
+ * Every path is classified before anything else happens:
+ *   ambiguous  an encoded '.', '/' or '\\' (%2e, %2f, %5c, in any case and at any decoding depth), a backslash,
+ *              a dot segment once decoded, a control character, or anything that will not decode. Refused
+ *              with 400 for everyone, signed in or not, so no downstream handler ever sees such a path
+ *              (`/x%2f..%2fdata/costs.json` would otherwise resolve to `/data/costs.json`).
+ *   sensitive  private data (`/data/…`, `/api/mcg-extra`): checked against the revocation list, never cached.
+ *              Matched on the decoded, lower-cased, slash-collapsed path, so `/data/x.js%6Fn`, `/DATA/x.json`
+ *              or `/data//x.json/` get the same check.
+ *   public     everything else (pages, scripts, styles).
  */
-export function isSensitivePath(pathname) {
+const AMBIGUOUS_ESCAPE = /%(2e|2f|5c)/i;
+export function classifyPath(pathname) {
   let p = String(pathname || '');
-  for (let i = 0; i < 3; i++) {
-    let d; try { d = decodeURIComponent(p); } catch { return true; }
+  for (let i = 0; i < 4; i++) {
+    if (AMBIGUOUS_ESCAPE.test(p) || p.includes('\\')) return 'ambiguous';
+    let d; try { d = decodeURIComponent(p); } catch { return 'ambiguous'; }
     if (d === p) break;
     p = d;
   }
-  if (/%[0-9a-f]{2}/i.test(p)) return true;                     // still encoded after three rounds: refuse to guess
-  p = p.toLowerCase().replace(/\\/g, '/').replace(/\/{2,}/g, '/');
-  return p.startsWith('/data/') || p === '/data' || p.startsWith('/api/mcg-extra');
+  if (/%[0-9a-f]{2}/i.test(p) || AMBIGUOUS_ESCAPE.test(p) || p.includes('\\')) return 'ambiguous';   // still encoded: refuse to guess
+  if (/(^|\/)\.{1,2}(\/|$)/.test(p) || /[\u0000-\u001f\u007f]/.test(p)) return 'ambiguous';
+  const n = p.toLowerCase().replace(/\/{2,}/g, '/');
+  return n === '/data' || n.startsWith('/data/') || n.startsWith('/api/mcg-extra') ? 'sensitive' : 'public';
 }
+export const isSensitivePath = pathname => classifyPath(pathname) !== 'public';
+const badRequest = () => new Response('Bad request', { status: 400, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...PRIVATE_HEADERS } });
 const MCG_EXTRA = '/api/mcg-extra';
 // A "not revoked" answer is reused for at most 10 seconds per edge instance (one Worker call per report
 // open); a revocation, once seen, is kept until the token expires.
@@ -61,6 +72,8 @@ export function createGate({ env = edgeEnv, fetchImpl = fetch, now = () => Date.
     const c = cfg();
     if (gateConfigProblem(c)) return unavailable();
     const url = new URL(request.url);
+    const kind = classifyPath(url.pathname);
+    if (kind === 'ambiguous') return badRequest();
     const session = await verifyGateToken(readCookie(request, GATE_COOKIE), { signingKey: c.signingKey, epoch: c.epoch, now: now() });
 
     if (url.pathname === '/__logout') {
@@ -75,7 +88,7 @@ export function createGate({ env = edgeEnv, fetchImpl = fetch, now = () => Date.
 
     if (!session) return loginPage();
 
-    if (isSensitivePath(url.pathname)) {
+    if (kind === 'sensitive') {
       let isRevoked;
       try { isRevoked = await revoked(session); } catch { return unavailable(); }
       if (isRevoked) return loginPage('', 200, { 'Set-Cookie': clearGateCookie() });
