@@ -2,19 +2,14 @@
   command = "python build.py"
   publish = "."
 
-[[edge_functions]]
-  path = "/*"
-  function = "auth"
-  # The verifier is called by the collector with its own trigger secret, not a browser.
-  excludedPath = ["/.netlify/functions/gp-verify", "/.netlify/functions/gp-verify-background"]
-
-# Same-origin proxy to the SB GP Worker (/api/v1/* → Worker /v1/*). Runs after
-# the password gate above. Needs SB_WORKER_ORIGIN; without it, answers 503. With
-# SB_WORKER_READER_SECRET (and the gate's SITE_PASSWORD) it reads published weeks for anyone past
-# the gate, so the dashboard has one password.
-[[edge_functions]]
-  path = "/api/v1/*"
-  function = "api-proxy"
+# Edge functions are declared inline (export const config in each file), with paths that do not
+# overlap, so no function depends on running before another:
+#   auth-login.js  /__auth      site-password sign-in; native rate limit + exact lockout in the Worker
+#   auth.js        /* except /__auth, /api/v1/* and the gp-verify functions: the site-password gate
+#   api-proxy.js   /api/v1/*    same-origin proxy to the Worker; checks the gate session itself
+# (A function declared both here and inline is treated as inline, and functions declared here run
+# before inline ones: declaring the gate in both places made the proxy run first. Keep them inline.)
+# The verifier is called by the collector with its own trigger secret, not a browser.
 
 # Free-tier path: independent verification of collector-computed weeks (gp-verify).
 # Built by Netlify from this repository at the deployed commit. No schedule is set.

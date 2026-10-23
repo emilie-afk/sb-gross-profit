@@ -11,6 +11,8 @@
  *                           (read-only parts also X-Verify-Secret)
  *   /v1/verify/*            X-Verify-Secret     independent verifier (Netlify Function gp-verify)
  *   /v1/aps/:week           reader              Air Plant Shop scenario input (apsMap.js); POST /v1/collect/aps-map stores it
+ *   /v1/gate/*              X-Gate-Secret       site-password gate: sign-in attempts, gate-session revocations (gate.js)
+ *   reader                  X-Dashboard-Reader-Secret + X-Gate-Session, attached by the dashboard proxy only
  *
  * The Worker never returns a secret, a D1 credential or customer data.
  */
@@ -37,6 +39,7 @@ import { ordersDiff, uploadOrders, getManifest, orderBodies, catalogPart, weekAu
 import { pendingVerifications, verifyInputs, verifyPart, postVerifyReport } from './verifyRoutes.js';
 import { getWeekStatus, verificationStatuses, postSignInEvent } from './weekStatus.js';
 import { uploadApsMap, apsMapCoverage, apsForWeek } from './apsMap.js';
+import { beginGateAttempt, gateAttemptSucceeded, revokeGateSession, gateSessionRevoked } from './gate.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -52,6 +55,16 @@ async function route(request, env) {
   // Explicit safe-read classification: login, logout, ingest, admin and any
   // unknown or future route count as writes.
   await environmentGuard(env, { write: !isSafeRead(m, p) });
+
+  // ── Site-password gate (Netlify edge) ──
+  if (p.startsWith('/v1/gate/')) {
+    requireSecret(request, env, 'gate');
+    if (p === '/v1/gate/attempts' && m === 'POST') return beginGateAttempt(request, env);
+    if ((g = p.match(/^\/v1\/gate\/attempts\/(\d{1,15})\/ok$/)) && m === 'POST') return gateAttemptSucceeded(env, g[1]);
+    if (p === '/v1/gate/revocations' && m === 'POST') return revokeGateSession(request, env);
+    if ((g = p.match(/^\/v1\/gate\/revocations\/(gat_[0-9a-f]{32})$/)) && m === 'GET') return gateSessionRevoked(env, g[1]);
+    throw new ApiError(404, 'not_found', 'No such route');
+  }
 
   // ── Auth ──
   if (p === '/v1/auth/login' && m === 'POST') return login(request, env);

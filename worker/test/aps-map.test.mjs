@@ -13,7 +13,7 @@ const ORIGIN = 'https://w.local';
 async function call(env, method, path, { body, cls } = {}) {
   const h = { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.9' };
   if (cls === 'ingest') h['X-Ingest-Secret'] = env.INGEST_SECRET;
-  if (cls === 'reader') h['X-Dashboard-Reader-Secret'] = env.DASHBOARD_READER_SECRET;
+  if (cls === 'reader') { h['X-Dashboard-Reader-Secret'] = env.DASHBOARD_READER_SECRET; h['X-Gate-Session'] = `gat_${'0'.repeat(32)}`; }
   const r = await worker.fetch(new Request(ORIGIN + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) }), env);
   const t = await r.text(); let j = null; try { j = JSON.parse(t); } catch { /* not JSON */ }
   return { status: r.status, json: j };

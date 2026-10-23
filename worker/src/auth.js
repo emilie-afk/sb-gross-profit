@@ -5,6 +5,8 @@
  *   admin    X-Admin-Secret    operator            /v1/admin/*
  *   session  sb_session cookie dashboard browser   /v1/weeks, /v1/snapshot/*, /v1/history, /v1/compare
  *   verify   X-Verify-Secret   verifier (gp-verify) /v1/verify/*, read-only /v1/collect/* parts
+ *   gate     X-Gate-Secret     site-password gate   /v1/gate/* only: sign-in attempts and revocations (gate.js)
+ *   reader   X-Dashboard-Reader-Secret + X-Gate-Session   the dashboard proxy, published reads
  *
  * The dashboard password is stored only as a PBKDF2-SHA256 hash
  * (DASHBOARD_PASSWORD_HASH). Sessions are HMAC-SHA256-signed, short-lived, and
@@ -85,10 +87,15 @@ const CLASSES = {
   // pinned inputs and stored results and write one verification report — nothing else.
   verify: { header: 'X-Verify-Secret', key: 'VERIFY_SECRET', code: 'verify_auth' },
   // The dashboard's own same-origin proxy (netlify/edge-functions/api-proxy.js), for published reads
-  // only. The proxy attaches it only after checking the site-password cookie, so the site password is
+  // only. The proxy attaches it only for a valid signed gate session (named in X-Gate-Session), so the site password is
   // the one sign-in; a browser can never send it (the proxy forwards no X-* headers).
   reader: { header: 'X-Dashboard-Reader-Secret', key: 'DASHBOARD_READER_SECRET', code: 'reader_auth' },
+  // The site-password gate (netlify/edge-functions/auth.js, auth-login.js): it may record sign-in attempts and
+  // gate-session revocations and ask whether a gate session is revoked. It reads no report.
+  gate: { header: 'X-Gate-Secret', key: 'GATE_SECRET', code: 'gate_auth' },
 };
+export const GATE_SESSION_HEADER = 'X-Gate-Session';
+const GATE_JTI = /^gat_[0-9a-f]{32}$/;
 
 function assertVerifyConfigured(env) {
   const v = env.VERIFY_SECRET;
@@ -104,6 +111,13 @@ function assertReaderConfigured(env) {
   if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET].includes(v)) throw new ApiError(500, 'misconfigured', 'DASHBOARD_READER_SECRET must differ from every other secret');
 }
 
+function assertGateConfigured(env) {
+  const v = env.GATE_SECRET;
+  if (!v) throw new ApiError(503, 'gate_not_configured', 'GATE_SECRET is not set on this Worker');
+  if (String(v).length < 32) throw new ApiError(500, 'misconfigured', 'GATE_SECRET must be at least 32 characters');
+  if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET].includes(v)) throw new ApiError(500, 'misconfigured', 'GATE_SECRET must differ from every other secret');
+}
+
 /** Throws unless the request carries the secret for exactly this credential class. */
 export function requireSecret(request, env, cls) {
   assertConfigured(env);
@@ -111,6 +125,7 @@ export function requireSecret(request, env, cls) {
   if (!c) throw new Error(`unknown credential class ${cls}`);
   if (cls === 'verify') assertVerifyConfigured(env);
   if (cls === 'reader') assertReaderConfigured(env);
+  if (cls === 'gate') assertGateConfigured(env);
   const got = request.headers.get(c.header) || '';
   if (!got || !timingSafeEqual(got, env[c.key])) throw new ApiError(401, c.code, `Missing or invalid ${c.header}`);
 }
@@ -186,7 +201,15 @@ export async function requireReader(request, env) {
   const adminH = request.headers.get('X-Admin-Secret'), readerH = request.headers.get(CLASSES.reader.header);
   if (adminH && readerH) throw new ApiError(401, 'credential_required', 'Send one credential');
   if (adminH) { requireSecret(request, env, 'admin'); return { admin: true }; }
-  if (readerH) { requireSecret(request, env, 'reader'); return { admin: false, reader: true }; }
+  if (readerH) {
+    requireSecret(request, env, 'reader');
+    // The proxy attaches the reader secret only for a valid gate session and names it, so a gate session
+    // revoked at logout reads nothing, even with a token that has not expired yet.
+    const jti = request.headers.get(GATE_SESSION_HEADER) || '';
+    if (!GATE_JTI.test(jti)) throw new ApiError(401, 'gate_session_required', `Missing or invalid ${GATE_SESSION_HEADER}`);
+    if (await env.DB.prepare('SELECT 1 AS r FROM session_revocation WHERE jti = ?1').bind(jti).first()) throw new ApiError(401, 'session_revoked', 'Sign in again');
+    return { admin: false, reader: true };
+  }
   await requireSession(request, env);
   return { admin: false };
 }

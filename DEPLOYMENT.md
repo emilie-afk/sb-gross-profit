@@ -29,9 +29,9 @@ The Live to Give tab still uses the headers the old parser expected
 vendor importer rather than duplicated. There is still exactly one Live to Give
 cost source.
 
-All other variables (`SITE_PASSWORD`, `MCG_SHEET_URL`, `MCG_POTS_SHEET_URL`,
+All other variables (`MCG_SHEET_URL`, `MCG_POTS_SHEET_URL`,
 `AS_SHEET_URL`, `HP_SHEET_URL`, `HP_COSTS_FOLDER_ID`, `GDRIVE_API_KEY`,
-`SB_SKU_ALIAS_URL*`, `MCG_EXTRA_SHEET_URL`, the `*_JSON*` fallbacks) are unchanged.
+`SB_SKU_ALIAS_URL*`, `MCG_EXTRA_SHEET_URL`, the `*_JSON*` fallbacks) are unchanged. The gate's variables are under "Site-password gate".
 No credentials are hard-coded anywhere in the repository.
 
 ## Vendor tab structure (verified 2026-09-22)
@@ -336,6 +336,7 @@ npx wrangler secret put ADMIN_SECRET               # admin/compute routes (diffe
 npx wrangler secret put SESSION_SIGNING_KEY        # session HMAC key (different value)
 cd .. && node tools/hash-password.mjs | npx wrangler secret put DASHBOARD_PASSWORD_HASH --config worker/wrangler.toml
 npx wrangler secret put DASHBOARD_READER_SECRET --config worker/wrangler.toml   # dashboard proxy reads (different value; also Netlify's SB_WORKER_READER_SECRET)
+npx wrangler secret put GATE_SECRET --config worker/wrangler.toml               # site-password gate: sign-in attempts and revocations (different value; also Netlify's SB_WORKER_GATE_SECRET)
 npx wrangler secret put NETLIFY_BUILD_HOOK_URL --config worker/wrangler.toml    # sb-profit build hook (weekly catalog refresh; see below)
 cd worker && npx wrangler deploy
 # C8, MANDATORY: bind the D1 database to this Worker's SB_ENVIRONMENT once (audited);
@@ -451,12 +452,14 @@ The browser only ever calls its own origin:
 https://sb-profit.netlify.app/api/v1/*  →  netlify/edge-functions/api-proxy.js  →  <SB_WORKER_ORIGIN>/v1/*
 ```
 
-- `netlify.toml` declares the proxy after the site-password gate.
-- Set the Netlify variable `SB_WORKER_ORIGIN` (`https://sb-gp-worker.<account>.workers.dev`). While it is unset, `/api/v1/*` answers 503.
-- The proxy forwards dashboard routes only: login, logout, session, and the published reads.
-- **One sign-in (the site password).** For the published reads the proxy attaches the Worker's dashboard reader secret, after checking the site-password cookie itself. Set `SB_WORKER_READER_SECRET` on `sb-profit` (= the Worker's `DASHBOARD_READER_SECRET`); the proxy also reads the gate's `SITE_PASSWORD`. The Weekly Reports section shows no second password. The reader sees published weeks only, like a session; the Worker's own login and its rate limit are unchanged. Without either variable nothing is attached and the reports say access is not set up.
-- It drops `X-*-Secret` headers, the site-password cookie and client IP headers.
-- It refuses cross-origin POSTs.
+- Every edge function is declared inline, with paths that do not overlap (`netlify.toml` declares none: a function declared there runs before the inline ones, which once made the proxy run before the gate):
+  - `auth-login.js` on `/__auth`: site-password sign-in;
+  - `auth.js` on every other path except `/api/v1/*` and the gp-verify functions: the gate;
+  - `api-proxy.js` on `/api/v1/*`: the proxy. It checks the gate session itself, so the order does not matter.
+- Set the Netlify variable `SB_WORKER_ORIGIN` (`https://sb-gp-worker.<account>.workers.dev`). While it is unset, `/api/v1/*` and sign-in answer 503.
+- The proxy forwards dashboard **read** routes only (GET): published reads, verified provisional reads, report parts, the Air Plant Shop input and the automation status. The Worker's own `/v1/auth/*` sign-in is not proxied: behind the proxy every browser shares one address, so its per-client attempt limit would lock all staff out at once.
+- **One sign-in (the site password).** Only for a valid gate session does the proxy attach the Worker's dashboard reader secret and the session id (`X-Gate-Session`); the Worker refuses a session revoked at logout. Set `SB_WORKER_READER_SECRET` on `sb-profit` (= the Worker's `DASHBOARD_READER_SECRET`). Without a valid session nothing reaches the Worker.
+- It forwards no browser cookie, `X-*` header or client IP header, and every answer is `Cache-Control: private, no-store` with `Vary: Cookie`.
 - `js/workerClient.js` is the browser client. It calls `/api/v1/...` with `credentials: 'same-origin'`.
 - `SameSite=Strict` stays. A direct cross-origin cookie setup is not supported without a deliberate change to the cookie and CORS model and new tests.
 
@@ -464,19 +467,35 @@ Before the dashboard reads from the Worker, run the real-proxy check against a
 deploy preview:
 
 ```
-SITE_PASSWORD=… DASHBOARD_PASSWORD=… node tools/proxy-smoke.mjs https://deploy-preview-N--sb-profit.netlify.app
+SITE_PASSWORD=… node tools/proxy-smoke.mjs https://deploy-preview-N--sb-profit.netlify.app
 ```
 
 It checks, in order:
 
-1. The site gate lets the script in.
-2. Login works through `/api/v1`.
-3. The cookie is HttpOnly, Secure, SameSite=Strict and Path=/.
-4. The session check and a published read succeed.
-5. Admin and ingest routes cannot be reached.
-6. A cross-origin POST is refused.
-7. Logout works.
-8. A copied cookie is refused after logout, and a forged cookie is refused.
+1. Signed out, reports and data files are refused.
+2. A wrong password gets 401 and no cookie.
+3. Sign-in sets a signed session cookie: HttpOnly, Secure, SameSite=Strict, Path=/, 8 hours. A `//other.host` redirect is not followed.
+4. A published read succeeds through `/api/v1`, private and uncached.
+5. Admin, ingest, gate and Worker sign-in routes cannot be reached.
+6. Logout clears the cookie, and a copy taken before logout reads no report and no data file.
+7. A forged cookie is refused.
+
+The failed-password lockout is not exercised there (it would lock the machine running the script out for 15 minutes); `worker/test/gate.test.mjs` covers it.
+
+### Site-password gate
+
+| Netlify variable | Value |
+| --- | --- |
+| `SITE_PASSWORD` | the one dashboard password |
+| `GATE_SIGNING_KEY` | at least 32 random characters, not the password; signs gate sessions and keys client-address hashes |
+| `GATE_SESSION_EPOCH` | optional, default `1`; change it to sign every browser out |
+| `SB_WORKER_GATE_SECRET` | = the Worker's `GATE_SECRET` |
+
+- The session is a signed token (`shared/gateSession.js`) with an id, issue time and 8-hour expiry, checked on every request. It is never derived from the password.
+- Logout records the token id in the Worker's `session_revocation` table. A copied token then reads no report (the Worker refuses it) and no `data/*.json` or `/api/mcg-extra` (the gate asks the Worker; each edge instance caches the answer for up to 60 seconds). **Limitation:** pages and scripts are public code and are still served to a revoked, unexpired token, for at most 8 hours.
+- **Throttle:** native Netlify rate limits, per client address and domain: 10 per minute on `/__auth`, 600 per minute on the gate, 120 per minute on `/api/v1/*`. That is 3 of the Pro plan's 5 code-based rules. They are approximate by design.
+- **Exact lockout:** after 10 failed passwords in 15 minutes from one client-address hash, the Worker refuses that client's sign-in, even with the right password (`auth_attempt`, counted before the password is compared). There is no site-wide ceiling.
+- Missing or unsafe configuration answers 503. If the Worker cannot be reached, sign-in and the data files answer 503; nothing opens.
 
 ### Credentials
 
@@ -484,8 +503,10 @@ It checks, in order:
 | --- | --- | --- | --- |
 | Ingest | `X-Ingest-Secret` | Windows collector, `build.py`, `tools/backfill.mjs push` | write source rows and catalog; read the week plan |
 | Admin | `X-Admin-Secret` | a person or an admin script | compute, revise, restate costs, settings (audited), backfill, publish (when unlocked) |
-| Reader session | `sb_session` (HttpOnly, Secure, SameSite=Strict, 12 h) | dashboard via `/api/v1` | read published snapshots, history, compare |
+| Reader session | `sb_session` (HttpOnly, Secure, SameSite=Strict, 12 h) | direct Worker callers only (not proxied) | read published snapshots, history, compare |
 | Verify | `X-Verify-Secret` (Worker secret `VERIFY_SECRET`) | Netlify Function `gp-verify` | read pinned inputs and stored results; write one verification report per snapshot |
+| Gate | `X-Gate-Secret` (Worker secret `GATE_SECRET`) | the site-password gate (`auth-login.js`, `auth.js`) | record sign-in attempts and gate-session revocations; ask whether a gate session is revoked. No report |
+| Dashboard reader | `X-Dashboard-Reader-Secret` + `X-Gate-Session` | the proxy only, for a valid gate session | read published snapshots, verified provisional reads, history, compare |
 
 **Audit actors.** Every audit record stores two fields:
 

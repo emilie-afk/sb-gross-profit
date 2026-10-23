@@ -1,12 +1,12 @@
 /**
  * Dashboard side of the Free-tier path: the week status is reachable through the
- * same-origin proxy (session only; never the collector or verifier routes), and the
+ * same-origin proxy (gate session only; never the collector or verifier routes), and the
  * Reports screen renders the verified-draft target and the exact pending status, escaped.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../worker/src/index.js';
-import { signSession } from '../worker/src/auth.js';
+import { gateConfig, gateCookieHeader } from './gate-fixture.mjs';
 import { createProxy } from '../netlify/edge-functions/api-proxy.js';
 import { renderAutomationStatus } from '../js/automationStatus.js';
 import { freeTierEnv } from '../worker/test/freeTierHarness.mjs';
@@ -15,8 +15,10 @@ const SITE = 'https://sb-profit.netlify.app', WORKER = 'https://sb-gp-worker.exa
 
 test('the proxy forwards the week status to a signed-in session and nothing on /v1/collect or /v1/verify', async () => {
   const env = await freeTierEnv();
-  const proxy = createProxy({ workerOrigin: WORKER, fetchImpl: req => worker.fetch(req, env) });
-  const cookie = `__gp_session=x; sb_session=${(await signSession(env)).token}`;
+  env.DASHBOARD_READER_SECRET = 'r'.repeat(40);
+  const g = gateConfig();
+  const proxy = createProxy({ workerOrigin: WORKER, readerSecret: env.DASHBOARD_READER_SECRET, ...g, fetchImpl: req => worker.fetch(req, env) });
+  const cookie = await gateCookieHeader(g);
   const r = await proxy(new Request(`${SITE}/api/v1/weeks/2026-09-14/status`, { headers: { cookie } }));
   assert.equal(r.status, 200);
   const s = await r.json();

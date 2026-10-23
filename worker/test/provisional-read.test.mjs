@@ -12,7 +12,7 @@ import { dataset, freeTierRun, changes } from './freeTierHarness.mjs';
 const ORIGIN = 'https://worker.test';
 const read = async (env, path, cls = 'reader') => {
   const h = { 'CF-Connecting-IP': '203.0.113.9' };
-  if (cls === 'reader') h['X-Dashboard-Reader-Secret'] = env.DASHBOARD_READER_SECRET; else h['X-Admin-Secret'] = env.ADMIN_SECRET;
+  if (cls === 'reader') { h['X-Dashboard-Reader-Secret'] = env.DASHBOARD_READER_SECRET; h['X-Gate-Session'] = `gat_${'0'.repeat(32)}`; } else h['X-Admin-Secret'] = env.ADMIN_SECRET;
   const r = await worker.fetch(new Request(ORIGIN + path, { headers: h }), env);
   return { status: r.status, json: await r.json().catch(() => null) };
 };

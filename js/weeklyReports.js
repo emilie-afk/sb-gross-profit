@@ -198,12 +198,15 @@ export function vietnamTime(iso) {
 }
 /**
  * What a failed call means for the reader. A service failure never reads as a sign-in problem:
- *   401 / 503 reader_not_configured → the dashboard's access to the reporting service is not set up
+ *   401 signed_out / session_revoked → the gate session ended (expired, signed out elsewhere): reload to sign in;
+ *   other 401 / 503 reader_not_configured → the dashboard's access to the reporting service is not set up
  *   (nothing for the reader to enter); 503 d1_daily_limit_reached → daily database allowance used up,
  *   with the reset in Vietnam time; 503 proxy_not_configured → not connected; anything else → unavailable.
  */
 export const NOT_CONNECTED = 'The dashboard is not connected to the reporting service yet.';
+export const SIGNED_OUT = 'Your sign-in has ended. Reload the page to sign in again.';
 export function failureMessage(e) {
+  if (e?.status === 401 && (e?.code === 'signed_out' || e?.code === 'session_revoked')) return SIGNED_OUT;
   if (e?.status === 401 || (e?.status === 503 && e?.code === 'reader_not_configured')) return "The dashboard's access to the weekly reports is not set up yet.";
   if (e?.status === 503 && e?.code === 'd1_daily_limit_reached') {
     const at = vietnamTime(e?.detail?.resetAt);

@@ -3,8 +3,9 @@
  * ===================================================================
  * Calls the dashboard's own origin (/api/v1/...), which the Netlify edge
  * function api-proxy.js forwards to the Worker. Same-origin is what lets the
- * Worker's SameSite=Strict, HttpOnly session cookie travel; the browser never
- * sees the cookie, a secret or a Worker URL. The manual workflow stays the
+ * site-password gate's SameSite=Strict, HttpOnly session cookie travel; the proxy
+ * checks it and attaches the reader credential itself. The browser never sees a
+ * secret or a Worker URL. Read routes only: there is no Worker sign-in from the browser. The manual workflow stays the
  * default; the read-only weekly automation status (Reports screen) and the read-only automated
  * weekly reports (upload screen, js/weeklyReports.js) use this client.
  */
@@ -15,10 +16,10 @@ export class WorkerApiError extends Error {
 }
 
 export async function workerApi(path, { method = 'GET', body, fetchImpl = globalThis.fetch } = {}) {
-  if (!path.startsWith('/') || /^\/(admin|ingest)\//.test(path)) throw new Error('Only dashboard routes are reachable from the browser');
+  if (!path.startsWith('/') || /^\/(admin|ingest|auth|gate|collect|verify)\//.test(path)) throw new Error('Only dashboard routes are reachable from the browser');
   const res = await fetchImpl(`${API_BASE}${path}`, {
     method,
-    credentials: 'same-origin',                   // send the session cookie; never cross-origin
+    credentials: 'same-origin',                   // send the gate session cookie; never cross-origin
     headers: body === undefined ? { Accept: 'application/json' } : { Accept: 'application/json', 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -27,9 +28,6 @@ export async function workerApi(path, { method = 'GET', body, fetchImpl = global
   return data;
 }
 
-export const login = (password, o) => workerApi('/auth/login', { method: 'POST', body: { password }, ...o });
-export const logout = o => workerApi('/auth/logout', { method: 'POST', body: {}, ...o });
-export const session = o => workerApi('/auth/session', o);
 /** Published weeks; with { provisional: true }, also each unpublished week's latest verified revision (marked provisional). */
 export const weeks = ({ provisional = false, ...o } = {}) => workerApi(`/weeks${provisional ? '?provisional=1' : ''}`, o);
 const pq = (provisional, sep = '?') => (provisional ? `${sep}provisional=1` : '');

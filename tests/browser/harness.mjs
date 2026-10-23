@@ -1,5 +1,5 @@
 /**
- * Browser test harness: the real dashboard (static files), the real edge proxy with the site-password check and
+ * Browser test harness: the real dashboard (static files), the real edge proxy with the signed gate-session check and
  * reader secret, and the real Worker in-process on fixture weeks (Aug–Sep 2026) published for reading.
  * Synthetic data only. start() → { url, gateCookie, csvFile, close }.
  */
@@ -32,8 +32,9 @@ export async function start({ unpublished = [] } = {}) {
   fs.writeFileSync(csvFile, toCsvText(rows, Object.keys(rows[0])));
   const DATA = path.join(dir, 'data'); fs.mkdirSync(DATA);
   for (const [k, v] of Object.entries(d.catalog.tables)) fs.writeFileSync(path.join(DATA, `${k}.json`), JSON.stringify(v));
-  const SITE_PW = crypto.randomBytes(12).toString('hex');
-  const proxy = createProxy({ workerOrigin: 'https://worker.test', readerSecret: env.DASHBOARD_READER_SECRET, sitePassword: SITE_PW, fetchImpl: req => worker.fetch(req, env) });
+  const { gateConfig, gateToken } = await import(`${R}/tests/gate-fixture.mjs`);
+  const g = gateConfig();
+  const proxy = createProxy({ workerOrigin: 'https://worker.test', readerSecret: env.DASHBOARD_READER_SECRET, ...g, fetchImpl: req => worker.fetch(req, env) });
   const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml' };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -51,6 +52,6 @@ export async function start({ unpublished = [] } = {}) {
   });
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${server.address().port}`;
-  return { url, gateCookie: crypto.createHash('sha256').update(SITE_PW).digest('hex'), csvFile, env,
+  return { url, gateCookie: (await gateToken(g)).token, csvFile, env,
            close: () => new Promise(r => { server.close(() => r()); fs.rmSync(dir, { recursive: true, force: true }); }) };
 }

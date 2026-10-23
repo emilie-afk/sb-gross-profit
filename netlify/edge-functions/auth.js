@@ -1,237 +1,108 @@
 /**
- * Netlify Edge Function — Password Gate
- * Runs on every request. Without a valid session cookie, only the
- * login page is returned. No site assets or data are accessible.
+ * Netlify Edge Function — site-password gate (every path except sign-in, the API proxy and gp-verify)
+ * ==================================================================================================
+ * Without a valid gate session only the sign-in page is returned. The session is a signed, expiring
+ * token (shared/gateSession.js), never a function of the password:
+ *   - expiry checked here on every request (8 hours); GATE_SESSION_EPOCH signs everyone out;
+ *   - /__logout records the token id in the Worker, so a copied token is refused for the cost data
+ *     files and every report read. Pages and scripts are public code: a revoked, unexpired token
+ *     still loads them until it expires (disclosed limitation).
+ * Sign-in itself is netlify/edge-functions/auth-login.js; the API proxy (api-proxy.js) checks the
+ * same token on its own, so the order in which Netlify runs the functions does not matter.
  *
- * Set SITE_PASSWORD in Netlify → Site configuration → Environment variables.
+ * Netlify environment (all required; a missing one answers 503 and opens nothing):
+ *   SITE_PASSWORD           the one dashboard password
+ *   GATE_SIGNING_KEY        ≥ 32 random characters; signs gate sessions and hashes client addresses
+ *   GATE_SESSION_EPOCH      optional, default "1"; change it to sign every browser out
+ *   SB_WORKER_ORIGIN        https://<worker host>
+ *   SB_WORKER_GATE_SECRET   = the Worker's GATE_SECRET (sign-in attempts and revocations only)
  */
+import { GATE_COOKIE, readCookie, verifyGateToken, gateConfigProblem, gateWorker, clearGateCookie, PRIVATE_HEADERS, edgeEnv } from '../../shared/gateSession.js';
+import { loginPage, unavailable, GATE_MESSAGES } from '../../shared/gatePage.js';
 
-const COOKIE_NAME = '__gp_session';
-const COOKIE_MAX_AGE = 60 * 60 * 8; // 8 hours
+/** Paths that carry private data: checked against the revocation list, never cached. */
+const SENSITIVE = /^\/(data\/[^/]+\.json|api\/mcg-extra)$/;
+const REVOCATION_CACHE_MS = 60_000;
+const REVOCATION_CACHE_MAX = 1000;
 
-async function sha256(str) {
-  const data = new TextEncoder().encode(str);
-  const buf  = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(buf))
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
-}
+export function createGate({ env = edgeEnv, fetchImpl = fetch, now = () => Date.now(), cache = new Map() } = {}) {
+  const cfg = () => ({ sitePassword: env('SITE_PASSWORD'), signingKey: env('GATE_SIGNING_KEY'), epoch: env('GATE_SESSION_EPOCH') });
+  const worker = () => gateWorker({ workerOrigin: env('SB_WORKER_ORIGIN'), gateSecret: env('SB_WORKER_GATE_SECRET'), fetchImpl });
 
-function getCookie(req, name) {
-  const header = req.headers.get('cookie') || '';
-  const match  = header.split(';').find(c => c.trim().startsWith(name + '='));
-  return match ? match.split('=').slice(1).join('=').trim() : null;
-}
+  /** Revoked? Cached per edge instance for up to 60 s (a revocation, once seen, until the token expires). */
+  async function revoked(p) {
+    const hit = cache.get(p.jti);
+    if (hit && (hit.revoked || now() - hit.at < REVOCATION_CACHE_MS)) return hit.revoked;
+    const r = await worker().isRevoked(p.jti);
+    if (cache.size >= REVOCATION_CACHE_MAX) cache.clear();
+    cache.set(p.jti, { revoked: r, at: now() });
+    return r;
+  }
 
-function loginPage(error = '') {
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GP Dashboard — Sign In</title>
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #0f172a;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  return async function gate(request, context) {
+    const c = cfg();
+    if (gateConfigProblem(c)) return unavailable();
+    const url = new URL(request.url);
+    const session = await verifyGateToken(readCookie(request, GATE_COOKIE), { signingKey: c.signingKey, epoch: c.epoch, now: now() });
+
+    if (url.pathname === '/__logout') {
+      let message = '';
+      if (session) {
+        try { await worker().revoke(session.jti, session.exp); cache.set(session.jti, { revoked: true, at: now() }); }
+        catch { message = GATE_MESSAGES.signed_out_unrecorded; }
+      }
+      if (message) return loginPage(message, 200, { 'Set-Cookie': clearGateCookie() });
+      return new Response(null, { status: 303, headers: { Location: '/', 'Set-Cookie': clearGateCookie(), ...PRIVATE_HEADERS } });
     }
-    .card {
-      background: #1e293b;
-      border: 1px solid #334155;
-      border-radius: 12px;
-      padding: 40px;
-      width: 100%;
-      max-width: 380px;
-      box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+
+    if (!session) return loginPage();
+
+    if (SENSITIVE.test(url.pathname)) {
+      let isRevoked;
+      try { isRevoked = await revoked(session); } catch { return unavailable(); }
+      if (isRevoked) return loginPage('', 200, { 'Set-Cookie': clearGateCookie() });
+      if (url.pathname === '/api/mcg-extra') return mcgExtra(env, fetchImpl);
+      const res = await context.next();
+      const out = new Response(res.body, res);
+      for (const [k, v] of Object.entries(PRIVATE_HEADERS)) out.headers.set(k, v);
+      return out;
     }
-    .logo {
-      text-align: center;
-      margin-bottom: 28px;
-    }
-    .logo svg { width: 40px; height: 40px; color: #6ee7b7; }
-    h1 { font-size: 1.25rem; font-weight: 600; color: #f1f5f9; text-align: center; margin-bottom: 6px; }
-    p  { font-size: 0.85rem; color: #94a3b8; text-align: center; margin-bottom: 24px; }
-    label { display: block; font-size: 0.8rem; font-weight: 500; color: #cbd5e1; margin-bottom: 6px; }
-    input[type=password] {
-      width: 100%;
-      padding: 10px 14px;
-      background: #0f172a;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      color: #f1f5f9;
-      font-size: 0.95rem;
-      outline: none;
-      transition: border-color .2s;
-    }
-    input[type=password]:focus { border-color: #6ee7b7; }
-    .error {
-      margin-top: 10px;
-      padding: 8px 12px;
-      background: #450a0a;
-      border: 1px solid #7f1d1d;
-      border-radius: 6px;
-      color: #fca5a5;
-      font-size: 0.8rem;
-    }
-    button {
-      margin-top: 20px;
-      width: 100%;
-      padding: 11px;
-      background: #6ee7b7;
-      color: #0f172a;
-      border: none;
-      border-radius: 8px;
-      font-size: 0.95rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background .2s;
-    }
-    button:hover { background: #34d399; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="logo">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-      </svg>
-    </div>
-    <h1>GP Dashboard</h1>
-    <p>Succulents Box Analytics</p>
-    <form method="POST" action="/__auth">
-      <label for="pw">Password</label>
-      <input type="password" id="pw" name="password" placeholder="Enter password" autofocus autocomplete="current-password">
-      ${error ? `<div class="error">${error}</div>` : ''}
-      <button type="submit">Sign In</button>
-    </form>
-  </div>
-</body>
-</html>`;
-  return new Response(html, {
-    status: error ? 401 : 200,
-    headers: { 'Content-Type': 'text/html; charset=utf-8' }
-  });
+    return context.next();
+  };
 }
 
 /**
- * Cost data files (data/*.json) are written by build.py at deploy time
- * and served as normal static assets — gated by this auth function.
- *
- * Required Netlify env var : SITE_PASSWORD
- * HP fallback env vars     : PRODUCT_COSTS_JSON1, PRODUCT_COSTS_JSON2, SKU_WEIGHTS_JSON
- *   (only needed if the HP Dropship Google Sheet is not yet populated)
+ * /api/mcg-extra — the extra MCG cost sheet, parsed on the server (removed in step 4 of the
+ * confidentiality plan: the catalog already carries it). A failure is a plain 502: no status text,
+ * column names, exception message or address ever reaches the browser.
  */
-
-export default async function handler(req, context) {
-  const sitePassword = Deno.env.get('SITE_PASSWORD');
-
-  // No password configured — block everything with a clear message
-  if (!sitePassword) {
-    return new Response('SITE_PASSWORD environment variable not set.', { status: 503 });
-  }
-
-  const url = new URL(req.url);
-
-  // Handle login POST
-  if (req.method === 'POST' && url.pathname === '/__auth') {
-    let body = '';
-    try { body = await req.text(); } catch {}
-    const params   = new URLSearchParams(body);
-    const entered  = params.get('password') || '';
-    const redirect = params.get('redirect') || '/';
-
-    if (entered === sitePassword) {
-      const token = await sha256(sitePassword + Date.now().toString().slice(0, -3));
-      // Store token → password hash mapping via cookie value = sha256(password)
-      // (No server state needed — we re-derive the expected hash on each request)
-      const cookieVal = await sha256(sitePassword);
-      return new Response(null, {
-        status: 302,
-        headers: {
-          'Location': redirect.startsWith('/') ? redirect : '/',
-          'Set-Cookie': `${COOKIE_NAME}=${cookieVal}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${COOKIE_MAX_AGE}`
-        }
-      });
-    }
-    return loginPage('Incorrect password. Please try again.');
-  }
-
-  // Logout
-  if (url.pathname === '/__logout') {
-    return new Response(null, {
-      status: 302,
-      headers: {
-        'Location': '/',
-        'Set-Cookie': `${COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`
-      }
-    });
-  }
-
-  // Validate session cookie on all other requests
-  const cookieVal   = getCookie(req, COOKIE_NAME);
-  const expectedVal = await sha256(sitePassword);
-
-  if (cookieVal !== expectedVal) {
-    // Not authenticated — return login page (nothing else leaks)
-    return loginPage();
-  }
-
-  // ── Authenticated ──────────────────────────────────────────────
-
-  // Proxy: /api/mcg-extra  →  fetch Google Sheet CSV from MCG_EXTRA_SHEET_URL env var
-  // The sheet URL never reaches the client; only the parsed JSON is returned.
-  if (url.pathname === '/api/mcg-extra') {
-    const sheetUrl = Deno.env.get('MCG_EXTRA_SHEET_URL');
-    if (!sheetUrl) {
-      return new Response(JSON.stringify({_debug:'no MCG_EXTRA_SHEET_URL env var'}), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }
-    try {
-      const resp = await fetch(sheetUrl);
-      if (!resp.ok) return new Response(JSON.stringify({_debug:`fetch failed: ${resp.status} ${resp.statusText}`}), { status: 200, headers: { 'Content-Type': 'application/json' } });
-      const csv  = await resp.text();
-      // Parse CSV: first row = headers, find SKU and "Cost Per Item" columns
-      const lines  = csv.split(/\r?\n/).filter(l => l.trim());
-      const headers = parseCSVLine(lines[0]);
-      const skuIdx  = headers.findIndex(h => h.trim().toUpperCase() === 'SKU');
-      const costIdx = headers.findIndex(h => h.trim().toUpperCase() === 'COST PER ITEM');
-      if (skuIdx === -1 || costIdx === -1) {
-        return new Response(JSON.stringify({_debug:`header mismatch`, _headers: headers.slice(0,10)}), { status: 200, headers: { 'Content-Type': 'application/json' } });
-      }
-      const descIdx = headers.findIndex(h => h.trim().toUpperCase() === 'DESCRIPTION');
-      const result = {};
-      for (let i = 1; i < lines.length; i++) {
-        const cols = parseCSVLine(lines[i]);
-        const sku  = (cols[skuIdx] || '').trim().toUpperCase();
-        const cost = parseFloat(cols[costIdx] || '');
-        if (!sku || isNaN(cost) || cost <= 0) continue;
-        result[sku] = cost;
-        // Also index by normalized plant name (strip SKU prefix + variant suffix)
-        // so variant SKUs not in the sheet can still match by name
-        if (descIdx !== -1) {
-          const desc = (cols[descIdx] || '').replace(/^[A-Z0-9]{4,}\s+/i, ''); // strip leading SKU
-          const name = desc.split('/')[0]          // drop variant suffix
-            .toLowerCase()
-            .replace(/[^a-z0-9\s]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (name) result['__n__' + name] = cost;
-        }
-      }
-      return new Response(JSON.stringify(result), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
-      });
-    } catch (e) {
-      return new Response(JSON.stringify({_debug:`exception: ${e.message}`}), { status: 200, headers: { 'Content-Type': 'application/json' } });
+async function mcgExtra(env, fetchImpl) {
+  const headers = { 'Content-Type': 'application/json', ...PRIVATE_HEADERS };
+  const failed = () => new Response(JSON.stringify({ error: 'mcg_extra_unavailable' }), { status: 502, headers });
+  const sheetUrl = env('MCG_EXTRA_SHEET_URL');
+  if (!sheetUrl) return new Response('{}', { status: 200, headers });
+  let csv;
+  try { const r = await fetchImpl(sheetUrl); if (!r.ok) return failed(); csv = await r.text(); } catch { return failed(); }
+  const lines = csv.split(/\r?\n/).filter(l => l.trim());
+  if (!lines.length) return failed();
+  const head = parseCSVLine(lines[0]).map(h => h.trim().toUpperCase());
+  const skuIdx = head.indexOf('SKU'), costIdx = head.indexOf('COST PER ITEM'), descIdx = head.indexOf('DESCRIPTION');
+  if (skuIdx === -1 || costIdx === -1) return failed();
+  const result = {};
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    const sku = (cols[skuIdx] || '').trim().toUpperCase();
+    const cost = parseFloat(cols[costIdx] || '');
+    if (!sku || isNaN(cost) || cost <= 0) continue;
+    result[sku] = cost;
+    // Also index by normalized plant name (strip SKU prefix + variant suffix) so variant SKUs not in the sheet can match by name.
+    if (descIdx !== -1) {
+      const desc = (cols[descIdx] || '').replace(/^[A-Z0-9]{4,}\s+/i, '');
+      const name = desc.split('/')[0].toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (name) result['__n__' + name] = cost;
     }
   }
-
-  return context.next(); // Authenticated — serve the file
+  return new Response(JSON.stringify(result), { status: 200, headers });
 }
 
 // Minimal CSV line parser (handles quoted fields)
@@ -248,4 +119,13 @@ function parseCSVLine(line) {
   return result;
 }
 
-export const config = { path: '/*' };
+const gate = createGate();
+export default (request, context) => gate(request, context);
+
+export const config = {
+  path: '/*',
+  excludedPath: ['/__auth', '/api/v1/*', '/.netlify/functions/gp-verify', '/.netlify/functions/gp-verify-background'],
+  // Broad traffic throttle per client (Netlify code-based rule; approximate by design). Failed-password
+  // lockouts are separate and exact: auth-login.js + the Worker's counter.
+  rateLimit: { windowLimit: 600, windowSize: 60, aggregateBy: ['ip', 'domain'] },
+};
