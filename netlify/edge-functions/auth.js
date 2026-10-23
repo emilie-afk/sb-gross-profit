@@ -5,8 +5,9 @@
  * token (shared/gateSession.js), never a function of the password:
  *   - expiry checked here on every request (8 hours); GATE_SESSION_EPOCH signs everyone out;
  *   - /__logout records the token id in the Worker, so a copied token is refused for the cost data
- *     files and every report read. Pages and scripts are public code: a revoked, unexpired token
- *     still loads them until it expires (disclosed limitation).
+ *     files and every report read (data files: within 10 seconds on every edge instance). Pages and
+ *     scripts are public code: a revoked, unexpired token still loads them until it expires
+ *     (disclosed limitation).
  * Sign-in itself is netlify/edge-functions/auth-login.js; the API proxy (api-proxy.js) checks the
  * same token on its own, so the order in which Netlify runs the functions does not matter.
  *
@@ -20,16 +21,33 @@
 import { GATE_COOKIE, readCookie, verifyGateToken, gateConfigProblem, gateWorker, clearGateCookie, PRIVATE_HEADERS, edgeEnv } from '../../shared/gateSession.js';
 import { loginPage, unavailable, GATE_MESSAGES } from '../../shared/gatePage.js';
 
-/** Paths that carry private data: checked against the revocation list, never cached. */
-const SENSITIVE = /^\/(data\/[^/]+\.json|api\/mcg-extra)$/;
-const REVOCATION_CACHE_MS = 60_000;
+/**
+ * Paths that carry private data: checked against the revocation list, never cached. Matched on the
+ * DECODED, lower-cased path (Netlify's static server decodes before it serves), so `/data/x.js%6Fn`,
+ * `/DATA/x.json` or `/data/x.json/` cannot slip past; a path that cannot be decoded counts as sensitive.
+ */
+export function isSensitivePath(pathname) {
+  let p = String(pathname || '');
+  for (let i = 0; i < 3; i++) {
+    let d; try { d = decodeURIComponent(p); } catch { return true; }
+    if (d === p) break;
+    p = d;
+  }
+  if (/%[0-9a-f]{2}/i.test(p)) return true;                     // still encoded after three rounds: refuse to guess
+  p = p.toLowerCase().replace(/\\/g, '/').replace(/\/{2,}/g, '/');
+  return p.startsWith('/data/') || p === '/data' || p.startsWith('/api/mcg-extra');
+}
+const MCG_EXTRA = '/api/mcg-extra';
+// A "not revoked" answer is reused for at most 10 seconds per edge instance (one Worker call per report
+// open); a revocation, once seen, is kept until the token expires.
+const REVOCATION_CACHE_MS = 10_000;
 const REVOCATION_CACHE_MAX = 1000;
 
 export function createGate({ env = edgeEnv, fetchImpl = fetch, now = () => Date.now(), cache = new Map() } = {}) {
   const cfg = () => ({ sitePassword: env('SITE_PASSWORD'), signingKey: env('GATE_SIGNING_KEY'), epoch: env('GATE_SESSION_EPOCH') });
   const worker = () => gateWorker({ workerOrigin: env('SB_WORKER_ORIGIN'), gateSecret: env('SB_WORKER_GATE_SECRET'), fetchImpl });
 
-  /** Revoked? Cached per edge instance for up to 60 s (a revocation, once seen, until the token expires). */
+  /** Revoked? A "no" is reused for up to 10 s per edge instance; a "yes" until the token expires. */
   async function revoked(p) {
     const hit = cache.get(p.jti);
     if (hit && (hit.revoked || now() - hit.at < REVOCATION_CACHE_MS)) return hit.revoked;
@@ -57,11 +75,11 @@ export function createGate({ env = edgeEnv, fetchImpl = fetch, now = () => Date.
 
     if (!session) return loginPage();
 
-    if (SENSITIVE.test(url.pathname)) {
+    if (isSensitivePath(url.pathname)) {
       let isRevoked;
       try { isRevoked = await revoked(session); } catch { return unavailable(); }
       if (isRevoked) return loginPage('', 200, { 'Set-Cookie': clearGateCookie() });
-      if (url.pathname === '/api/mcg-extra') return mcgExtra(env, fetchImpl);
+      if (url.pathname === MCG_EXTRA) return mcgExtra(env, fetchImpl);
       const res = await context.next();
       const out = new Response(res.body, res);
       for (const [k, v] of Object.entries(PRIVATE_HEADERS)) out.headers.set(k, v);
@@ -127,5 +145,5 @@ export const config = {
   excludedPath: ['/__auth', '/api/v1/*', '/.netlify/functions/gp-verify', '/.netlify/functions/gp-verify-background'],
   // Broad traffic throttle per client (Netlify code-based rule; approximate by design). Failed-password
   // lockouts are separate and exact: auth-login.js + the Worker's counter.
-  rateLimit: { windowLimit: 600, windowSize: 60, aggregateBy: ['ip', 'domain'] },
+  rateLimit: { windowLimit: 1200, windowSize: 60, aggregateBy: ['ip', 'domain'] },
 };

@@ -83,9 +83,28 @@ export async function passwordMatches(entered, sitePassword, signingKey) {
   return sameBytes(await hmac(signingKey, `pw:${entered ?? ''}`), await hmac(signingKey, `pw:${sitePassword}`));
 }
 
-/** A keyed hash of the client IP: the Worker counts attempts per hash and never sees the address. */
+/**
+ * The part of a client address that identifies one client for the attempt limit: an IPv4 address whole,
+ * an IPv6 address by its /64 prefix (one subscriber usually holds a whole /64, so counting full IPv6
+ * addresses would give a fresh budget per address). IPv4-mapped IPv6 counts as IPv4.
+ */
+export function clientKey(ip) {
+  const s = String(ip || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  const mapped = s.match(/^(?:0{0,4}:){0,5}(?::|0{0,4}:)?ffff:(\d{1,3}(?:\.\d{1,3}){3})$/) || s.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  if (mapped) return mapped[1];
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) return s;
+  if (!s.includes(':') || !/^[0-9a-f:.]+$/.test(s)) return s || 'unknown';
+  const [head, tail = null] = s.split('::');
+  const h = head ? head.split(':') : [], t = tail === null ? [] : (tail ? tail.split(':') : []);
+  if (t.length && t.at(-1).includes('.')) t.splice(-1, 1, '0', '0');            // embedded IPv4 tail: outside the /64 anyway
+  const groups = tail === null ? h : [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
+  if (groups.length !== 8) return s;
+  return `${groups.slice(0, 4).map(g => (parseInt(g, 16) || 0).toString(16)).join(':')}::/64`;
+}
+
+/** A keyed hash of the client (clientKey): the Worker counts attempts per hash and never sees the address. */
 export async function clientIpHash(ip, signingKey) {
-  return b64url(await hmac(signingKey, `ip:${ip || 'unknown'}`)).slice(0, 32);
+  return b64url(await hmac(signingKey, `ip:${clientKey(ip)}`)).slice(0, 32);
 }
 
 /** A same-site path to return to after sign-in, or "/". Never "//host", a backslash, a scheme or a control character. */

@@ -8,12 +8,12 @@ import assert from 'node:assert/strict';
 import nodeCrypto from 'node:crypto';
 import worker from '../src/index.js';
 import { createLogin } from '../../netlify/edge-functions/auth-login.js';
-import { createGate } from '../../netlify/edge-functions/auth.js';
+import { createGate, isSensitivePath } from '../../netlify/edge-functions/auth.js';
 import { createProxy } from '../../netlify/edge-functions/api-proxy.js';
 import { config as loginConfig } from '../../netlify/edge-functions/auth-login.js';
 import { config as gateFnConfig } from '../../netlify/edge-functions/auth.js';
 import { config as proxyConfig } from '../../netlify/edge-functions/api-proxy.js';
-import { GATE_COOKIE, safeRedirect, verifyGateToken, signGateToken } from '../../shared/gateSession.js';
+import { GATE_COOKIE, safeRedirect, verifyGateToken, signGateToken, clientKey } from '../../shared/gateSession.js';
 import { makeEnv, call, rnd, PASSWORD } from './helpers.mjs';
 import { gateConfig, gateToken } from '../../tests/gate-fixture.mjs';
 
@@ -227,10 +227,47 @@ test('A8/A10: every edge function is declared inline with non-overlapping paths 
   assert.deepEqual([loginConfig.path, loginConfig.rateLimit], ['/__auth', { windowLimit: 10, windowSize: 60, aggregateBy: ['ip', 'domain'] }]);
   assert.equal(gateFnConfig.path, '/*');
   for (const p of ['/__auth', '/api/v1/*', '/.netlify/functions/gp-verify', '/.netlify/functions/gp-verify-background']) assert.ok(gateFnConfig.excludedPath.includes(p), p);
-  assert.deepEqual(gateFnConfig.rateLimit, { windowLimit: 600, windowSize: 60, aggregateBy: ['ip', 'domain'] });
-  assert.deepEqual([proxyConfig.path, proxyConfig.rateLimit], ['/api/v1/*', { windowLimit: 120, windowSize: 60, aggregateBy: ['ip', 'domain'] }]);
+  assert.deepEqual(gateFnConfig.rateLimit, { windowLimit: 1200, windowSize: 60, aggregateBy: ['ip', 'domain'] });
+  assert.deepEqual([proxyConfig.path, proxyConfig.rateLimit], ['/api/v1/*', { windowLimit: 3000, windowSize: 60, aggregateBy: ['ip', 'domain'] }]);
   for (const c of [loginConfig, gateFnConfig, proxyConfig]) assert.ok(c.rateLimit.windowSize <= 180, 'Netlify maximum window');
   const fs = await import('node:fs');
   const toml = fs.readFileSync(new URL('../../netlify.toml', import.meta.url), 'utf8');
   assert.ok(!/^\s*\[\[edge_functions\]\]/m.test(toml), 'no netlify.toml declaration: it would run before the inline ones');
+});
+
+test('review fix: encoded, case-changed and trailing-slash forms of the data paths still get the revocation check', async () => {
+  for (const p of ['/data/x.json', '/data/x.js%6Fn', '/data/x%2Ejson', '/DATA/x.json', '/Data/X.JSON', '/data/x.json/', '/%64ata/x.json', '/%2564ata/x.json',
+                   '/data//x.json', '/api/mcg-extra', '/api/MCG-EXTRA', '/%zz'])
+    assert.equal(isSensitivePath(p), true, p);
+  for (const p of ['/', '/index.html', '/js/app.js', '/datafile.json', '/css/data.css']) assert.equal(isSensitivePath(p), false, p);
+  const s = await site();
+  const cookie = s.cookieOf(await s.signIn(s.g.sitePassword));
+  await s.get('/__logout', cookie);
+  for (const p of ['/data/mcg_total.js%6Fn', '/DATA/mcg_total.json', '/data/mcg_total.json/', '/%64ata/mcg_total.json']) {
+    const r = await s.get(p, cookie);
+    assert.notEqual(await r.text(), 'STATIC-FILE', p);
+  }
+});
+
+test('review fix: IPv6 clients are counted by their /64, so rotating addresses inside one prefix gets no fresh budget', async () => {
+  assert.equal(clientKey('2001:db8:1:2:aaaa::1'), clientKey('2001:DB8:1:2:ffff:ffff:ffff:ffff'));
+  assert.notEqual(clientKey('2001:db8:1:2::1'), clientKey('2001:db8:1:3::1'));
+  assert.equal(clientKey('::ffff:203.0.113.5'), '203.0.113.5');
+  assert.equal(clientKey('[2001:db8::1]'), clientKey('2001:0db8:0000:0000::2'));
+  const s = await site();
+  for (let i = 0; i < 10; i++) assert.equal((await s.signIn(`wrong-${i}`, { ip: `2001:db8:5:6::${(i + 1).toString(16)}` })).status, 401);
+  assert.equal((await s.signIn(s.g.sitePassword, { ip: '2001:db8:5:6:abcd:ef01:2345:6789' })).status, 429, 'same /64');
+  assert.equal((await s.signIn(s.g.sitePassword, { ip: '2001:db8:5:7::1' })).status, 303, 'another /64');
+});
+
+test('review fix: a "not revoked" answer is reused for at most 10 seconds on another edge instance', async () => {
+  const s = await site();
+  const cookie = s.cookieOf(await s.signIn(s.g.sitePassword));
+  let t = Date.now();
+  const other = createGate({ env: k => s.vars[k], now: () => t, fetchImpl: (r, i) => worker.fetch(r instanceof Request ? r : new Request(r, i), s.wenv) });
+  const read = async () => (await (await other(new Request(`${SITE}/data/mcg_total.json`, { headers: { cookie } }), { ip: '198.51.100.20', next: async () => new Response('STATIC-FILE') })).text()) === 'STATIC-FILE';
+  assert.equal(await read(), true);                 // cached "not revoked" on this instance
+  await s.get('/__logout', cookie);                 // revoked through another instance
+  t += 9_000; assert.equal(await read(), true, 'within the 10-second reuse window (documented)');
+  t += 2_000; assert.equal(await read(), false, 'refused after it');
 });

@@ -64,6 +64,8 @@ export default async request => createProxy({ workerOrigin: edgeEnv('SB_WORKER_O
 
 export const config = {
   path: '/api/v1/*',
-  // Per-client throttle on report reads (Netlify code-based rule; approximate by design).
-  rateLimit: { windowLimit: 120, windowSize: 60, aggregateBy: ['ip', 'domain'] },
+  // Coarse abuse ceiling per client address (Netlify code-based rule; approximate by design). A multi-week
+  // report loads one part per 40 orders, 4 at a time, for every week, and staff can share one office
+  // address, so the ceiling sits far above normal use: it stops floods, not report loading.
+  rateLimit: { windowLimit: 3000, windowSize: 60, aggregateBy: ['ip', 'domain'] },
 };
