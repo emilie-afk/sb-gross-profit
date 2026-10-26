@@ -8,22 +8,28 @@ Decision (2026-10-26): staging stays, on the `weekly-automation-phase1` branch d
 only builds that may read the private sources or push a catalog. In Netlify → sb-profit → Project configuration:
 1. Deploy log visibility: **Private** (done 2026-10-26).
 2. Sensitive variable policy for untrusted fork pull requests: **Require approval** (already set).
-3. Environment variables (yours to edit; values are never pasted into chat):
-   - Every `*_SHEET_URL`, `SB_SKU_ALIAS_URL`, `SB_SKU_ALIAS_URL_2`, `HP_SKU_ALIAS_URL`, `HP_COSTS_FOLDER_ID`, `GDRIVE_API_KEY`
-     (and the `*_JSON*` fallbacks if set): a value for **Production** and a **branch value for `weekly-automation-phase1`**
-     only. No value in Deploy Previews, Branch deploys (all branches), Preview Server or Local development.
-   - `CATALOG_PUSH_URL` and `SB_INGEST_SECRET`: Production = the production Worker; branch `weekly-automation-phase1` = the
-     **staging** Worker URL and the **staging** ingest secret (reveal both values in the UI and confirm the secret differs
-     from production's). Remove the generic Branch deploys value.
-   - `SITE_PASSWORD`: Production = the dashboard password; branch `weekly-automation-phase1` = a **separate staging password**.
-     No value in Deploy Previews (a preview then answers 503 at sign-in).
-   - Mark every credential "Contains secret values".
-   - Netlify applies a branch value to Deploy Previews opened from that branch too, so `build.py` also enforces it
+3. Environment variables (done 2026-10-26 except the staging password; values never pasted into chat):
+   - Branch deploys are built for `weekly-automation-phase1` only (Build & deploy → Branches), so the generic **Branch
+     deploys** context is the staging context. It is used instead of a branch-specific value on purpose: Netlify applies a
+     branch-specific value to Deploy Previews opened from that branch too, the generic Branch deploys value it does not.
+   - Every `*_SHEET_URL`, `SB_SKU_ALIAS_URL`, `SB_SKU_ALIAS_URL_2`, `HP_SKU_ALIAS_URL`, `HP_COSTS_FOLDER_ID`, `GDRIVE_API_KEY`,
+     `CATALOG_PUSH_URL`, `SB_INGEST_SECRET`, `SITE_PASSWORD` (and the `SB_VERIFY_*` / `SB_WORKER_ORIGIN` values): a value
+     in **Production** and **Branch deploys** only; Deploy Previews, Preview Server and Local development are empty.
+     `SB_WORKER_READER_SECRET`: Production only.
+   - `CATALOG_PUSH_URL`: checked in-page without showing values: Production is not a staging Worker host, Branch deploys is
+     a staging `workers.dev` host. `SB_INGEST_SECRET`: the Production and Branch deploys values differ.
+   - Credentials marked "Contains secret values": `GDRIVE_API_KEY`, `HP_COSTS_FOLDER_ID`, `SB_INGEST_SECRET`, `SB_VERIFY_SECRET`,
+     `SB_VERIFY_TRIGGER_SECRET`, `SB_WORKER_READER_SECRET`, `SITE_PASSWORD` (Netlify then scopes it to Builds, Functions,
+     Runtime; edge functions read the Functions scope).
+   - `SITE_PASSWORD`: Branch deploys keeps the production password (owner decision 2026-10-26); it is set only in
+     Production and Branch deploys, never in Deploy Previews.
+   - A Deploy Preview now has no password, so its sign-in answers 503 and opens nothing. `build.py` also enforces the split
      (`deploy_context.py`): a Deploy Preview, any other branch deploy and `netlify dev` build with every private source and
      the push removed; production may not push to a staging Worker, and the staging branch only to one.
-   - Check without printing values: the Environment variables page, filtered by context (Production, Deploy Previews,
-     Branch deploys), lists which keys each context resolves; after the next builds, each deploy log (now private) has a
-     `[deploy context]` line naming the role and the ignored variable names.
+   - Check without printing values: the Environment variables page lists per variable which contexts have a value
+     ("Empty" otherwise); after the next builds, each deploy log (now private) has a `[deploy context]` line naming the role
+     and the ignored variable names. The next production build also confirms the secret-marked Drive values still work
+     (HP costs read from Drive).
 4. Check that no branch or preview build has pushed a catalog. A commit that is on `main` proves nothing by itself: a deploy
    preview or branch deploy can build the same commit. Match every pushed catalog to a **production** deploy:
    - In D1, list each push with its commit and build time:
@@ -35,6 +41,19 @@ only builds that may read the private sources or push a catalog. In Netlify → 
    - A push with no matching production deploy (context deploy-preview or branch-deploy, or no deploy at that time) came from
      a non-production build: stop, and treat that catalog as untrusted until it is reviewed (it is never deleted).
    Do this after items 1–3, so no new preview build can push while you check.
+
+   **Result (2026-10-26, production D1, read-only):** 25 catalog uploads (Oct 2 – Oct 21), 10 accepted catalog revisions.
+   - 20 uploads match a production deploy of the same commit, built within a minute of `built_at` (deploy times are shown
+     in UTC+7 on the dashboard). For `4d2327d` (Oct 6) a production and a staging branch deploy built the same commit at the
+     same time; the deploy logs settle it: production pushed `cat_99c82763…` (the revision in production D1), the branch
+     deploy pushed a different revision to the staging Worker.
+   - 5 uploads match no Netlify deploy. All are operator pushes from the release workspace, not builds (the push scripts are kept with the release records):
+     Oct 2 07:35 UTC, the first production catalog (`cat_f9204acf…`, metadata of the staging build `2e80b5b` whose catalog
+     it re-pushed); Oct 8 09:49 UTC (`a99dc6d` metadata) and Oct 9 08:44–08:46 UTC (`e6c8afd`, one full and two
+     `correction_push`), the MCG pack-cost correction work.
+   - No Deploy Preview or branch deploy pushed to production. The staging branch deploys push to the staging Worker.
+   - **Acceptance of the 5 operator pushes: pending.** Record them as approved exceptions only after confirming each
+     matches the intended initial catalog or pack-cost correction.
 
 ## 1. Back up
 - `npx wrangler d1 export sb-gp --remote --output <encrypted folder outside the repo>\sb-gp-before-gate.sql`
