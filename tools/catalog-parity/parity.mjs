@@ -53,7 +53,7 @@ export async function runParity(sourcesFile, { allowFixtures = false, showKeys =
   // Python side
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'catalog-parity-'));
   try {
-    for (const f of ['build.py', 'vendor_sheets.py', 'catalog_hook.py']) fs.copyFileSync(path.join(REPO, f), path.join(work, f));
+    for (const f of ['build.py', 'vendor_sheets.py', 'catalog_hook.py', 'deploy_context.py']) fs.copyFileSync(path.join(REPO, f), path.join(work, f));
     const srcJson = path.join(work, 'sources.json');
     fs.writeFileSync(srcJson, JSON.stringify(resolved));
     execFileSync(python, [path.join(HERE, 'run_build.py'), work, srcJson], { stdio: ['ignore', 'pipe', 'pipe'] });

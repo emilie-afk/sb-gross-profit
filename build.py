@@ -35,6 +35,11 @@ HP fallback env vars (only if HP_SHEET_URL not set):
 
 import os, json, csv, io, urllib.request, urllib.error
 
+# Deploy-context guard (deploy_context.py): a Deploy Preview or any other branch never reads the private
+# cost sources or pushes a catalog, whatever variables reach it. Runs before anything reads the environment.
+import deploy_context
+BUILD_ROLE, _ = deploy_context.apply(os.environ)
+
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -767,6 +772,10 @@ def push_catalog():
         return
     if not url.startswith('https://'):
         print("\nCatalog push: skipped (CATALOG_PUSH_URL must be https)")
+        return
+    _target_problem = deploy_context.push_target_problem(url, BUILD_ROLE)
+    if _target_problem:
+        print(f"\nCatalog push: skipped ({_target_problem})")
         return
     tables = {}
     for name in ['mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement',

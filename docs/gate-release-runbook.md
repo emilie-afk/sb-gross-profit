@@ -1,13 +1,29 @@
 # Gate release runbook (sb-gross-profit)
 
-Commits on main 2783537: faf0990, 3f71bbf, d15d25e, ceffd96 (patches 0001–0004). Vendor classification is not part of this release.
+Branch gate-hardening-release on main 2783537 (the four gate commits, this runbook, and the deploy-context guard). Vendor classification is not part of this release.
 Every step is yours to run or approve. No value below is a real secret; never paste one into chat or Git.
 
 ## 0. Netlify variable isolation (before anything else)
-In Netlify → sb-profit → Site configuration:
-1. Environment variables: set the scope of `CATALOG_PUSH_URL`, `SB_INGEST_SECRET`, every `*_SHEET_URL`, `HP_COSTS_FOLDER_ID`, `GDRIVE_API_KEY` and the `*_JSON*` fallbacks to **Production** only (no deploy previews or branch deploys). Mark the secret ones "Contains secret values".
-2. Build & deploy → Sensitive variable policy for pull requests from forks: **Require approval** (or deploy without sensitive variables).
-3. Deploy log visibility: **Private**.
+Decision (2026-10-26): staging stays, on the `weekly-automation-phase1` branch deploy only. Production and that branch are the
+only builds that may read the private sources or push a catalog. In Netlify → sb-profit → Project configuration:
+1. Deploy log visibility: **Private** (done 2026-10-26).
+2. Sensitive variable policy for untrusted fork pull requests: **Require approval** (already set).
+3. Environment variables (yours to edit; values are never pasted into chat):
+   - Every `*_SHEET_URL`, `SB_SKU_ALIAS_URL`, `SB_SKU_ALIAS_URL_2`, `HP_SKU_ALIAS_URL`, `HP_COSTS_FOLDER_ID`, `GDRIVE_API_KEY`
+     (and the `*_JSON*` fallbacks if set): a value for **Production** and a **branch value for `weekly-automation-phase1`**
+     only. No value in Deploy Previews, Branch deploys (all branches), Preview Server or Local development.
+   - `CATALOG_PUSH_URL` and `SB_INGEST_SECRET`: Production = the production Worker; branch `weekly-automation-phase1` = the
+     **staging** Worker URL and the **staging** ingest secret (reveal both values in the UI and confirm the secret differs
+     from production's). Remove the generic Branch deploys value.
+   - `SITE_PASSWORD`: Production = the dashboard password; branch `weekly-automation-phase1` = a **separate staging password**.
+     No value in Deploy Previews (a preview then answers 503 at sign-in).
+   - Mark every credential "Contains secret values".
+   - Netlify applies a branch value to Deploy Previews opened from that branch too, so `build.py` also enforces it
+     (`deploy_context.py`): a Deploy Preview, any other branch deploy and `netlify dev` build with every private source and
+     the push removed; production may not push to a staging Worker, and the staging branch only to one.
+   - Check without printing values: the Environment variables page, filtered by context (Production, Deploy Previews,
+     Branch deploys), lists which keys each context resolves; after the next builds, each deploy log (now private) has a
+     `[deploy context]` line naming the role and the ignored variable names.
 4. Check that no branch or preview build has pushed a catalog. A commit that is on `main` proves nothing by itself: a deploy
    preview or branch deploy can build the same commit. Match every pushed catalog to a **production** deploy:
    - In D1, list each push with its commit and build time:

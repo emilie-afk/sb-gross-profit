@@ -482,6 +482,16 @@ It checks, in order:
 
 The failed-password lockout is not exercised there (it would lock the machine running the script out for 15 minutes); `worker/test/gate.test.mjs` covers it.
 
+### Deploy-context guard (`deploy_context.py`)
+
+Only production builds and branch deploys of `weekly-automation-phase1` (staging) read the private cost sources or push a
+catalog. Netlify applies a branch-specific value to Deploy Previews opened from that branch too, so `build.py` removes every
+`*_SHEET_URL`, `*_SKU_ALIAS_URL*`, `HP_COSTS_FOLDER_ID`, `GDRIVE_API_KEY`, `*_JSON*` fallback, `CATALOG_PUSH_URL` and
+`SB_INGEST_SECRET` from the environment of any other build (Deploy Previews, other branch deploys, `netlify dev`) before
+reading it; the build still completes, with empty cost tables. A production build refuses to push to a staging Worker host and
+the staging branch pushes only to one. Each build log prints one `[deploy context]` line: the context, the branch, the role and
+the names (never values) of any ignored variables. A local run without `CONTEXT` is unchanged.
+
 ### Site-password gate
 
 | Netlify variable | Value |
