@@ -54,6 +54,27 @@ only builds that may read the private sources or push a catalog. In Netlify → 
    - No Deploy Preview or branch deploy pushed to production. The staging branch deploys push to the staging Worker.
    - **Acceptance of the 5 operator pushes: pending.** Record them as approved exceptions only after confirming each
      matches the intended initial catalog or pack-cost correction.
+   - **Content check (2026-10-26, read-only; per-table canonical sha256 of the stored catalog parts):**
+     - Oct 2 initial catalog `cat_f9204acf…`: every table identical to `cat_112803e1…`, the catalog the staging build of
+       `2e80b5b` produced and the production build of `606a71b` pushed two hours later (only the revision id differs).
+       **Matches the intended initial catalog.**
+     - Oct 8 09:49 and Oct 9 08:44 uploads: sealed but **rejected** by the Worker (Calathea Collective SKU count more than
+       10% below the newest catalog); no catalog became active from them. No effect.
+     - Oct 9 08:45 and 08:46 correction uploads (`correctionOf` `cat_f9204acf…` and `cat_112803e1…`): both accepted as
+       `cat_c29c7ed8…`, registered as correction `ccr_fc6c216c…` (Aug 3 – Sep 21 from `cat_f9204acf…`, Sep 28 from
+       `cat_112803e1…`), as planned. Every table equals its base except the added `mcg_pack` (77 SKUs), which is identical
+       to the pack table the production build of `090846d` read on Oct 8. **Differs from the approved Oct 6 change list**
+       (kept outside the repository): 54 of its 60 costs match; 6 SKUs it left missing (the sheet showed $0 on Oct 6) carry
+       the later sheet costs, and 17 SKUs are not on the list. In the corrected weeks this affects 3 order lines (details in
+       the private release record, not here: this repository is public).
+       **Owner decision needed** before these two are recorded as approved exceptions.
+
+## Scripts for steps 1–5 (laptop, kept with the release records outside the repository)
+- `release-gate-1.ps1` (`-DryRun` first: checks, live configuration, build only): steps 1, 2 and 3.1–3.2. It generates the
+  gate secrets locally, pipes `GATE_SECRET` to wrangler and puts the two Netlify values on the clipboard one at a time;
+  nothing is printed. Then you push the release to `main` (step 3.3).
+- `release-gate-2.ps1`: waits for the new gate on production, moves the laptop's `production-release`, runs step 4's
+  smoke test (masked password prompt) and the step 5 probe of an old deploy URL.
 
 ## 1. Back up
 - `npx wrangler d1 export sb-gp --remote --output <encrypted folder outside the repo>\sb-gp-before-gate.sql`
