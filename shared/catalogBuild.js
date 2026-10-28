@@ -173,12 +173,60 @@ function parseShopifyExportRows(rows) {
   return { sb, hp, hpByName };
 }
 
+// SKU alias sheets (build.py 1c, same rules): the Products Master product tabs with explicit columns, or the older
+// two-column sheet. An alias pointing to two SKUs, or that is itself a product SKU, is left out and reported.
+const ALIAS_LAYOUTS = [
+  ['SB products', ['sb bundles sku', 'mcg sku'], 'amz sb alias skus'],
+  ['HP products', ['hd sku'], 'amz sb alias skus'],
+];
 const ALIAS_SIGNALS = new Set(['sku', 'succulent sku', 'sb sku', 'mcg sku', 'amazon sku', 'amazon alias', 'seller sku', 'alias', 'internal sku', 'variant sku']);
-function parseAliasRows(rawRows) {
-  const idx = rawRows.findIndex(r => r.map(c => lower(pyStrip(c))).filter(c => ALIAS_SIGNALS.has(c)).length >= 2);
-  if (idx < 0) return null;
-  const header = rawRows[idx];
-  return rawRows.slice(idx + 1).map(r => pyZipDict(header, r));
+const ALIAS_BAD_TOKEN = new RegExp(`[${PY_WS},;]`);
+function findAliasLayout(rawRows) {
+  for (let i = 0; i < rawRows.length; i++) {
+    const cells = rawRows[i].map(c => lower(pyStrip(c)));
+    for (const layout of ALIAS_LAYOUTS) if (cells.includes(layout[2]) && cells.includes(layout[1][0])) return [i, layout];
+    if (cells.filter(c => ALIAS_SIGNALS.has(c)).length >= 2) return [i, null];
+  }
+  return [null, null];
+}
+/**
+ * [[alias, canonical], ...] (upper case) from one sheet and the layout name (null: no header); invalid tokens appended.
+ * Every product SKU the sheet names (each canonical column of every row, with or without aliases) goes into `products`.
+ */
+function aliasPairs(rawRows, label, invalid, products) {
+  const [idx, layout] = findAliasLayout(rawRows);
+  if (idx === null) return [[], null];
+  const header = rawRows[idx].map(c => lower(pyStrip(c)));
+  const pairs = [];
+  if (layout) {
+    const [name, canonCols, aliasCol] = layout;
+    const ci = canonCols.filter(c => header.includes(c)).map(c => header.indexOf(c));
+    const ai = header.indexOf(aliasCol);
+    for (const row of rawRows.slice(idx + 1)) {
+      const cell = j => (j < row.length ? row[j] : '');
+      for (const j of ci) if (pyStrip(cell(j))) products.add(upper(pyStrip(cell(j))));
+      const j0 = ci.find(j => pyStrip(cell(j)));
+      const canon = j0 === undefined ? '' : upper(pyStrip(cell(j0)));
+      if (!canon) continue;
+      for (const token of cell(ai).split(/\r\n|\r|\n/)) {
+        const t = upper(pyStrip(token));
+        if (!t) continue;
+        if (ALIAS_BAD_TOKEN.test(t)) { invalid.push(`${label}:${t}`); continue; }
+        if (t !== canon) pairs.push([t, canon]);
+      }
+    }
+    return [pairs, name];
+  }
+  for (const row of rawRows.slice(idx + 1)) {
+    const rlow = new Map();
+    header.forEach((k, j) => { if (j < row.length && pyStrip(row[j])) rlow.set(k, upper(pyStrip(row[j]))); });
+    const g = k => pyGet(rlow, k);
+    const sb = pyOr(g('succulent sku'), g('sb sku'), g('mcg sku'), g('internal sku'), g('sku'), g('variant sku'), '');
+    const amz = pyOr(g('amazon sku'), g('amazon alias'), g('amazon'), g('seller sku'), g('alias'), g('msku'), '');
+    if (sb) products.add(sb);
+    if (sb && amz && sb !== amz) pairs.push([amz, sb]);
+  }
+  return [pairs, 'two-column'];
 }
 
 // ─── Lively Root tab ──────────────────────────────────────────────────────────
@@ -291,21 +339,27 @@ export function buildCatalogTables(src, { livelyRootSource = 'manual_list' } = {
 
   // 1c. SKU alias
   const alias = new Map();
+  const aliasTargets = new Map(), aliasInvalid = [], aliasProducts = new Set();
   for (const key of ['SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL']) {
     if (!has(src[key])) continue;
-    const rows = parseAliasRows(pyCsvRows(src[key]));
-    let count = 0;
-    if (rows === null) warnings.push(`${key}: header row not found`);
-    else for (const row of rows) {
-      const rlow = new Map();
-      for (const [k, v] of row) if (pyStrip(v)) rlow.set(lower(pyStrip(k)), upper(pyStrip(v)));
-      const g = k => pyGet(rlow, k);
-      const sb = pyOr(g('succulent sku'), g('sb sku'), g('mcg sku'), g('internal sku'), g('sku'), g('variant sku'), '');
-      const amz = pyOr(g('amazon sku'), g('amazon alias'), g('amazon'), g('seller sku'), g('alias'), g('msku'), '');
-      if (sb && amz && sb !== amz) { alias.set(amz, sb); alias.set(sb, sb); count++; }
-    }
-    report.sources[key] = { mappings: count };
+    const [pairs, layoutName] = aliasPairs(pyCsvRows(src[key]), key, aliasInvalid, aliasProducts);
+    if (layoutName === null) warnings.push(`${key}: header row not found`);
+    for (const [a, c] of pairs) { const t = aliasTargets.get(a) || aliasTargets.set(a, []).get(a); if (!t.includes(c)) t.push(c); }
+    report.sources[key] = { layout: layoutName, pairs: pairs.length };
   }
+  const canonicalSkus = new Set([...aliasTargets.values()].flat());
+  for (const c of canonicalSkus) aliasProducts.add(c);
+  const aliasConflicts = [];
+  for (const a of [...aliasTargets.keys()].sort()) {
+    const t = aliasTargets.get(a);
+    if (t.length > 1) aliasConflicts.push(`${a} -> ${t.join(' | ')}`);
+    else if (aliasProducts.has(a)) aliasConflicts.push(`${a} -> ${t[0]} (also a product SKU)`);
+    else alias.set(a, t[0]);
+  }
+  for (const c of [...canonicalSkus].sort()) if (!alias.has(c) && !aliasTargets.has(c)) alias.set(c, c);
+  report.skuAlias = { mappings: [...alias].filter(([k, v]) => k !== v).length, conflicts: aliasConflicts, invalid: aliasInvalid };
+  if (aliasConflicts.length) warnings.push(`SKU alias: ${aliasConflicts.length} conflicting alias(es) left out`);
+  if (aliasInvalid.length) warnings.push(`SKU alias: ${aliasInvalid.length} token(s) with whitespace inside left out`);
 
   // 2. Air Plant Shop
   const as = new Map();

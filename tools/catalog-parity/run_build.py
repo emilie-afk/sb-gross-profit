@@ -1,6 +1,6 @@
 """Run the real build.py against local source files, with no network.
 
-    python3 run_build.py <workdir> <sources.json>
+    python3 run_build.py <workdir> <sources.json> [<log file>]
 
 <workdir> already holds copies of build.py, vendor_sheets.py and catalog_hook.py
 (parity.mjs makes it, outside the repository). <sources.json> maps build.py
@@ -65,7 +65,8 @@ urllib.request.urlopen = fake_urlopen
 sys.path.insert(0, workdir)
 os.chdir(workdir)
 _stdout = sys.stdout
-sys.stdout = open(os.devnull, 'w')          # build.py prints sheet rows; keep them out of any log
+# build.py prints sheet rows; keep them out of any log, unless a test asks for its own log file (synthetic sheets).
+sys.stdout = open(sys.argv[3] if len(sys.argv) > 3 else os.devnull, 'w', encoding='utf-8')
 try:
     runpy.run_path(os.path.join(workdir, 'build.py'), run_name='__main__')
 finally:

@@ -663,6 +663,15 @@ Keys are the build.py environment names: `MCG_SHEET_URL`, `MCG_POTS_SHEET_URL`,
 fallbacks `PRODUCT_COSTS_JSON1/2`, `SKU_WEIGHTS_JSON`. Copy the values from the
 Netlify environment; leave out any that are unset there.
 
+SKU aliases (`SB_SKU_ALIAS_URL`, `SB_SKU_ALIAS_URL_2`, `HP_SKU_ALIAS_URL`, each optional; build.py and the Worker
+read them the same way): the Products Master product tabs are read by their headers — canonical SKU in
+`SB Bundles SKU` (else `MCG SKU`) or `HD SKU`, every Amazon alias of that product in `AMZ SB Alias SKUs`, one per
+line. The older two-column alias sheet (`SB SKU` + `Amazon SKU`, etc.) still works. An alias naming two different
+SKUs, or that is itself another product's SKU, is left out and listed in the build log; a token with whitespace
+inside is left out too (never split). An alias is a fallback only: a SKU with its own cost keeps it. A new catalog
+changes no published week (each keeps its pinned catalog). As of 2026-10-28 `SB_SKU_ALIAS_URL` points to a tab that
+no longer exists (HTTP 400); remove it or point it at a current tab.
+
 Lively Root: the `LIVELY_GOOD_SHEET_URL` tab is the Products Master "Lively
 Root" tab (the engine aliases vendor "Lively Root" to catalog key "Lively
 Good"): SKU in column E, Cost per item in G, the Listing Shopify checkbox in

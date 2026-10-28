@@ -24,8 +24,31 @@ export function syntheticSheets({ scale = false, vendorScale = 1 } = {}) {
       + ',no sku,3\r\n'
       + 'EEZZ7680,manual overlap,9.99\r\n',
     MCG_POTS_SHEET_URL: 'MCG Product Calulator,,\n,,\nPot SKU,Pot Cost,Notes\nEEZZ7620.BR-1,$3.00,x\nEEZZ7620.WH-1,$3.50,\n\nEEZZ9000,0,\nEEZZ9100,2.25\n',
-    SB_SKU_ALIAS_URL: 'Alias sheet,\nSB SKU,Amazon SKU,Notes\ns2ky1111,amz-1111,\nS2KY3333,S2KY3333,same\n,AMZ-EMPTY,\nS2KY5555,AMZ-5555,\n',
-    SB_SKU_ALIAS_URL_2: 'Internal SKU,Seller SKU\nHPX-2,SELLER-HPX-2\n',
+    // Older two-column sheet. S2KY0001 has no alias of its own; S2KY0002 lists it as an alias (a conflict).
+    SB_SKU_ALIAS_URL: 'Alias sheet,\nSB SKU,Amazon SKU,Notes\ns2ky1111,amz-1111,\nS2KY3333,S2KY3333,same\n,AMZ-EMPTY,\nS2KY5555,AMZ-5555,\nS2KY0001,,\nS2KY0002,S2KY0001,\n',
+    // The Products Master product tabs (explicit alias layouts): one row per product, every Amazon alias of it in one
+    // cell, one per line. Row 5 conflicts with row 4 (9003-2) and has a token with a space inside; row 6 lists itself
+    // and another product's SKU as aliases; row 7 has no SKU.
+    SB_SKU_ALIAS_URL_2: 'STT,Plant Name,Plant Size,Style/Pot,MCG SKU,POT SKU,SB Bundles SKU,Weight (oz),Cost,Shopify,,,AMZ SB Alias SKUs,Amazon\r\n'
+      + '1,Synthetic Echeveria,2in,,S2KY1111,,S2KY1111,1,$2.00,Y,,,"9001-2-var\n 2inColor-S2KY1111",Y\r\n'
+      + '2,Synthetic Echeveria,2in,Pot,S2KY1111,EEZZ7620.BR-1,S2KY1111+EEZZ7620.BR-1,2,$4.00,Y,,,"9001-2p\r\n E9001-2p ",Y\r\n'
+      + '3,Synthetic Haworthia,2in,,s2ky5555,,,1,$2.00,,,,9002-2,\r\n'
+      + '4,Synthetic Conflict A,2in,,S2KY3333,,S2KY3333,1,$2.00,,,,9003-2,\r\n'
+      + '5,Synthetic Conflict B,2in,,S2KY6666,,S2KY6666,1,$2.00,,,,"9003-2\nbad token",\r\n'
+      + '6,Synthetic Self,2in,,S2KY4444,,S2KY4444,1,$2.00,,,,"S2KY4444\nS2KY1111",\r\n'
+      + '7,No SKU,,,,,,,,,,,9009-2,\r\n'
+      // Product A (S2KY7777) lists no aliases; product B lists A's SKU as its alias (a conflict). S2KY9999 lists only
+      // itself; S2KY9898 lists S2KY9999 (a conflict) and one alias of its own.
+      + '8,Synthetic Product A,2in,,S2KY7777,,S2KY7777,1,$2.00,,,,,\r\n'
+      + '9,Synthetic Product B,2in,,S2KY8888,,S2KY8888,1,$2.00,,,,S2KY7777,\r\n'
+      + '10,Synthetic Self Only,2in,,S2KY9999,,S2KY9999,1,$2.00,,,,s2ky9999 ,\r\n'
+      + '11,Synthetic Points At Self Only,2in,,S2KY9898,,S2KY9898,1,$2.00,,,,"S2KY9999\n9011-2",\r\n',
+    HP_SKU_ALIAS_URL: 'No.,Plant Name,Size,HD SKU,Weight (oz),Cost,Shopify Uploaded Listing,AMZ SB Alias SKUs\n'
+      + '1,Synthetic Hoya,4,4_HOYA_SYNTH,8,$5.00,Y,"7001-4-pl\nH7001-4-pl-BPF"\n'
+      + '2,Synthetic Pothos,4,4_POTHOS_SYNTH,8,$5.00,Y,7002-4-pl\n'
+      + '3,Synthetic Pothos large,6,6_POTHOS_SYNTH,8,$5.00,Y,"7002-4-pl\n7003-6-pl"\n'
+      + '4,Synthetic Fern,4,4_FERN_SYNTH,8,$5.00,Y,\n'
+      + '5,Synthetic Fern large,6,6_FERN_SYNTH,8,$5.00,Y,4_fern_synth\n',
     AS_SHEET_URL: 'SKU ,Fullfilled Price,Retail\nAS-001,$7.00,14\nas-002,8.5,\nAS-003,,\nHPX-1,6.00,\n',
     L2G_SHEET_URL: 'Live to Give products,,\nShopify Name,SKUs,Dropship Price (60% of retail price)\n'
       + '"Internal Pray\n\nPrayer Gift Box",Pray DLX,29.99\n,Pray STD,19.99\n'

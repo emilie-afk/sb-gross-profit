@@ -33,7 +33,7 @@ HP fallback env vars (only if HP_SHEET_URL not set):
   PRODUCT_COSTS_JSON1, PRODUCT_COSTS_JSON2, SKU_WEIGHTS_JSON
 """
 
-import os, json, csv, io, urllib.request, urllib.error
+import os, re, json, csv, io, urllib.request, urllib.error
 
 # Deploy-context guard (deploy_context.py): a Deploy Preview or any other branch never reads the private
 # cost sources or pushes a catalog, whatever variables reach it. Runs before anything reads the environment.
@@ -212,47 +212,87 @@ else:
 
 
 # ── 1c. SKU Alias map (Succulent Box SKU ↔ Amazon alias) ─────────────────────
-# Sheet has two columns: canonical SB/MCG SKU  |  Amazon seller alias SKU
-# We build a bidirectional map so either form can be looked up.
-# Env var: SB_SKU_ALIAS_URL  (can be a single CSV export URL covering all tabs,
-#          or set SB_SKU_ALIAS_URL_2 for a second tab)
+# Sources (each optional): SB_SKU_ALIAS_URL, SB_SKU_ALIAS_URL_2, HP_SKU_ALIAS_URL.
+# Two sheet shapes are read:
+#   * the product tabs of the Products Master (explicit columns, ALIAS_LAYOUTS below): one row per product,
+#     the canonical SKU in 'SB Bundles SKU' (else 'MCG SKU') or 'HD SKU', and every Amazon alias of that
+#     product in one 'AMZ SB Alias SKUs' cell, one alias per line;
+#   * the older two-column alias sheet (any two of ALIAS_SIGNALS as headers, one alias per row).
+# An alias that points to two different SKUs is a conflict: it is left out and reported, never guessed.
+# A cell token with whitespace inside it is not split further; it is reported and left out.
+# Only new catalogs use the map: published weeks keep their pinned catalogs.
 print("\n[SKU Alias]")
 sku_alias = {}   # alias_sku → canonical_sku
 
-def parse_alias_rows(raw_rows, label):
-    """Find header row, return list of dicts."""
-    ALIAS_SIGNALS = {'sku', 'succulent sku', 'sb sku', 'mcg sku', 'amazon sku',
-                     'amazon alias', 'seller sku', 'alias', 'internal sku', 'variant sku'}
-    header_idx = None
-    for i, row in enumerate(raw_rows):
-        row_lower = [c.strip().lower() for c in row]
-        if sum(1 for c in row_lower if c in ALIAS_SIGNALS) >= 2:
-            header_idx = i
-            break
-    if header_idx is None:
-        print(f"  ✗ {label}: could not find header row (need ≥2 SKU-like columns)")
-        return []
-    header = raw_rows[header_idx]
-    print(f"  {label} header: {header}")
-    return [dict(zip(header, row)) for row in raw_rows[header_idx + 1:]]
+ALIAS_LAYOUTS = (
+    ('SB products', ('sb bundles sku', 'mcg sku'), 'amz sb alias skus'),
+    ('HP products', ('hd sku',), 'amz sb alias skus'),
+)
+ALIAS_SIGNALS = {'sku', 'succulent sku', 'sb sku', 'mcg sku', 'amazon sku',
+                 'amazon alias', 'seller sku', 'alias', 'internal sku', 'variant sku'}
 
-def extract_aliases(rows, label):
-    count = 0
-    for row in rows:
-        # Normalise keys to lowercase for flexible matching
-        rlow = {k.strip().lower(): v.strip().upper() for k, v in row.items() if v.strip()}
-        # Find the canonical SB/MCG SKU column
+
+def find_alias_layout(raw_rows):
+    """(header index, layout) for the first row naming an explicit layout's alias column and its main
+    canonical column; else the first row with ≥2 ALIAS_SIGNALS (layout None); else (None, None)."""
+    for i, row in enumerate(raw_rows):
+        cells = [c.strip().lower() for c in row]
+        for layout in ALIAS_LAYOUTS:
+            if layout[2] in cells and layout[1][0] in cells:
+                return i, layout
+        if sum(1 for c in cells if c in ALIAS_SIGNALS) >= 2:
+            return i, None
+    return None, None
+
+
+def alias_pairs(raw_rows, label, invalid, products):
+    """[(alias, canonical), ...] from one sheet (both upper-case), and its layout name. Every product SKU the sheet
+    names (each canonical column of every row, whether or not the row lists aliases) is added to `products`."""
+    idx, layout = find_alias_layout(raw_rows)
+    if idx is None:
+        print(f"  ✗ {label}: could not find header row (expected the '{ALIAS_LAYOUTS[0][2]}' column, or ≥2 SKU-like columns)")
+        return [], None
+    header = [c.strip().lower() for c in raw_rows[idx]]
+    pairs = []
+    if layout is not None:
+        name, canon_cols, alias_col = layout
+        ci = [header.index(c) for c in canon_cols if c in header]
+        ai = header.index(alias_col)
+        for row in raw_rows[idx + 1:]:
+            cell = lambda j: row[j] if j < len(row) else ''
+            for j in ci:
+                if cell(j).strip():
+                    products.add(cell(j).strip().upper())
+            canon = next((cell(j).strip().upper() for j in ci if cell(j).strip()), '')
+            if not canon:
+                continue
+            for token in re.split(r'\r\n|\r|\n', cell(ai)):
+                t = token.strip().upper()
+                if not t:
+                    continue
+                if any(ch.isspace() for ch in t) or ',' in t or ';' in t:
+                    invalid.append(f'{label}:{t}')
+                    continue
+                if t != canon:
+                    pairs.append((t, canon))
+        return pairs, name
+    # Older two-column sheet.
+    for row in raw_rows[idx + 1:]:
+        rlow = {k: v.strip().upper() for k, v in zip(header, row) if v.strip()}
         sb_sku = (rlow.get('succulent sku') or rlow.get('sb sku') or rlow.get('mcg sku') or
                   rlow.get('internal sku') or rlow.get('sku') or rlow.get('variant sku') or '')
-        # Find the Amazon alias column
         amz_sku = (rlow.get('amazon sku') or rlow.get('amazon alias') or rlow.get('amazon') or
                    rlow.get('seller sku') or rlow.get('alias') or rlow.get('msku') or '')
+        if sb_sku:
+            products.add(sb_sku)
         if sb_sku and amz_sku and sb_sku != amz_sku:
-            sku_alias[amz_sku] = sb_sku   # amazon alias → canonical
-            sku_alias[sb_sku]  = sb_sku   # canonical → itself (no-op but safe)
-            count += 1
-    print(f"  → {count} alias mappings from {label}")
+            pairs.append((amz_sku, sb_sku))
+    return pairs, 'two-column'
 
+
+alias_targets = {}       # alias → canonical SKUs, in first-seen order
+alias_invalid = []
+alias_products = set()   # every product SKU the alias sheets name (rows with or without aliases)
 for env_key in ('SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL'):
     alias_url = os.environ.get(env_key)
     if not alias_url:
@@ -260,13 +300,40 @@ for env_key in ('SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL'):
     try:
         with urllib.request.urlopen(alias_url, timeout=15) as r:
             raw_text = r.read().decode('utf-8-sig')
-        raw_rows = list(csv.reader(io.StringIO(raw_text)))
-        alias_rows = parse_alias_rows(raw_rows, env_key)
-        extract_aliases(alias_rows, env_key)
+        pairs, layout_name = alias_pairs(list(csv.reader(io.StringIO(raw_text))), env_key, alias_invalid, alias_products)
+        for a, c in pairs:
+            targets = alias_targets.setdefault(a, [])
+            if c not in targets:
+                targets.append(c)
+        if layout_name:
+            print(f"  → {len(pairs)} alias pairs from {env_key} ({layout_name})")
     except Exception as e:
         print(f"  ✗ {env_key}: {e}")
 
-if not sku_alias:
+canonical_skus = {c for targets in alias_targets.values() for c in targets}
+alias_products |= canonical_skus
+alias_conflicts = []
+for a in sorted(alias_targets):
+    targets = alias_targets[a]
+    if len(targets) > 1:
+        alias_conflicts.append(f"{a} -> {' | '.join(targets)}")
+    elif a in alias_products:     # another product's own SKU, even one listed without aliases
+        alias_conflicts.append(f"{a} -> {targets[0]} (also a product SKU)")
+    else:
+        sku_alias[a] = targets[0]
+for c in sorted(canonical_skus):
+    if c not in sku_alias and c not in alias_targets:
+        sku_alias[c] = c          # canonical → itself (a no-op lookup, kept for the dashboard's alias view)
+
+if alias_conflicts:
+    print(f"  ⚠ {len(alias_conflicts)} conflicting alias(es) left out:")
+    for line in alias_conflicts[:20]:
+        print(f"    - {line}")
+if alias_invalid:
+    print(f"  ⚠ {len(alias_invalid)} alias token(s) with whitespace inside left out: {', '.join(alias_invalid[:10])}")
+if sku_alias:
+    print(f"  → {sum(1 for k, v in sku_alias.items() if k != v)} alias mappings")
+else:
     print("  SB_SKU_ALIAS_URL not set or no mappings found — skipping")
 
 
