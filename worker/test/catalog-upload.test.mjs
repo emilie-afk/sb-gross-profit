@@ -92,6 +92,75 @@ test('chunked catalog: validation as the one-request push; out-of-order, missing
   assert.equal((await api(env, 'PUT', `/v1/ingest/catalog/uploads/${big.json.uploadId}/chunks/mcg_total/0`, { entries: huge }, 'ingest')).status, 400, 'too many entries in one chunk');
 });
 
+/** The real shape since Oct 13: Calathea Collective's vendor_index entry alone is ~147 KB (2,631 SKUs). */
+function bigIndexCatalog() {
+  const c = bigCatalog();
+  const index = (v, n) => ({
+    byLooseSku: Object.fromEntries(Array.from({ length: n }, (_, i) => [`${v.slice(0, 3).toUpperCase()}X${i}`, `${v.slice(0, 3).toUpperCase()}-X${i}`])),
+    byName: Object.fromEntries(Array.from({ length: n }, (_, i) => [`synthetic plant ${i} 4in`, `${v.slice(0, 3).toUpperCase()}-X${i}`])),
+  });
+  c.tables.vendor_index = { 'Calathea Collective': index('Calathea Collective', 2631), LindaMakes: index('LindaMakes', 396), 'Live to Give': index('Live to Give', 30) };
+  return c;
+}
+
+test('chunked catalog: a vendor_index entry larger than the 96 KB chunk limit is split per field and stored exactly', { skip: !HAVE_PY }, async () => {
+  const env = (await freeTierRun(dataset({ n: 60 }), { verify: false })).env;
+  const cat = bigIndexCatalog();
+  assert.ok(JSON.stringify(cat.tables.vendor_index['Calathea Collective']).length > 96 * 1024, 'the fixture reproduces the oversized entry');
+  const { layout, chunks } = chunk(cat.tables);
+  const vi = layout.find(e => e[0] === 'vendor_index');
+  assert.equal(vi[1], 3, 'vendor_index goes one level deeper');
+  assert.deepEqual(vi[2].map(([v, subs]) => [v, subs.map(([f]) => f)]),
+    [['Calathea Collective', ['byLooseSku', 'byName']], ['LindaMakes', ['byLooseSku', 'byName']], ['Live to Give', ['byLooseSku', 'byName']]]);
+  assert.ok(chunks.every(c => JSON.stringify({ entries: c.entries, group: c.group }).length <= 96 * 1024), 'every chunk request is under the limit');
+  const r = await push(env, cat.tables);
+  assert.equal(r.accepted, true, JSON.stringify(r));
+  const back = catalogFromParts(r.catalogRev, await storedParts(env, r.catalogRev));
+  assert.equal(stableStringify(back.tables), stableStringify(cat.tables), 'every table, exactly');
+  const legacy = validateCatalog({ tables: cat.tables, mcgExtra: {}, overrides: {} }, null);
+  assert.deepEqual(r.counts, legacy.counts, 'the same counts as the one-request push (vendor_index counts vendors)');
+  // The same catalog pushed again is a duplicate (same chunks, same revision).
+  assert.deepEqual([(await push(env, cat.tables)).catalogRev], [r.catalogRev]);
+});
+
+test('chunked catalog: depth-3 uploads are checked like depth 2; an older depth-1 vendor_index still works', { skip: !HAVE_PY }, async () => {
+  const env = (await freeTierRun(dataset({ n: 60 }), { verify: false })).env;
+  const cat = bigIndexCatalog();
+  // A chunk naming another vendor or field than the layout, or a bare string group: refused at the chunk.
+  for (const g of [['LindaMakes', 'byLooseSku'], ['Calathea Collective', 'byNames'], 'Calathea Collective']) {
+    const wrong = x => { const k = x.chunks.find(c => c.table === 'vendor_index'); k.group = g; return x; };
+    assert.deepEqual(await push(env, cat.tables, { mutate: wrong }), { error: 'bad_payload', at: 'chunk' }, JSON.stringify(g));
+  }
+  // Swapped entries inside one field, or a field missing: refused at the seal.
+  const swap = x => { const k = x.chunks.findIndex((c, i) => i > 0 && c.table === 'vendor_index' && JSON.stringify(x.chunks[i - 1].group) === JSON.stringify(c.group));
+    [x.chunks[k - 1].entries, x.chunks[k].entries] = [x.chunks[k].entries, x.chunks[k - 1].entries]; return x; };
+  assert.deepEqual(await push(env, cat.tables, { mutate: swap }), { error: 'chunk_order', at: 'seal' });
+  const missing = x => ({ ...x, chunks: x.chunks.filter(c => !(c.table === 'vendor_index' && c.group[1] === 'byName' && c.group[0] === 'LindaMakes')) });
+  assert.deepEqual(await push(env, cat.tables, { mutate: missing }), { error: 'chunks_missing', at: 'seal' });
+  // Layout errors: sub-groups out of order, a sub-group with no chunks, depth 2 for vendor_index.
+  for (const bad of [
+    [['vendor_index', 3, [['A', [['byName', 1], ['byLooseSku', 1]]]]]],
+    [['vendor_index', 3, [['A', [['byLooseSku', 0]]]]]],
+    [['vendor_index', 3, [['A', []]]]],
+    [['vendor_index', 2, [['A', 1]]]],
+  ]) assert.equal((await api(env, 'POST', '/v1/ingest/catalog/uploads', { layout: bad, meta: {} }, 'ingest')).status, 400, JSON.stringify(bad));
+  // An older build.py sends vendor_index at depth 1: accepted when it fits (and stored identically).
+  const small = bigCatalog();
+  const old = x => {
+    const vi = x.layout.find(e => e[0] === 'vendor_index');
+    const t = small.tables.vendor_index;
+    vi[1] = 1; vi[2] = 1;
+    const first = x.chunks.findIndex(c => c.table === 'vendor_index');
+    const rest = x.chunks.filter(c => c.table !== 'vendor_index');
+    rest.splice(first, 0, { table: 'vendor_index', part: 0, group: null, entries: t });
+    return { ...x, chunks: rest };
+  };
+  const r = await push(env, small.tables, { mutate: old });
+  assert.equal(r.accepted, true, JSON.stringify(r));
+  const back = catalogFromParts(r.catalogRev, await storedParts(env, r.catalogRev));
+  assert.equal(stableStringify(back.tables), stableStringify(small.tables));
+});
+
 test('chunked catalog: a week computed with it verifies and reads exactly as with the one-request catalog', { skip: !HAVE_PY }, async () => {
   const d = dataset({ n: 120, scr: { zeroEvery: 1e9 } });
   const week = d.weeks[7];

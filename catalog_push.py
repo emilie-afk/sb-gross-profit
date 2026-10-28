@@ -8,6 +8,11 @@ took ~22 ms there, so build.py sends the catalog as chunks of key-sorted entries
 Layout (what the Worker checks the chunks against):
   [table, 1, n]                       n chunks of the table's top-level entries
   [table, 2, [[group, n], ...]]       vendor_costs: groups (vendors), each in n chunks
+  [table, 3, [[group, [[sub, n], ...]], ...]]
+                                      vendor_index: vendor → field (byLooseSku, byName) → n chunks.
+                                      One vendor's index can exceed the Worker's 96 KB chunk limit
+                                      on its own (Calathea Collective: ~147 KB), so it is split one
+                                      level deeper. A chunk's group is then [vendor, field].
 Keys are sorted in JavaScript's order (UTF-16 code units) and every chunk holds a
 contiguous key range, so the Worker can store each chunk as the exact fragment of the
 table's canonical JSON. No network here: pure functions, tested from the JS suite.
@@ -15,6 +20,7 @@ table's canonical JSON. No network here: pure functions, tested from the JS suit
 import json
 
 DEPTH2 = {'vendor_costs'}
+DEPTH3 = {'vendor_index'}
 CHUNK_BYTES = 16_000          # serialized entries per chunk (the Worker accepts ≤ 96 KB); ~16 KB keeps a chunk well under 10 ms
 CHUNK_ENTRIES = 600           # (the Worker accepts ≤ 2,000)
 
@@ -45,7 +51,25 @@ def catalog_chunks(tables):
     for name, t in tables.items():
         if not isinstance(t, dict):
             raise ValueError(f'catalog table {name} is not an object')
-        if name in DEPTH2:
+        if name in DEPTH3:
+            groups, part = [], 0
+            for g in sorted(t.keys(), key=js_key):
+                if not isinstance(t[g], dict) or not t[g]:
+                    raise ValueError(f'catalog table {name}.{g} is not a non-empty object')
+                subs = []
+                for s in sorted(t[g].keys(), key=js_key):
+                    if not isinstance(t[g][s], dict):
+                        raise ValueError(f'catalog table {name}.{g}.{s} is not an object')
+                    parts = _split(t[g][s])
+                    subs.append([s, len(parts)])
+                    for entries in parts:
+                        chunks.append((name, part, [g, s], entries))
+                        part += 1
+                groups.append([g, subs])
+            if not groups:
+                raise ValueError(f'catalog table {name} has no groups')
+            layout.append([name, 3, groups])
+        elif name in DEPTH2:
             groups, part = [], 0
             for g in sorted(t.keys(), key=js_key):
                 if not isinstance(t[g], dict):

@@ -11,6 +11,11 @@
  *   layout     [[table, 1, n]]                       a table of n chunks of top-level entries
  *              [[table, 2, [[groupKey, n], ...]]]    a table of groups (vendor_costs: vendor →
  *                                                    SKU → cost), each in n chunks of its entries
+ *              [[table, 3, [[groupKey, [[subKey, n], ...]], ...]]]
+ *                                                    one level deeper (vendor_index: vendor → byLooseSku /
+ *                                                    byName → entries): one vendor's index alone can exceed
+ *                                                    the 96 KB chunk limit. The chunk's group is [groupKey, subKey].
+ *                                                    vendor_index may still come as depth 1 (older build.py).
  *   a chunk    stored as the exact fragment of the table's canonical (key-sorted) JSON text, so
  *              the fragments joined in part order ARE the table: readers (loadCatalog,
  *              catalogFromParts) are unchanged
@@ -35,17 +40,41 @@ import { CATALOG_TABLES, validateCatalogCounts, parseMcgExtraCsv, catalogPartsRe
 
 const P = (s, d = null) => { try { return JSON.parse(s); } catch { return d; } };
 export const CATALOG_UPLOAD_LIMITS = Object.freeze({ chunkBytes: 96 * 1024, chunkEntries: 2000, chunks: 400, groups: 50, mcgExtraCsvBytes: 96 * 1024 });
-const DEPTH2 = new Set(['vendor_costs']);
+// Accepted depths per table (default 1). vendor_index: 3 (current build.py) or 1 (older build.py, whose upload of a
+// large vendor fails at the chunk limit and falls back to the one-request push).
+const DEPTHS = { vendor_costs: [2], vendor_index: [1, 3] };
+const depthsOf = t => DEPTHS[t] || [1];
 const bad = msg => new ApiError(400, 'bad_payload', msg);
 
-/** The chunk positions of a layout entry: part → { g, i, n, G } (g = group index, i = index in group). */
+/**
+ * The chunk positions of a layout entry: part → { g, key, s, sub, i, n, G, S, group, slot }
+ * (g = group index of G, s = sub-group index of S within the group, i = chunk index of n within the innermost
+ * group; group = what the chunk request must name; slot = the innermost group, for the key-order check).
+ */
 function positions(entry) {
   const [, depth, spec] = entry;
-  if (depth === 1) return Array.from({ length: spec }, (_, i) => ({ g: null, key: null, i, n: spec, G: 1 }));
+  if (depth === 1) return Array.from({ length: spec }, (_, i) => ({ g: null, key: null, s: null, sub: null, i, n: spec, G: 1, S: 1, group: null, slot: '' }));
   const out = [];
-  spec.forEach(([key, n], g) => { for (let i = 0; i < n; i++) out.push({ g, key, i, n, G: spec.length }); });
+  if (depth === 2) {
+    spec.forEach(([key, n], g) => { for (let i = 0; i < n; i++) out.push({ g, key, s: null, sub: null, i, n, G: spec.length, S: 1, group: key, slot: `${g}` }); });
+    return out;
+  }
+  spec.forEach(([key, subs], g) => subs.forEach(([sub, n], s) => {
+    for (let i = 0; i < n; i++) out.push({ g, key, s, sub, i, n, G: spec.length, S: subs.length, group: [key, sub], slot: `${g}/${s}` });
+  }));
   return out;
 }
+/** [[key, x], ...] with string keys strictly increasing, 1..max long. */
+function checkKeyed(list, max, what) {
+  if (!Array.isArray(list) || !list.length || list.length > max) throw bad(`layout: ${what} must be [[key, …], ...] (1 to ${max})`);
+  let prev = null;
+  for (const g of list) {
+    if (!Array.isArray(g) || g.length !== 2 || typeof g[0] !== 'string') throw bad(`layout: ${what} must be [[key, …], ...]`);
+    if (prev !== null && !(g[0] > prev)) throw bad(`layout: ${what} keys must be strictly increasing`);
+    prev = g[0];
+  }
+}
+const chunkCount = n => { if (!Number.isInteger(n) || n < 1) throw bad('layout: a table or group needs at least one chunk'); return n; };
 function checkLayout(layout) {
   if (!Array.isArray(layout) || !layout.length) throw bad('layout must list the tables');
   const seen = new Set(); let chunks = 0;
@@ -53,15 +82,16 @@ function checkLayout(layout) {
     if (!Array.isArray(e) || e.length !== 3 || !CATALOG_TABLES.includes(e[0]) || seen.has(e[0])) throw bad('layout: [[table, depth, chunks]] with known tables, each once');
     seen.add(e[0]);
     const [t, depth, spec] = e;
-    if (depth !== (DEPTH2.has(t) ? 2 : 1)) throw bad(`layout: ${t} has depth ${DEPTH2.has(t) ? 2 : 1}`);
-    if (depth === 1) { if (!Number.isInteger(spec) || spec < 1) throw bad('layout: a table needs at least one chunk'); chunks += spec; }
-    else {
-      if (!Array.isArray(spec) || !spec.length || spec.length > CATALOG_UPLOAD_LIMITS.groups) throw bad('layout: groups must be [[key, chunks], ...] (at least one)');
-      let prev = null;
-      for (const g of spec) {
-        if (!Array.isArray(g) || typeof g[0] !== 'string' || !Number.isInteger(g[1]) || g[1] < 1) throw bad('layout: groups must be [[key, chunks], ...]');
-        if (prev !== null && !(g[0] > prev)) throw bad('layout: group keys must be strictly increasing');
-        prev = g[0]; chunks += g[1];
+    if (!depthsOf(t).includes(depth)) throw bad(`layout: ${t} has depth ${depthsOf(t).join(' or ')}`);
+    if (depth === 1) chunks += chunkCount(spec);
+    else if (depth === 2) {
+      checkKeyed(spec, CATALOG_UPLOAD_LIMITS.groups, 'groups');
+      for (const [, n] of spec) chunks += chunkCount(n);
+    } else {
+      checkKeyed(spec, CATALOG_UPLOAD_LIMITS.groups, 'groups');
+      for (const [, subs] of spec) {
+        checkKeyed(subs, CATALOG_UPLOAD_LIMITS.groups, 'sub-groups');
+        for (const [, n] of subs) chunks += chunkCount(n);
       }
     }
   }
@@ -115,15 +145,24 @@ export async function putCatalogChunk(request, env, id, table, partText) {
   if (!pos) throw bad('No such chunk in this upload');
   const entries = b?.entries;
   if (!entries || typeof entries !== 'object' || Array.isArray(entries)) throw bad('entries must be an object');
-  if ((pos.key ?? null) !== (b.group ?? null)) throw bad('group does not match the layout');
+  if (JSON.stringify(pos.group) !== JSON.stringify(b.group ?? null)) throw bad('group does not match the layout');
   const keys = Object.keys(entries).sort();
   if (keys.length > CATALOG_UPLOAD_LIMITS.chunkEntries) throw bad(`At most ${CATALOG_UPLOAD_LIMITS.chunkEntries} entries per chunk`);
   // Only a table (or group) of a single chunk may be empty: an empty middle chunk would break the text.
   if (!keys.length && pos.n !== 1) throw bad('Only a single-chunk table or group may be empty');
   try { assertNoCustomerFields(entries); } catch { throw new ApiError(400, 'customer_data_rejected', 'The catalog contains customer fields'); }
   const inner = stableStringify(entries).slice(1, -1);
-  const open = pos.i === 0 ? (pos.g === null ? '{' : `${pos.g === 0 ? '{' : ','}${JSON.stringify(pos.key)}:{`) : ',';
-  const close = pos.i === pos.n - 1 ? (pos.g === null ? '}' : `}${pos.g === pos.G - 1 ? '}' : ''}`) : '';
+  // The fragment around the entries: opening and closing braces of the table, group and sub-group it starts or ends.
+  const groupOpen = `${pos.g === 0 ? '{' : ','}${JSON.stringify(pos.key)}:{`;
+  const open = pos.i > 0 ? ','
+    : pos.g === null ? '{'
+    : pos.s === null ? groupOpen
+    : `${pos.s === 0 ? groupOpen : ','}${JSON.stringify(pos.sub)}:{`;
+  const tableClose = pos.g === pos.G - 1 ? '}' : '';
+  const close = pos.i < pos.n - 1 ? ''
+    : pos.g === null ? '}'
+    : pos.s === null ? `}${tableClose}`
+    : `}${pos.s === pos.S - 1 ? `}${tableClose}` : ''}`;
   const payload = open + inner + close;
   // The upload must still be open IN this statement: a seal freezes it (status 'sealing') before
   // reading the chunks, so no chunk can change between the seal's validation and its commit.
@@ -131,7 +170,7 @@ export async function putCatalogChunk(request, env, id, table, partText) {
       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 WHERE EXISTS (SELECT 1 FROM catalog_upload WHERE upload_id = ?1 AND status = 'open')
       ON CONFLICT(upload_id, table_name, part) DO UPDATE SET grp = excluded.grp, first_key = excluded.first_key, last_key = excluded.last_key, n = excluded.n, sha256 = excluded.sha256, payload = excluded.payload
       WHERE EXISTS (SELECT 1 FROM catalog_upload WHERE upload_id = excluded.upload_id AND status = 'open')`)
-    .bind(id, table, part, pos.key, keys[0] ?? null, keys[keys.length - 1] ?? null, keys.length, await sha256Text(payload), payload).run();
+    .bind(id, table, part, pos.s === null ? pos.key : JSON.stringify(pos.group), keys[0] ?? null, keys[keys.length - 1] ?? null, keys.length, await sha256Text(payload), payload).run();
   if (w.meta?.changes !== 1) throw new ApiError(409, 'upload_closed', 'This upload is being sealed or is sealed; chunks can no longer change');
   return json({ uploadId: id, table, part, entries: keys.length });
 }
@@ -195,7 +234,7 @@ export async function sealCatalogUpload(request, env, id) {
       const pos = positions(e), got = (byTable.get(e[0]) || []).sort((a, b) => a.part - b.part);
       if (got.length !== pos.length || got.some((r, k) => r.part !== k)) throw new ApiError(409, 'chunks_missing', `${e[0]}: ${pos.length - got.length} chunk(s) not uploaded yet`);
       for (let k = 1; k < got.length; k++) {
-        if (pos[k].g === pos[k - 1].g && !(got[k].first_key > got[k - 1].last_key)) throw new ApiError(400, 'chunk_order', `${e[0]}: keys must increase across chunks`);
+        if (pos[k].slot === pos[k - 1].slot && !(got[k].first_key > got[k - 1].last_key)) throw new ApiError(400, 'chunk_order', `${e[0]}: keys must increase across chunks`);
       }
       if (e[1] === 1) tableCounts[e[0]] = got.reduce((n, r) => n + r.n, 0);
       else {
