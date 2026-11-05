@@ -195,3 +195,49 @@ test('end to end: a week computed and published by the real path is reported', a
   assert.equal(w.totals.gross_profit_revenue_basis, pub.totals.operatingRevenue);
   assert.equal(w.completeness === 'complete', pub.totals.profitabilityStatus === 'complete');
 });
+
+test('rotation: REPORTING_SECRET_NEXT is accepted alongside the current key, held to the same rules, and revocable', async () => {
+  const env = await makeEnv({ DASHBOARD_READER_SECRET: rnd(), VERIFY_SECRET: rnd(), GATE_SECRET: rnd() });
+  const oldKey = rnd(), newKey = rnd();
+  // A first rotation can start with no current key.
+  env.REPORTING_SECRET_NEXT = newKey;
+  assert.equal((await rep(env, '', newKey)).status, 200, 'the next key alone works');
+  assert.equal((await rep(env, '', oldKey)).status, 401);
+  // Overlap: both keys read, anything else is refused.
+  env.REPORTING_SECRET = oldKey;
+  assert.equal((await rep(env, '', oldKey)).status, 200);
+  assert.equal((await rep(env, '', newKey)).status, 200);
+  assert.equal((await rep(env, '', rnd())).status, 401);
+  assert.equal((await rep(env, '', null)).status, 401);
+  // Promotion: both equal for a moment, then NEXT is deleted; the old key stops working.
+  env.REPORTING_SECRET = newKey;
+  assert.equal((await rep(env, '', newKey)).status, 200, 'equal current and next keys are fine');
+  delete env.REPORTING_SECRET_NEXT;
+  assert.equal((await rep(env, '', newKey)).status, 200);
+  assert.equal((await rep(env, '', oldKey)).status, 401, 'the old key is revoked');
+  // A short next key, or one equal to any other secret, fails closed for every route.
+  env.REPORTING_SECRET_NEXT = 'short';
+  assert.equal((await rep(env, '', newKey)).status, 500);
+  for (const k of ['ADMIN_SECRET', 'INGEST_SECRET', 'SESSION_SIGNING_KEY', 'VERIFY_SECRET', 'DASHBOARD_READER_SECRET', 'GATE_SECRET']) {
+    env.REPORTING_SECRET_NEXT = env[k];
+    assert.equal((await rep(env, '', env[k])).status, 500, `${k} as next key: reporting refused`);
+    assert.equal((await call(env, 'GET', '/v1/admin/settings', { headers: { 'X-Admin-Secret': env.ADMIN_SECRET } })).status, 500, `${k} as next key: admin refused too`);
+  }
+  delete env.REPORTING_SECRET_NEXT;
+  assert.equal((await rep(env, '', newKey)).status, 200, 'works again once the collision is gone');
+});
+
+test('rotation: the response names the slot that matched (1, 2 or both), never a key', async () => {
+  const env = await makeEnv({ DASHBOARD_READER_SECRET: rnd(), VERIFY_SECRET: rnd(), GATE_SECRET: rnd() });
+  const a = rnd(), b = rnd();
+  env.REPORTING_SECRET = a;
+  assert.equal((await rep(env, '', a)).headers.get('x-reporting-key-slot'), '1');
+  env.REPORTING_SECRET_NEXT = b;
+  assert.equal((await rep(env, '', b)).headers.get('x-reporting-key-slot'), '2');
+  assert.equal((await rep(env, '', a)).headers.get('x-reporting-key-slot'), '1');
+  env.REPORTING_SECRET_NEXT = a;
+  assert.equal((await rep(env, '', a)).headers.get('x-reporting-key-slot'), '1,2');
+  const refused = await rep(env, '', rnd());
+  assert.equal(refused.status, 401);
+  assert.equal(refused.headers.get('x-reporting-key-slot'), null);
+});

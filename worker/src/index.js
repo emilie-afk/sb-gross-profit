@@ -70,8 +70,12 @@ async function route(request, env) {
 
   // ── Reporting (Marketing Dashboard server; its own credential, published totals only) ──
   if (p.startsWith('/v1/reporting/')) {
-    requireSecret(request, env, 'reporting');
-    if (p === '/v1/reporting/weeks' && m === 'GET') return reportingWeeks(request, env);
+    const slots = requireSecret(request, env, 'reporting');
+    if (p === '/v1/reporting/weeks' && m === 'GET') {
+      const res = await reportingWeeks(request, env);
+      res.headers.set('X-Reporting-Key-Slot', slots);
+      return res;
+    }
     throw new ApiError(404, 'not_found', 'No such route');
   }
 

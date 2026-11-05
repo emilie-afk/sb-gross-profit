@@ -1,0 +1,91 @@
+# Worker deploy and reporting-key rotation.
+#
+# This repository is public, and so are these logs. The workflow is built so that nothing private can be read from
+# it: secrets live only in the protected "worker-production" environment (main branch only), pull requests and
+# forks never run it, it uses no third-party actions, and the script prints step results and setting names only.
+#
+#   push to main (Worker files)      tests; checks that every bundled file is under the trigger paths, that every
+#                                     migration is applied on the live database, and that no live setting changes;
+#                                     then `wrangler deploy`
+#   Run workflow -> deploy            the same, started by hand (optionally allowing intended setting changes)
+#   Run workflow -> rotate key        resumable two-slot rotation of the reporting key: a new key goes only into a
+#                                     slot no dashboard deploy or setting uses; the previous key is removed only after
+#                                     the live Marketing Dashboard proves (by key id and slot) it reads with the new one
+#
+# A failed or interrupted rotation is resumed by running it again. Rotations of different Worker repositories may
+# overlap. Both are tested in .github/scripts/test_worker_ci.py.
+name: Worker
+
+on:
+  push:
+    branches: [main]
+    paths: ["worker/**", "shared/**", ".github/workflows/worker.yml", ".github/scripts/worker_ci.py", ".github/tools/**"]
+  workflow_dispatch:
+    inputs:
+      task:
+        description: What to run
+        type: choice
+        options: [deploy, rotate-reporting-key]
+        default: deploy
+      allow_setting_changes:
+        description: Deploy even if it changes live Worker variables or schedules (only when intended)
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: worker-production
+  cancel-in-progress: false
+
+jobs:
+  worker:
+    if: github.event.repository.fork == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: worker-production
+    permissions:
+      contents: read
+    env:
+      TASK: ${{ github.event_name == 'push' && 'deploy' || inputs.task }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Test
+        if: env.TASK == 'deploy'
+        run: |
+          node --test --test-reporter=dot worker/test/*.test.mjs
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+
+      - name: Install tools from the lockfile
+        # Exact versions and integrity hashes from .github/tools/package-lock.json; no install scripts run.
+        run: npm ci --prefix .github/tools --ignore-scripts --no-audit --no-fund --loglevel=error > /dev/null
+
+      - name: Deploy or rotate
+        env:
+          WORKER_DIR: worker
+          WRANGLER_BIN: .github/tools/node_modules/.bin/wrangler
+          ESBUILD_BIN: .github/tools/node_modules/esbuild/bin/esbuild
+          TRIGGER_PATHS: "worker/** shared/**"
+          SOURCE_KEY: gross_profit
+          REPORTING_PATH: /v1/reporting/weeks
+          REPORTING_AUTH: "header:X-Reporting-Secret"
+          DASHBOARD_SECRET_VAR: GROSS_PROFIT_REPORTING_SECRET
+          DASHBOARD_URL_VAR: GROSS_PROFIT_API_URL
+          ALLOW_SETTING_CHANGES: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_setting_changes && 'true' || 'false' }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_VAR_OVERRIDES: ${{ secrets.WORKER_VAR_OVERRIDES }}
+          # Dashboard credentials reach rotation runs only.
+          NETLIFY_AUTH_TOKEN: ${{ env.TASK == 'rotate-reporting-key' && secrets.NETLIFY_AUTH_TOKEN || '' }}
+          NETLIFY_ACCOUNT_ID: ${{ env.TASK == 'rotate-reporting-key' && secrets.NETLIFY_ACCOUNT_ID || '' }}
+          NETLIFY_DASHBOARD_SITE_ID: ${{ env.TASK == 'rotate-reporting-key' && secrets.NETLIFY_DASHBOARD_SITE_ID || '' }}
+          DASHBOARD_URL: ${{ env.TASK == 'rotate-reporting-key' && secrets.DASHBOARD_URL || '' }}
+          PULL_CHECK_TOKEN: ${{ env.TASK == 'rotate-reporting-key' && secrets.PULL_CHECK_TOKEN || '' }}
+        run: python3 -I .github/scripts/worker_ci.py "${TASK/rotate-reporting-key/rotate}"

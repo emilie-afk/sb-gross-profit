@@ -82,9 +82,10 @@ function assertConfigured(env) {
   if (new Set(vals).size !== vals.length) throw new ApiError(500, 'misconfigured', 'Ingest, admin and session secrets must all differ');
   // Fail closed for every route, including session cookies and sign-in: a reporting secret equal to any other secret
   // would hand that credential (or, for SESSION_SIGNING_KEY, the power to sign sessions) to the reporting holder.
-  const r = env.REPORTING_SECRET;
-  if (r && [env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET, env.GATE_SECRET].includes(r)) {
-    throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must differ from every other secret');
+  // REPORTING_SECRET_NEXT (set only while a key rotation is in progress) is held to the same rule.
+  const others = [env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET, env.GATE_SECRET];
+  for (const r of [env.REPORTING_SECRET, env.REPORTING_SECRET_NEXT]) {
+    if (r && others.includes(r)) throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must differ from every other secret');
   }
 }
 
@@ -102,7 +103,7 @@ const CLASSES = {
   // gate-session revocations and ask whether a gate session is revoked. It reads no report.
   gate: { header: 'X-Gate-Secret', key: 'GATE_SECRET', code: 'gate_auth' },
   // The Marketing Dashboard's server (reporting.js): published weekly totals only. It reads no order, no draft and
-  // nothing else; deleting REPORTING_SECRET (wrangler secret delete) revokes it at once.
+  // nothing else; deleting REPORTING_SECRET and REPORTING_SECRET_NEXT (wrangler secret delete) revokes it at once.
   reporting: { header: 'X-Reporting-Secret', key: 'REPORTING_SECRET', code: 'reporting_auth' },
 };
 export const GATE_SESSION_HEADER = 'X-Gate-Session';
@@ -129,13 +130,18 @@ function assertGateConfigured(env) {
   if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET].includes(v)) throw new ApiError(500, 'misconfigured', 'GATE_SECRET must differ from every other secret');
 }
 
-function assertReportingConfigured(env) {
-  const v = env.REPORTING_SECRET;
-  if (!v) throw new ApiError(503, 'reporting_not_configured', 'Reporting access is not enabled on this Worker');
-  if (String(v).length < 32) throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must be at least 32 characters');
-  if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET, env.GATE_SECRET].includes(v)) {
-    throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must differ from every other secret');
+// The reporting keys accepted now: two slots, REPORTING_SECRET and REPORTING_SECRET_NEXT. A key rotation writes the new
+// key into the slot the dashboard is not using, moves the dashboard to it, then deletes the other slot.
+function reportingKeys(env) {
+  const keys = [env.REPORTING_SECRET, env.REPORTING_SECRET_NEXT].filter(Boolean);
+  if (!keys.length) throw new ApiError(503, 'reporting_not_configured', 'Reporting access is not enabled on this Worker');
+  for (const v of keys) {
+    if (String(v).length < 32) throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must be at least 32 characters');
+    if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET, env.GATE_SECRET].includes(v)) {
+      throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must differ from every other secret');
+    }
   }
+  return keys;
 }
 
 /** Throws unless the request carries the secret for exactly this credential class. */
@@ -146,8 +152,16 @@ export function requireSecret(request, env, cls) {
   if (cls === 'verify') assertVerifyConfigured(env);
   if (cls === 'reader') assertReaderConfigured(env);
   if (cls === 'gate') assertGateConfigured(env);
-  if (cls === 'reporting') assertReportingConfigured(env);
   const got = request.headers.get(c.header) || '';
+  if (cls === 'reporting') {
+    // Two slots: REPORTING_SECRET (1) and REPORTING_SECRET_NEXT (2). Returns which slot(s) matched, e.g. "2" or "1,2",
+    // so a key rotation can tell which slot the dashboard's live key is in. A slot number is not secret.
+    reportingKeys(env);
+    const slots = [];
+    [env.REPORTING_SECRET, env.REPORTING_SECRET_NEXT].forEach((k, i) => { if (k && timingSafeEqual(got, k)) slots.push(String(i + 1)); });
+    if (!got || !slots.length) throw new ApiError(401, c.code, `Missing or invalid ${c.header}`);
+    return slots.join(',');
+  }
   if (!got || !timingSafeEqual(got, env[c.key])) throw new ApiError(401, c.code, `Missing or invalid ${c.header}`);
 }
 
