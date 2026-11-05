@@ -13,6 +13,7 @@
  *   /v1/aps/:week           reader              Air Plant Shop scenario input (apsMap.js); POST /v1/collect/aps-map stores it
  *   /v1/gate/*              X-Gate-Secret       site-password gate: sign-in attempts, gate-session revocations (gate.js)
  *   reader                  X-Dashboard-Reader-Secret + X-Gate-Session, attached by the dashboard proxy only
+ *   /v1/reporting/weeks     X-Reporting-Secret  Marketing Dashboard server: published weekly totals only (reporting.js)
  *
  * The Worker never returns a secret, a D1 credential or customer data.
  */
@@ -40,6 +41,7 @@ import { pendingVerifications, verifyInputs, verifyPart, postVerifyReport } from
 import { getWeekStatus, verificationStatuses, postSignInEvent } from './weekStatus.js';
 import { uploadApsMap, apsMapCoverage, apsForWeek } from './apsMap.js';
 import { beginGateAttempt, gateAttemptSucceeded, revokeGateSession, gateSessionRevoked } from './gate.js';
+import { reportingWeeks } from './reporting.js';
 
 async function route(request, env) {
   const url = new URL(request.url);
@@ -63,6 +65,13 @@ async function route(request, env) {
     if ((g = p.match(/^\/v1\/gate\/attempts\/(\d{1,15})\/ok$/)) && m === 'POST') return gateAttemptSucceeded(env, g[1]);
     if (p === '/v1/gate/revocations' && m === 'POST') return revokeGateSession(request, env);
     if ((g = p.match(/^\/v1\/gate\/revocations\/(gat_[0-9a-f]{32})$/)) && m === 'GET') return gateSessionRevoked(env, g[1]);
+    throw new ApiError(404, 'not_found', 'No such route');
+  }
+
+  // ── Reporting (Marketing Dashboard server; its own credential, published totals only) ──
+  if (p.startsWith('/v1/reporting/')) {
+    requireSecret(request, env, 'reporting');
+    if (p === '/v1/reporting/weeks' && m === 'GET') return reportingWeeks(request, env);
     throw new ApiError(404, 'not_found', 'No such route');
   }
 

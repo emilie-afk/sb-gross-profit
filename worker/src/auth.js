@@ -7,6 +7,8 @@
  *   verify   X-Verify-Secret   verifier (gp-verify) /v1/verify/*, read-only /v1/collect/* parts
  *   gate     X-Gate-Secret     site-password gate   /v1/gate/* only: sign-in attempts and revocations (gate.js)
  *   reader   X-Dashboard-Reader-Secret + X-Gate-Session   the dashboard proxy, published reads
+ *   reporting X-Reporting-Secret  the Marketing Dashboard (server side): /v1/reporting/* only — published weekly
+ *            totals, no order, customer, catalog or credential data. Revoke by deleting the secret.
  *
  * The dashboard password is stored only as a PBKDF2-SHA256 hash
  * (DASHBOARD_PASSWORD_HASH). Sessions are HMAC-SHA256-signed, short-lived, and
@@ -78,6 +80,12 @@ function assertConfigured(env) {
   }
   const vals = [env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY];
   if (new Set(vals).size !== vals.length) throw new ApiError(500, 'misconfigured', 'Ingest, admin and session secrets must all differ');
+  // Fail closed for every route, including session cookies and sign-in: a reporting secret equal to any other secret
+  // would hand that credential (or, for SESSION_SIGNING_KEY, the power to sign sessions) to the reporting holder.
+  const r = env.REPORTING_SECRET;
+  if (r && [env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET, env.GATE_SECRET].includes(r)) {
+    throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must differ from every other secret');
+  }
 }
 
 const CLASSES = {
@@ -93,6 +101,9 @@ const CLASSES = {
   // The site-password gate (netlify/edge-functions/auth.js, auth-login.js): it may record sign-in attempts and
   // gate-session revocations and ask whether a gate session is revoked. It reads no report.
   gate: { header: 'X-Gate-Secret', key: 'GATE_SECRET', code: 'gate_auth' },
+  // The Marketing Dashboard's server (reporting.js): published weekly totals only. It reads no order, no draft and
+  // nothing else; deleting REPORTING_SECRET (wrangler secret delete) revokes it at once.
+  reporting: { header: 'X-Reporting-Secret', key: 'REPORTING_SECRET', code: 'reporting_auth' },
 };
 export const GATE_SESSION_HEADER = 'X-Gate-Session';
 const GATE_JTI = /^gat_[0-9a-f]{32}$/;
@@ -118,6 +129,15 @@ function assertGateConfigured(env) {
   if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET].includes(v)) throw new ApiError(500, 'misconfigured', 'GATE_SECRET must differ from every other secret');
 }
 
+function assertReportingConfigured(env) {
+  const v = env.REPORTING_SECRET;
+  if (!v) throw new ApiError(503, 'reporting_not_configured', 'Reporting access is not enabled on this Worker');
+  if (String(v).length < 32) throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must be at least 32 characters');
+  if ([env.INGEST_SECRET, env.ADMIN_SECRET, env.SESSION_SIGNING_KEY, env.VERIFY_SECRET, env.DASHBOARD_READER_SECRET, env.GATE_SECRET].includes(v)) {
+    throw new ApiError(500, 'misconfigured', 'REPORTING_SECRET must differ from every other secret');
+  }
+}
+
 /** Throws unless the request carries the secret for exactly this credential class. */
 export function requireSecret(request, env, cls) {
   assertConfigured(env);
@@ -126,6 +146,7 @@ export function requireSecret(request, env, cls) {
   if (cls === 'verify') assertVerifyConfigured(env);
   if (cls === 'reader') assertReaderConfigured(env);
   if (cls === 'gate') assertGateConfigured(env);
+  if (cls === 'reporting') assertReportingConfigured(env);
   const got = request.headers.get(c.header) || '';
   if (!got || !timingSafeEqual(got, env[c.key])) throw new ApiError(401, c.code, `Missing or invalid ${c.header}`);
 }
