@@ -291,12 +291,30 @@ def worker_check(origin, key):
 
 
 def expect_worker_reads(origin, key, slot):
+    status, slots = None, []
     for _ in range(12):                                # a secret can take a few seconds to reach every location
         status, slots = worker_check(origin, key)
         if status == 200 and slot in slots:
             return
         SLEEP(5)
-    raise Fail(f"the Worker did not accept the key in slot {slot} within one minute")
+    seen = "no slot reported" if not slots else "slot " + ",".join(slots) + " reported"
+    raise Fail(f"the Worker did not accept the key in slot {slot} within one minute (last answer: HTTP {status}, {seen}). "
+               f"{worker_url_hint()}")
+
+
+def worker_url_hint():
+    """Whether WORKER_URL points at this Worker's workers.dev address. Says yes/no only; never prints an address."""
+    try:
+        name = urllib.parse.quote(build_config()[0]["name"])
+        sub = cf("GET", "/workers/subdomain", "read workers.dev subdomain").get("subdomain")
+        host = urllib.parse.urlsplit(env("WORKER_URL")).hostname or ""
+        if sub and host == f"{name}.{sub}.workers.dev":
+            return "WORKER_URL points to this Worker's workers.dev address"
+        if sub and host.endswith(".workers.dev"):
+            return "WORKER_URL is a workers.dev address of a DIFFERENT Worker; set it to this Worker's address"
+        return "WORKER_URL is not this Worker's workers.dev address; check it points to this Worker (custom domains are fine)"
+    except Fail:
+        return "could not compare WORKER_URL with this Worker's address"
 
 
 def expect_no_key_refused(origin):
