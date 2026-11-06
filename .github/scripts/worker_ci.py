@@ -32,6 +32,9 @@ import urllib.request
 CF_API = "https://api.cloudflare.com/client/v4"
 NETLIFY_API = "https://api.netlify.com/api/v1"
 TIMEOUT = 30
+# Cloudflare refuses Python's default User-Agent ("Python-urllib/…") with error 1010 before a Worker runs, so every
+# request names this client explicitly.
+USER_AGENT = "sb-worker-ci/1.0"
 SLEEP = time.sleep                                    # replaced in tests
 NOW = time.monotonic
 DEPLOY_WAIT_SECONDS = 20 * 60
@@ -68,7 +71,7 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 def http(method, url, headers=None, body=None, label="request", ok=(200,), want_headers=False):
     """One request, never redirected. Returns (status, parsed JSON or None). The body of an error is never read."""
     data = None
-    headers = dict(headers or {})
+    headers = {"user-agent": USER_AGENT, **(headers or {})}
     if body is not None:
         data = json.dumps(body).encode()
         headers["content-type"] = "application/json"
