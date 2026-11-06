@@ -635,6 +635,24 @@ class Redirects(unittest.TestCase):
         second.stop()
         self.assertEqual(second.hits, [], "no request (and so no credential) reached the redirect target")
 
+    def test_requests_name_the_client_never_the_python_default(self):
+        # Cloudflare answers Python-urllib's default User-Agent with 403 (error 1010) before the Worker runs.
+        def ok(h):
+            h.send_response(200)
+            h.end_headers()
+            h.wfile.write(b"{}")
+        s = _Server(ok)
+        s.start()
+        try:
+            ci.http("GET", s.url, {"x-reporting-secret": "k"}, label="probe")
+            ci.http("POST", s.url, {"authorization": "Bearer t"}, {"a": 1}, label="probe")
+        finally:
+            s.stop()
+        self.assertEqual(len(s.hits), 2)
+        for h in s.hits:
+            self.assertEqual(h.get("user-agent"), ci.USER_AGENT)
+            self.assertNotIn("Python-urllib", h.get("user-agent", ""))
+
     def test_error_bodies_are_never_returned_or_printed(self):
         def fail(h):
             h.send_response(500)
