@@ -147,6 +147,8 @@ class World:
                 return out(200, {"success": True, "result": {"bindings": b}})
             if bare.endswith("/schedules"):
                 return out(200, {"success": True, "result": {"schedules": []}})
+            if bare.endswith("/workers/subdomain"):
+                return out(200, {"success": True, "result": {"subdomain": "acct-sub"}})
             if bare.endswith("/query"):
                 return out(200, {"success": True, "result": [{"results": [{"name": n} for n in self.applied]}]})
         if url.startswith(ci.NETLIFY_API):
@@ -543,6 +545,28 @@ class Rotate(Base):
         self.assertEqual(code, 1)
         self.assertEqual([op for op in self.w.ops if op[0] == "wrangler"], [])
         self.assertIn("unreadable", out)
+
+    def test_failed_key_check_says_what_the_worker_answered_and_whether_the_url_is_this_worker(self):
+        for url, hint in (("https://other-worker.acct-sub.workers.dev", "DIFFERENT Worker"),
+                          ("https://demo-worker.acct-sub.workers.dev", "points to this Worker's workers.dev address"),
+                          ("https://reports.example.com", "not this Worker's workers.dev address")):
+            with self.subTest(url):
+                self.fresh()
+                self.w.no_key_status = 401
+                orig = self.w.http
+
+                def http(method, u, headers=None, *a, **k):
+                    if u.endswith("/v1/reports") and headers:
+                        return (404, None, {}) if k.get("want_headers") else (404, None)
+                    return orig(method, u, headers, *a, **k)
+                self.w.http = http
+                code, out = self.run_task("rotate", {"WORKER_URL": url})
+                self.assertEqual(code, 1)
+                self.assertIn("last answer: HTTP 404, no slot reported", out)
+                self.assertIn(hint, out)
+                self.assertNotIn(url.split("//")[1], out)
+                self.assertNotIn("acct-sub", out)
+                self.assert_safe()
 
     def test_header_auth(self):
         self.env.update(REPORTING_AUTH="header:X-Reporting-Secret")
