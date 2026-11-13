@@ -7,7 +7,9 @@
  * the earlier one under the same record id with a higher revision number.
  *
  * Returned per week: stable ids, the reporting dates and timezone, the scope (the Shopify store), completeness,
- * revision and publication times, and store-level totals. Never returned: orders, order lines, SKUs, customers,
+ * revision and publication times, store-level totals, and the same totals by order date ("days": operating
+ * revenue, known product cost, shipping expense and operating GP summed over the week's orders per business date,
+ * as the dashboard's period view adds them up). Never returned: orders, order lines, SKUs, customers,
  * catalog or policy detail, verification reports, publication holds, actors, notes or any secret.
  *
  * Paginated in week order with an opaque cursor (the last week returned). D1 cost: at most limit + 1 rows.
@@ -36,6 +38,37 @@ export function completenessOf(profitabilityStatus, partialWeek) {
   return { completeness, reasons };
 }
 
+const c2 = v => Math.round((Number(v) || 0) * 100) / 100;
+/**
+ * Totals by business date for the given snapshots, summed inside D1 (no order row reaches the Worker): chunked
+ * snapshots from their stored order parts' text, row snapshots from snapshot_order. Operating GP per day =
+ * operating revenue − known product cost − shipping expense, as the dashboard's period view computes it.
+ */
+async function dayTotals(db, ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const list = JSON.stringify(ids);
+  const [chunked, rows] = await db.batch([
+    db.prepare(`SELECT b.snapshot_id AS id, json_extract(o.value, '$.business_date') AS d, COUNT(*) AS n,
+        SUM(COALESCE(json_extract(o.value, '$.operating_revenue'), 0)) AS rev, SUM(COALESCE(json_extract(o.value, '$.known_product_cogs'), 0)) AS cogs,
+        SUM(COALESCE(json_extract(o.value, '$.ship_paid'), 0)) AS ship
+      FROM snapshot_blob b, json_each(b.body_text, '$.orders') o
+      WHERE b.snapshot_id IN (SELECT value FROM json_each(?1)) AND b.part >= 'orders:' AND b.part < 'orders;' AND b.body_text IS NOT NULL
+      GROUP BY b.snapshot_id, d`).bind(list),
+    db.prepare(`SELECT o.snapshot_id AS id, o.business_date AS d, COUNT(*) AS n, SUM(COALESCE(o.operating_revenue, 0)) AS rev,
+        SUM(COALESCE(o.known_product_cogs, 0)) AS cogs, SUM(COALESCE(o.ship_paid, 0)) AS ship
+      FROM snapshot_order o WHERE o.snapshot_id IN (SELECT value FROM json_each(?1)) GROUP BY o.snapshot_id, o.business_date`).bind(list),
+  ]);
+  for (const r of [...(chunked.results || []), ...(rows.results || [])]) {
+    if (typeof r.d !== 'string' || !WEEK_RE.test(r.d)) continue;
+    const rev = c2(r.rev), cogs = c2(r.cogs), ship = c2(r.ship);
+    (out.get(r.id) || out.set(r.id, []).get(r.id)).push({ date: r.d, orders: Number(r.n), gross_profit: c2(rev - cogs - ship),
+      gross_profit_revenue_basis: rev, product_cost: cogs, shipping_cost: ship });
+  }
+  for (const v of out.values()) v.sort((a, b) => (a.date < b.date ? -1 : 1));
+  return out;
+}
+
 export async function reportingWeeks(request, env) {
   const url = new URL(request.url);
   for (const k of url.searchParams.keys()) if (!['from', 'to', 'cursor', 'limit'].includes(k)) throw new ApiError(400, 'bad_query', `Unknown parameter ${k}`);
@@ -55,6 +88,7 @@ export async function reportingWeeks(request, env) {
     ORDER BY s.week_start LIMIT ?4`).bind(from, to, cursor, limit + 1).all()).results || [];
 
   const page = rows.slice(0, limit);
+  const days = await dayTotals(env.DB, page.map(r => r.snapshot_id));
   const settings = await getSettings(env.DB);
   const timezone = settings.store_timezone || DEFAULT_REPORTING_TIMEZONE;
   const weeks = page.map(r => {
@@ -81,6 +115,7 @@ export async function reportingWeeks(request, env) {
         orders_requiring_shipping_cost: num(r.orders_requiring_shipstation_rate),
         orders_with_shipping_cost: num(r.orders_with_valid_shipstation_rate),
       },
+      days: (days.get(r.snapshot_id) || []).filter(d => d.date >= (partialWeek?.reportingStart || r.week_start) && d.date <= addDays(r.week_start, 6)),
     };
   });
   return json({
