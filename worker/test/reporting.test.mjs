@@ -124,7 +124,7 @@ test('published weeks only, with dates, timezone, scope, completeness and revisi
   for (const s of ['#100001', 'secretNote', 'policy', 'cat-private-rev', 'internal reason', 'catalog', 'bridge', 'hold', env.REPORTING_SECRET, env.ADMIN_SECRET]) {
     assert.ok(!text.includes(s), `response must not contain ${s}`);
   }
-  assert.deepEqual(Object.keys(a).sort(), ['completeness', 'completeness_reasons', 'computed_at', 'currency', 'id', 'period', 'published_at', 'revision', 'scope', 'snapshot_id', 'totals']);
+  assert.deepEqual(Object.keys(a).sort(), ['completeness', 'completeness_reasons', 'computed_at', 'currency', 'days', 'id', 'period', 'published_at', 'revision', 'scope', 'snapshot_id', 'totals']);
 });
 
 test('a later published revision keeps the record id with a higher revision; the store timezone setting is used', async () => {
@@ -194,6 +194,26 @@ test('end to end: a week computed and published by the real path is reported', a
   assert.equal(w.totals.gross_profit, pub.totals.operatingGpAfterShipping);
   assert.equal(w.totals.gross_profit_revenue_basis, pub.totals.operatingRevenue);
   assert.equal(w.completeness === 'complete', pub.totals.profitabilityStatus === 'complete');
+  // Days: the real week's orders by business date; they add up to the week's totals.
+  assert.ok(w.days.length >= 1 && w.days.every(d => d.date >= WEEK && d.date <= w.period.end));
+  const sum = k => Math.round(w.days.reduce((a, d) => a + d[k], 0) * 100) / 100;
+  assert.ok(Math.abs(sum('gross_profit_revenue_basis') - w.totals.gross_profit_revenue_basis) <= 0.05, `revenue ${sum('gross_profit_revenue_basis')} vs ${w.totals.gross_profit_revenue_basis}`);
+  assert.ok(Math.abs(sum('gross_profit') - w.totals.gross_profit) <= 0.05, `gp ${sum('gross_profit')} vs ${w.totals.gross_profit}`);
+});
+
+test('days: a chunked week is summed by business date from its stored order parts, inside the week only, with no order data', async () => {
+  const env = await makeEnv({ REPORTING_SECRET: rnd() });
+  const id = await snap(env, '2026-09-28');
+  const order = (name, date, rev, cogs, ship) => ({ order_name: name, business_date: date, operating_revenue: rev, known_product_cogs: cogs, ship_paid: ship });
+  const part = (orders) => JSON.stringify({ orders });
+  for (const [k, orders] of [[0, [order('#900001', '2026-09-28', 100, 40, 10), order('#900002', '2026-10-01', 50, 20, null)]], [1, [order('#900003', '2026-10-01', 30, 10, 5), order('#900004', '2026-10-09', 999, 0, 0)]]]) {
+    await env.DB.prepare('INSERT INTO snapshot_blob (snapshot_id, part, sha256, body, body_text) VALUES (?1, ?2, ?3, ?4, ?5)').bind(id, `orders:${k}`, 'x', new Uint8Array([1]), part(orders)).run();
+  }
+  const r = await rep(env);
+  const [w] = r.json.weeks;
+  assert.deepEqual(w.days.map(d => [d.date, d.orders, d.gross_profit_revenue_basis, d.product_cost, d.shipping_cost, d.gross_profit]),
+    [['2026-09-28', 1, 100, 40, 10, 50], ['2026-10-01', 2, 80, 30, 5, 45]]);           // Oct 9 lies outside the week
+  assert.ok(!JSON.stringify(r.json).includes('#90000'), 'no order numbers');
 });
 
 test('rotation: REPORTING_SECRET_NEXT is accepted alongside the current key, held to the same rules, and revocable', async () => {
