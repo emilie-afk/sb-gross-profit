@@ -2714,7 +2714,6 @@ function renderDashboard(lines) {
   try { _lastShipBreakdown = shippingBreakdown(lines); } catch { _lastShipBreakdown = null; }
   renderShippingBreakdown(_lastShipBreakdown);
   renderReports(lines, s, openReport);
-  if (st) { const b = document.querySelector('[data-report="subpl"]'); if (b) { b.disabled = true; b.textContent = 'CSV upload only'; b.title = 'Available for CSV uploads only.'; } }
   renderChannelBreakdown(s, Object.values(s.byChannel).reduce((a, v) => a + v.revenue, 0));
   renderVendorBreakdown();
   buildFilters(lines);
@@ -3536,7 +3535,6 @@ window.sortSubPL = key => {
 };
 
 function renderSubPLView() {
-  if (storedState) { const v = document.getElementById('view-subpl'); if (v) v.style.display = 'none'; return; }
   const subLines = filteredLines.filter(l => /^(SUB|GSUB)/i.test(l.sku || ''));
 
   // Revenue: avg monthly price from paid orders (lineRevenue / subMonths where lineRevenue > 0)

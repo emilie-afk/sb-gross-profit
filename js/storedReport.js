@@ -209,7 +209,7 @@ export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder
       shipNote: first ? shipNoteOf(o) : null,
       isFreeShip: first && o.ship_collected === 0 && o.requires_ss_rate ? 'YES' : '',
       isRoute: !!flags.isRoute, isGiftCard: !!flags.isGiftCard, isDigital: !!flags.isDigital, isSubRenewal: !!flags.isSubRenewal,
-      isInfluencerSample: !!flags.isInfluencerSample, isProductLine: !!flags.isProductLine, subMonths: 1,
+      isInfluencerSample: !!flags.isInfluencerSample, isProductLine: !!flags.isProductLine, subMonths: subMonthsOf(l.sku),
       profitabilityStatus: o.profitability_status || null, shippingExpenseStatus: o.shipping_expense_status || null,
       refundAllocated: l.refund_allocated ?? 0, refundSource: l.refund_source || null,
       ...(first ? { orderOperatingRevenue: o.operating_revenue ?? null, orderOperatingGp: o.operating_gp ?? null } : {}),
@@ -240,8 +240,44 @@ export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder
       li.lineNetGp = li.lineGp !== null ? Math.round((li.lineGp + Math.round(delta * share * 100) / 100) * 100) / 100 : null;
       li.lineNetGpPct = li.lineNetGp !== null && li.lineRevenue ? Math.round(li.lineNetGp / li.lineRevenue * 1000) / 10 : null;
     }
+    subscriptionFields(g, byName.get(g[0].orderNum));
   }
   return out;
+}
+
+// ─── Subscription fields (Subscription P&L and the Subscriptions table) ──────────────────────────────────
+// The calculator's per-delivery subscription fields, rebuilt from the stored order and lines so automatic
+// reports get the same Subscription P&L as CSV uploads (shared/calculator.js, the isSubSku block):
+//   subMonths     the SKU's months (the last number of 1–24 in a SUB/GSUB SKU; 1 otherwise)
+//   subShipMo     the order's shipping × this line's revenue share ÷ months. The stored ship_collected is the
+//                 order's shipping ÷ the first line's months (the calculator's rule), so it is multiplied back.
+//   subSSCostMo   the order's ShipStation label cost (each box ships on its own label; null when not in yet)
+//   expSubShipMo  the expected monthly shipping fee; subShipLoss = label cost − shipping collected per month
+// Revenue share uses each line's revenue before refunds (the calculator's line price less line discount;
+// order discounts are spread in proportion, so the share is the same).
+const SUB_SHIP_NORMAL = 6.99, SUB_SHIP_POT = 7.99;                    // calculator.js: rates effective until Jul 2026
+export const isSubSku = sku => /^(SUB|GSUB)/i.test(sku || '');
+export function subMonthsOf(sku) {
+  const s = String(sku || '').toUpperCase();
+  if (!isSubSku(s)) return 1;
+  const nums = s.split('-').map(p => parseInt(p, 10)).filter(n => !isNaN(n) && n >= 1 && n <= 24);
+  return nums.length ? nums[nums.length - 1] : 1;
+}
+function subscriptionFields(g, o) {
+  for (const li of g) Object.assign(li, { subShipMo: null, expSubShipMo: null, subSSCostMo: null, subShipLoss: null });
+  if (!o || !g.some(li => isSubSku(li.sku))) return;
+  const rawShip = c(o.ship_collected) * subMonthsOf(g[0].sku);                    // cents, the whole order's shipping
+  const basis = li => Math.max(0, c(li.lineRevenue) + c(li.refundAllocated));
+  const tot = g.reduce((s, li) => s + basis(li), 0);
+  const ss = o.ship_paid_ss !== null && o.ship_paid_ss !== undefined && Number(o.ship_paid_ss) > 0 ? Number(o.ship_paid_ss) : null;
+  for (const li of g) {
+    if (!isSubSku(li.sku)) continue;
+    const share = tot > 0 ? Math.min(basis(li) / tot, 1) : 0;
+    li.subShipMo = Math.round(rawShip * share / li.subMonths) / 100;
+    const up = li.sku.toUpperCase();
+    li.expSubShipMo = up.includes('POT') || up.includes('UPGRADE') ? SUB_SHIP_POT : SUB_SHIP_NORMAL;
+    if (ss !== null) { li.subSSCostMo = Math.round(ss * 100) / 100; li.subShipLoss = d$(c(li.subSSCostMo) - c(li.subShipMo)); }
+  }
 }
 
 const SHIP_NOTE = { missing_shipstation_rate: 'No ShipStation cost yet', pass_through: 'HPD pass-through (Shopify shipping)' };
