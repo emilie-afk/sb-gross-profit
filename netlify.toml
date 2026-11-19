@@ -1,0 +1,24 @@
+[build]
+  command = "python build.py"
+  publish = "."
+
+# Edge functions are declared inline (export const config in each file), with paths that do not
+# overlap, so no function depends on running before another:
+#   auth-login.js  /__auth      site-password sign-in; native rate limit + exact lockout in the Worker
+#   auth.js        /* except /__auth, /api/v1/* and the gp-verify functions: the site-password gate
+#   api-proxy.js   /api/v1/*    same-origin proxy to the Worker; checks the gate session itself
+# (A function declared both here and inline is treated as inline, and functions declared here run
+# before inline ones: declaring the gate in both places made the proxy run first. Keep them inline.)
+# The verifier is called by the collector with its own trigger secret, not a browser.
+
+# Free-tier path: independent verification of collector-computed weeks (gp-verify).
+# Built by Netlify from this repository at the deployed commit. No schedule is set.
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+# The private business rules written by build.py (PRIVATE_RULES_JSON), bundled with the verifier.
+[functions.gp-verify]
+  included_files = ["data/private-rules.json"]
+[functions.gp-verify-background]
+  included_files = ["data/private-rules.json"]

@@ -1,0 +1,443 @@
+/**
+ * read.js — /v1 read routes
+ * =========================
+ * Dashboard sessions see PUBLISHED snapshots only. Admin callers may add
+ * ?includeDrafts=1 to review drafts and blocked revisions before go-live.
+ * ?provisional=1 (custom-date reports, "Include provisional data"): for a week with NO published
+ * revision, its latest independently VERIFIED revision is readable too, marked provisional and with the
+ * publication checks that hold it. Read only: nothing here publishes, writes or changes a gate; a week
+ * with a published revision is always read at that revision; weeks before PUBLICATION_EARLIEST_WEEK never.
+ * Nothing here returns raw source rows in bulk: order detail is paginated or
+ * fetched one order at a time.
+ */
+import { ApiError, json, jsonText, intParam, WEEK_RE } from './http.js';
+import { totalsFromRow } from './compute.js';
+import { gunzipCapped, blobBytes } from './gz.js';
+import { scenarioLines, indexRow, ORDERS_PER_PART } from '../../shared/resultParts.js';
+import { normalizeSku } from '../../shared/vendorCosts.js';
+
+export const ORDER_PAGE_MAX = 100;
+
+const P = (s, d) => { try { return s === null || s === undefined ? d : JSON.parse(s); } catch { return d; } };
+
+function statuses(url, reader) {
+  const drafts = reader.admin && url.searchParams.get('includeDrafts') === '1';
+  return drafts ? ['published', 'draft', 'blocked', 'superseded'] : ['published'];
+}
+
+/** Provisional reads: requested explicitly, never for weeks before the publication start. */
+const provisionalWanted = url => url.searchParams.get('provisional') === '1';
+const earliestOf = env => (WEEK_RE.test(env?.PUBLICATION_EARLIEST_WEEK || '') ? env.PUBLICATION_EARLIEST_WEEK : '0000-00-00');
+/** The latest verified collector revision of a week no revision of which is published. */
+export const PROVISIONAL_WHERE = `s.storage = 'chunked' AND s.status IN ('draft', 'blocked')
+    AND EXISTS (SELECT 1 FROM verify_report vv WHERE vv.snapshot_id = s.snapshot_id AND vv.status = 'verified')
+    AND NOT EXISTS (SELECT 1 FROM snapshot p WHERE p.week_start = s.week_start AND p.status = 'published')
+    AND NOT EXISTS (SELECT 1 FROM snapshot n JOIN verify_report nv ON nv.snapshot_id = n.snapshot_id
+      WHERE n.week_start = s.week_start AND n.revision > s.revision AND n.storage = 'chunked' AND n.status IN ('draft', 'blocked') AND nv.status = 'verified')`;
+/** The publication checks that hold a revision (codes and plain messages from its gate). */
+const holdOf = gate => (P(gate, {})?.failures || []).map(f => ({ code: String(f.code || ''), message: String(f.message || '') }));
+
+async function pickSnapshot(db, weekStart, url, reader, env = null) {
+  if (!WEEK_RE.test(weekStart)) throw new ApiError(400, 'bad_query', 'week must be YYYY-MM-DD');
+  const allowed = statuses(url, reader);
+  const rev = url.searchParams.get('revision');
+  // The verification report comes with the snapshot row (one query instead of two).
+  const V = `, v.status AS _v_status, v.report AS _v_report, v.diff AS _v_diff, v.attempts AS _v_attempts, v.at AS _v_at
+      FROM snapshot s LEFT JOIN verify_report v ON v.snapshot_id = s.snapshot_id`;
+  const q = rev
+    ? db.prepare(`SELECT s.*${V} WHERE s.week_start = ?1 AND s.revision = ?2 AND s.status IN (SELECT value FROM json_each(?3))`).bind(weekStart, parseInt(rev, 10), JSON.stringify(allowed))
+    : db.prepare(`SELECT s.*${V} WHERE s.week_start = ?1 AND s.status IN (SELECT value FROM json_each(?2))
+        ORDER BY CASE s.status WHEN 'published' THEN 0 ELSE 1 END, s.revision DESC LIMIT 1`).bind(weekStart, JSON.stringify(allowed));
+  let row = await q.first();
+  if (!row && provisionalWanted(url) && weekStart >= earliestOf(env)) {
+    row = await db.prepare(`SELECT s.*, r.gate AS _gate${V} LEFT JOIN reporting_run r ON r.run_id = s.run_id
+        WHERE s.week_start = ?1 AND ${PROVISIONAL_WHERE}${rev ? ' AND s.revision = ?2' : ''} LIMIT 1`).bind(...(rev ? [weekStart, parseInt(rev, 10)] : [weekStart])).first();
+    if (row) { const { _gate, ...rest } = row; row = { ...rest, _provisional: { hold: holdOf(_gate) } }; }
+  }
+  if (!row) throw new ApiError(404, reader.admin ? 'week_unknown' : 'not_published', `No ${allowed.length > 1 ? '' : 'published '}snapshot for ${weekStart}`);
+  const { _v_status, _v_report, _v_diff, _v_attempts, _v_at, ...s } = row;
+  if (s.storage !== 'chunked') return s;
+  // Same shape as before (verificationOf + withVerification): readers are logged in, and the
+  // logged-in dashboard shows the field-level differences.
+  return { ...s, _verification: _v_status ? { status: _v_status, at: _v_at, attempts: _v_attempts, counts: P(_v_report, {}),
+    ...(_v_diff ? { differences: P(_v_diff, null) } : {}) } : { status: 'pending' } };
+}
+
+/** Catalog selection as sessions see it: no acceptance reason or actor (admin audit only). */
+function catalogView(s, reader) {
+  const c = P(s.catalog_info, null);
+  if (!c || reader?.admin) return c;
+  const { acceptance, ...freshness } = c.freshness || {};
+  return { rev: c.rev, capturedAt: c.capturedAt, basis: c.basis, freshness: { status: freshness.status } };
+}
+
+const header = (s, reader = null) => ({ weekStart: s.week_start, revision: s.revision, status: s.status, snapshotId: s.snapshot_id,
+  computedAt: s.computed_at, publishedAt: s.published_at, engineVersion: s.engine_version, catalogRev: s.catalog_rev,
+  catalog: catalogView(s, reader), policy: P(s.policy, {}), profitabilityStatus: s.profitability_status,
+  ...(s.storage === 'chunked' ? { computedBy: 'collector', verification: s._verification || { status: 'pending' } } : {}),
+  ...(s._provisional ? { provisional: true, hold: s._provisional.hold } : {}) });
+
+// ─── Free-tier (collector-computed) snapshots: the same rows, read from gzip parts ──
+
+const PART_CAP = 8 * 1024 * 1024;
+async function part(db, s, name) {
+  const r = await db.prepare('SELECT body FROM snapshot_blob WHERE snapshot_id = ?1 AND part = ?2').bind(s.snapshot_id, name).first();
+  if (!r) throw new ApiError(500, 'snapshot_part_missing', 'A stored part of this snapshot is missing');
+  return JSON.parse(await gunzipCapped(blobBytes(r.body), PART_CAP));
+}
+/** Several parts in one query → Map name → gunzipped text. */
+async function partTexts(db, s, names) {
+  if (!names.length) return new Map();
+  const rows = (await db.prepare('SELECT part, body FROM snapshot_blob WHERE snapshot_id = ?1 AND part IN (SELECT value FROM json_each(?2))').bind(s.snapshot_id, JSON.stringify(names)).all()).results || [];
+  if (rows.length !== names.length) throw new ApiError(500, 'snapshot_part_missing', 'A stored part of this snapshot is missing');
+  const out = new Map();
+  for (const r of rows) out.set(r.part, await gunzipCapped(blobBytes(r.body), PART_CAP));
+  return out;
+}
+/** The order index: one tuple per order (engine order) with list fields and the part k holding the order. */
+const orderIndex = async (db, s) => (await part(db, s, 'orderindex')).orders.map(indexRow);
+/** SQLite ORDER BY semantics for one key: NULLs first ascending, last descending; numbers numerically, text binary. */
+const sqlCmp = (key, desc = false) => (a, b) => {
+  const x = a[key], y = b[key];
+  if (x === y) return 0;
+  if (x === null || x === undefined) return desc ? 1 : -1;
+  if (y === null || y === undefined) return desc ? -1 : 1;
+  const c = typeof x === 'number' && typeof y === 'number' ? x - y : (String(x) < String(y) ? -1 : 1);
+  return desc ? -c : c;
+};
+const chain = (...fs) => (a, b) => { for (const f of fs) { const c = f(a, b); if (c) return c; } return 0; };
+
+export async function listWeeks(request, env, reader) {
+  const url = new URL(request.url);
+  const allowed = statuses(url, reader);
+  const rows = (await env.DB.prepare(`SELECT s.week_start, s.revision, s.status, s.profitability_status, s.computed_at, s.storage, v.status AS verification,
+      t.operating_revenue, t.operating_gp_after_shipping, t.operating_gp_margin, t.cost_coverage_by_revenue,
+      t.orders_requiring_shipstation_rate, t.orders_with_valid_shipstation_rate, json_extract(t.labels, '$.partialWeek') AS partial_week
+    FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id LEFT JOIN verify_report v ON v.snapshot_id = s.snapshot_id
+    WHERE s.status IN (SELECT value FROM json_each(?1)) ORDER BY s.week_start DESC, s.revision DESC`).bind(JSON.stringify(allowed)).all()).results || [];
+  const weeks = new Map();
+  for (const r of rows) {
+    if (!weeks.has(r.week_start)) weeks.set(r.week_start, { weekStart: r.week_start, revisions: [] });
+    weeks.get(r.week_start).revisions.push({ revision: r.revision, status: r.status, profitabilityStatus: r.profitability_status,
+      computedAt: r.computed_at, operatingRevenue: r.operating_revenue, operatingGpAfterShipping: r.operating_gp_after_shipping,
+      operatingGpMargin: r.operating_gp_margin, costCoverageByRevenue: r.cost_coverage_by_revenue,
+      shippingCoverage: { ordersWithCost: r.orders_with_valid_shipstation_rate, ordersRequiringCost: r.orders_requiring_shipstation_rate },
+      ...(r.partial_week ? { partialWeek: P(r.partial_week, null) } : {}),
+      ...(r.storage === 'chunked' ? { computedBy: 'collector', verification: r.verification || 'pending' } : {}) });
+  }
+  if (provisionalWanted(url)) {
+    // Weeks with no published revision: their latest verified revision, marked provisional, with its holds.
+    const prov = (await env.DB.prepare(`SELECT s.week_start, s.revision, s.status, s.profitability_status, s.computed_at, r.gate,
+        t.operating_revenue, t.operating_gp_after_shipping, t.operating_gp_margin, t.cost_coverage_by_revenue, t.missing_cost_lines, t.missing_cost_revenue,
+        t.orders_requiring_shipstation_rate, t.orders_with_valid_shipstation_rate, json_extract(t.labels, '$.partialWeek') AS partial_week
+      FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id LEFT JOIN reporting_run r ON r.run_id = s.run_id
+      WHERE s.week_start >= ?1 AND ${PROVISIONAL_WHERE} ORDER BY s.week_start DESC`).bind(earliestOf(env)).all()).results || [];
+    for (const r of prov) {
+      if (!weeks.has(r.week_start)) weeks.set(r.week_start, { weekStart: r.week_start, revisions: [] });
+      weeks.get(r.week_start).revisions.push({ revision: r.revision, status: r.status, provisional: true, hold: holdOf(r.gate),
+        profitabilityStatus: r.profitability_status, computedAt: r.computed_at, operatingRevenue: r.operating_revenue,
+        operatingGpAfterShipping: r.operating_gp_after_shipping, operatingGpMargin: r.operating_gp_margin, costCoverageByRevenue: r.cost_coverage_by_revenue,
+        missingCostLines: r.missing_cost_lines, missingCostRevenue: r.missing_cost_revenue,
+        shippingCoverage: { ordersWithCost: r.orders_with_valid_shipstation_rate, ordersRequiringCost: r.orders_requiring_shipstation_rate },
+        ...(r.partial_week ? { partialWeek: P(r.partial_week, null) } : {}), computedBy: 'collector', verification: 'verified' });
+    }
+  }
+  return json({ weeks: [...weeks.values()].sort((a, b) => (a.weekStart < b.weekStart ? 1 : -1)) });
+}
+
+export async function getSnapshot(request, env, reader, weekStart) {
+  const url = new URL(request.url);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
+  const t = await env.DB.prepare('SELECT * FROM snapshot_totals WHERE snapshot_id = ?1').bind(s.snapshot_id).first();
+  const top = intParam(url, 'breakdownLimit', 50, { min: 1, max: 500 });
+  const sections = s.storage === 'chunked' ? await part(env.DB, s, 'sections') : null;
+  const bd = sections ? [...sections.breakdowns].sort(chain(sqlCmp('dimension'), sqlCmp('known_cost_revenue', true), sqlCmp('key')))
+    : (await env.DB.prepare('SELECT * FROM snapshot_breakdown WHERE snapshot_id = ?1 ORDER BY dimension, known_cost_revenue DESC, key').bind(s.snapshot_id).all()).results || [];
+  const breakdowns = {};
+  for (const b of bd) {
+    (breakdowns[b.dimension] ||= []);
+    if (breakdowns[b.dimension].length >= top) continue;
+    breakdowns[b.dimension].push({ key: b.key, units: b.units, knownCostRevenue: b.known_cost_revenue, knownCogs: b.known_cogs,
+      knownCostGp: b.known_cost_gp, knownCostMargin: b.known_cost_margin, missingCostRevenue: b.missing_cost_revenue,
+      missingCostUnits: b.missing_cost_units, missingCostLines: b.missing_cost_lines, coverageStatus: b.coverage_status,
+      gpLabel: b.missing_cost_lines ? 'Known-cost product GP' : 'Product GP',
+      ...(b.detail ? P(b.detail, {}) : {}) });
+  }
+  const recon = (sections ? [...sections.reconciliation].sort(sqlCmp('check_name'))
+    : (await env.DB.prepare('SELECT * FROM snapshot_reconciliation WHERE snapshot_id = ?1 ORDER BY check_name').bind(s.snapshot_id).all()).results || [])
+    .map(r => ({ check: r.check_name, expected: r.expected, actual: r.actual, delta: r.delta, passed: !!r.passed, blocking: !!r.blocking }));
+  const issueCounts = sections ? Object.fromEntries(Object.entries(sections.issues.reduce((m, r) => (m[r.kind] = (m[r.kind] || 0) + 1, m), {})).sort((a, b) => (a[0] < b[0] ? -1 : 1)))
+    : Object.fromEntries(((await env.DB.prepare('SELECT kind, COUNT(*) AS n FROM snapshot_issue WHERE snapshot_id = ?1 GROUP BY kind')
+      .bind(s.snapshot_id).all()).results || []).map(r => [r.kind, r.n]));
+  const narrative = P((await env.DB.prepare('SELECT narrative FROM snapshot_narrative WHERE snapshot_id = ?1').bind(s.snapshot_id).first())?.narrative, null);
+  // The narrative's comparison is always against the prior PUBLISHED week. A
+  // draft-basis comparison is an admin preview, returned only with includeDrafts.
+  const preview = reader.admin && url.searchParams.get('includeDrafts') === '1' ? P(s.draft_comparison, null) : undefined;
+  return json({ ...header(s, reader), totals: totalsFromRow(t), passThrough: { routeCollected: t.route_collected, routeRemitted: t.route_remitted, routeNet: t.route_net },
+    revenueBridge: P(t.revenue_bridge, null), breakdowns, reconciliation: recon, issueCounts, narrative,
+    ...(preview !== undefined ? { draftComparisonPreview: preview } : {}) });
+}
+
+// A final order_name key makes every sort total (identical in SQL and for chunked snapshots).
+const ORDER_SORTS = {
+  gp_asc: 'operating_gp ASC, order_name ASC', gp_desc: 'operating_gp DESC, order_name ASC', revenue_desc: 'operating_revenue DESC, order_name ASC',
+  date_desc: 'business_date DESC, order_name DESC', date_asc: 'business_date ASC, order_name ASC',
+};
+const ORDER_SORT_FNS = {
+  gp_asc: chain(sqlCmp('operating_gp'), sqlCmp('order_name')), gp_desc: chain(sqlCmp('operating_gp', true), sqlCmp('order_name')),
+  revenue_desc: chain(sqlCmp('operating_revenue', true), sqlCmp('order_name')),
+  date_desc: chain(sqlCmp('business_date', true), sqlCmp('order_name', true)), date_asc: chain(sqlCmp('business_date'), sqlCmp('order_name')),
+};
+
+export async function listOrders(request, env, reader, weekStart) {
+  const url = new URL(request.url);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
+  // Pages are capped at 100 orders (Workers Free: bounded CPU per request); page with offset.
+  const limit = intParam(url, 'limit', 50, { min: 1, max: ORDER_PAGE_MAX });
+  const offset = intParam(url, 'offset', 0, { min: 0 });
+  const sort = url.searchParams.get('sort') || 'gp_asc';
+  if (!ORDER_SORTS[sort]) throw new ApiError(400, 'bad_query', `sort must be one of ${Object.keys(ORDER_SORTS).join(', ')}`);
+  if (s.storage === 'chunked') {
+    const q = url.searchParams;
+    // Order parts stored with their text (migration 0019): D1 filters, sorts and pages the week's
+    // orders; the Worker parses only the page's rows, whatever the sort or filter.
+    const X = c => `json_extract(j.value, '$.${c}')`;
+    const where = ["b.snapshot_id = ?1", "b.part >= 'orders:' AND b.part < 'orders;'"], vals = [s.snapshot_id];
+    const add = (c, v) => { vals.push(v); where.push(`${X(c)} = ?${vals.length}`); };
+    if (q.get('missingCost') === 'true') where.push(`${X('missing_cost_lines')} > 0`);
+    if (q.get('missingShipping') === 'true') where.push(`${X('shipping_expense_status')} = 'missing_shipstation_rate'`);
+    if (q.get('channel')) add('channel', q.get('channel'));
+    if (q.get('category')) add('order_cat', q.get('category'));
+    if (q.get('status')) add('profitability_status', q.get('status'));
+    const from = `FROM snapshot_blob b, json_each(b.body_text, '$.orders') j WHERE ${where.join(' AND ')}`;
+    const orderBy = ORDER_SORTS[sort].split(', ').map(t => { const [c, dir] = t.split(' '); return `${X(c)} ${dir}`; }).join(', ');
+    const [nt, ct, pr] = await env.DB.batch([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND part >= 'orders:' AND part < 'orders;' AND body_text IS NULL").bind(s.snapshot_id),
+      env.DB.prepare(`SELECT COUNT(*) AS n ${from}`).bind(...vals),
+      env.DB.prepare(`SELECT j.value AS o ${from} ORDER BY ${orderBy} LIMIT ${limit} OFFSET ${offset}`).bind(...vals),
+    ]);
+    if ((nt.results?.[0]?.n ?? 1) === 0) {
+      return json({ ...header(s, reader), page: { offset, limit, total: ct.results?.[0]?.n || 0 }, sort, orders: (pr.results || []).map(r => orderOut(JSON.parse(r.o))) });
+    }
+    // Older snapshots (parts without text): filter and sort on the compact index; read only the
+    // parts that hold the page's orders (parts group orders in gp_asc order).
+
+    const idx = (await orderIndex(env.DB, s)).filter(o =>
+      (q.get('missingCost') !== 'true' || o.missing_cost_lines > 0) &&
+      (q.get('missingShipping') !== 'true' || o.shipping_expense_status === 'missing_shipstation_rate') &&
+      (!q.get('channel') || o.channel === q.get('channel')) && (!q.get('category') || o.order_cat === q.get('category')) &&
+      (!q.get('status') || o.profitability_status === q.get('status'))).sort(ORDER_SORT_FNS[sort]);
+    const page = idx.slice(offset, offset + limit);
+    const texts = await partTexts(env.DB, s, [...new Set(page.map(o => `orders:${o.part}`))]);
+    const rows = new Map();
+    for (const t of texts.values()) for (const o of JSON.parse(t).orders) rows.set(o.order_name, o);
+    return json({ ...header(s, reader), page: { offset, limit, total: idx.length }, sort, orders: page.map(o => orderOut(rows.get(o.order_name))) });
+  }
+  const where = ['snapshot_id = ?1']; const vals = [s.snapshot_id];
+  const add = (cond, v) => { vals.push(v); where.push(cond.replace('?', `?${vals.length}`)); };
+  if (url.searchParams.get('missingCost') === 'true') where.push('missing_cost_lines > 0');
+  if (url.searchParams.get('missingShipping') === 'true') where.push("shipping_expense_status = 'missing_shipstation_rate'");
+  if (url.searchParams.get('channel')) add('channel = ?', url.searchParams.get('channel'));
+  if (url.searchParams.get('category')) add('order_cat = ?', url.searchParams.get('category'));
+  if (url.searchParams.get('status')) add('profitability_status = ?', url.searchParams.get('status'));
+  const whereSql = where.join(' AND ');
+  const total = (await env.DB.prepare(`SELECT COUNT(*) AS n FROM snapshot_order WHERE ${whereSql}`).bind(...vals).first())?.n || 0;
+  const rows = (await env.DB.prepare(`SELECT * FROM snapshot_order WHERE ${whereSql} ORDER BY ${ORDER_SORTS[sort]} LIMIT ${limit} OFFSET ${offset}`)
+    .bind(...vals).all()).results || [];
+  return json({ ...header(s, reader), page: { offset, limit, total }, sort, orders: rows.map(orderOut) });
+}
+
+const orderOut = o => ({ orderName: o.order_name, businessDate: o.business_date, channel: o.channel, orderCat: o.order_cat,
+  operatingRevenue: o.operating_revenue, shopifyNetRevenue: o.shopify_net_revenue, routeCollected: o.route_collected,
+  knownProductCogs: o.known_product_cogs, shipCollected: o.ship_collected, shipPaid: o.ship_paid, shipPaidSS: o.ship_paid_ss,
+  shipPaidHP: o.ship_paid_hp, operatingGp: o.operating_gp, missingCostLines: o.missing_cost_lines,
+  requiresShipStationRate: o.requires_ss_rate === null ? null : !!o.requires_ss_rate,
+  hasValidShipStationRate: o.has_valid_ss_rate === null ? null : !!o.has_valid_ss_rate,
+  shippingExpenseSource: o.shipping_expense_source, shippingExpenseStatus: o.shipping_expense_status,
+  missingReason: o.missing_reason, profitabilityStatus: o.profitability_status, hpdShippingBasis: o.hpd_shipping_basis, lineCount: o.line_count });
+
+const lineOut = l => ({ lineIndex: l.line_index, sku: l.sku, product: l.product, vendorKey: l.vendor_key, channel: l.channel,
+  store: l.store, qty: l.qty, unitPrice: l.unit_price, unitCost: l.unit_cost, contractRevenue: l.contract_revenue,
+  lineCogs: l.line_cogs, knownCostGp: l.known_cost_gp, costSource: l.cost_source, costMatchType: l.cost_match_type,
+  missingCost: !!l.missing_cost, discountAllocated: l.discount_allocated, discountSource: l.discount_source,
+  refundAllocated: l.refund_allocated, refundSource: l.refund_source, routeCollected: l.route_collected,
+  routeRemitted: l.route_remitted, flags: P(l.flags, {}) });
+
+export async function getOrder(request, env, reader, weekStart, orderName) {
+  const url = new URL(request.url);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
+  let o, lines;
+  if (s.storage === 'chunked') {
+    // Parts stored with their text (migration 0019): D1 finds the order and its lines; nothing is gunzipped.
+    const X = c => `json_extract(j.value, '$.${c}')`;
+    const [nt, orr, lr] = await env.DB.batch([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND ((part >= 'orders:' AND part < 'orders;') OR (part >= 'lines:' AND part < 'lines;')) AND body_text IS NULL").bind(s.snapshot_id),
+      env.DB.prepare(`SELECT j.value AS o FROM snapshot_blob b, json_each(b.body_text, '$.orders') j WHERE b.snapshot_id = ?1 AND b.part >= 'orders:' AND b.part < 'orders;' AND ${X('order_name')} = ?2 LIMIT 1`).bind(s.snapshot_id, orderName),
+      env.DB.prepare(`SELECT j.value AS l FROM snapshot_blob b, json_each(b.body_text, '$.lines') j WHERE b.snapshot_id = ?1 AND b.part >= 'lines:' AND b.part < 'lines;' AND ${X('order_name')} = ?2 ORDER BY ${X('line_index')} ASC`).bind(s.snapshot_id, orderName),
+    ]);
+    if ((nt.results?.[0]?.n ?? 1) === 0) {
+      const row = orr.results?.[0];
+      if (!row) throw new ApiError(404, 'order_unknown', `No order ${orderName} in this snapshot`);
+      return json({ ...header(s, reader), order: orderOut(JSON.parse(row.o)), lines: (lr.results || []).map(r => lineOut(JSON.parse(r.l))) });
+    }
+    const t = (await part(env.DB, s, 'orderindex')).orders.find(x => x[0] === orderName);
+    const hit = t ? indexRow(t) : null;
+    if (hit) {
+      const texts = await partTexts(env.DB, s, [`orders:${hit.part}`, `lines:${hit.part}`]);
+      o = JSON.parse(texts.get(`orders:${hit.part}`)).orders.find(x => x.order_name === orderName);
+      lines = JSON.parse(texts.get(`lines:${hit.part}`)).lines.filter(l => l.order_name === orderName).sort(sqlCmp('line_index'));
+    }
+  } else {
+    o = await env.DB.prepare('SELECT * FROM snapshot_order WHERE snapshot_id = ?1 AND order_name = ?2').bind(s.snapshot_id, orderName).first();
+    lines = (await env.DB.prepare('SELECT * FROM snapshot_line WHERE snapshot_id = ?1 AND order_name = ?2 ORDER BY line_index')
+      .bind(s.snapshot_id, orderName).all()).results || [];
+  }
+  if (!o) throw new ApiError(404, 'order_unknown', `No order ${orderName} in this snapshot`);
+  return json({ ...header(s, reader), order: orderOut(o), lines: lines.map(lineOut) });
+}
+
+export async function listIssues(request, env, reader, weekStart) {
+  const url = new URL(request.url);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
+  const limit = intParam(url, 'limit', 100, { min: 1, max: 1000 });
+  const offset = intParam(url, 'offset', 0, { min: 0 });
+  const kind = url.searchParams.get('kind');
+  if (s.storage === 'chunked') {
+    const rows = (await part(env.DB, s, 'sections')).issues.filter(r => !kind || r.kind === kind).sort(sqlCmp('seq'));
+    return json({ ...header(s, reader), page: { offset, limit, total: rows.length }, issues: rows.slice(offset, offset + limit).map(r => ({ kind: r.kind, orderName: r.order_name, ...P(r.detail, {}) })) });
+  }
+  const vals = [s.snapshot_id]; let where = 'snapshot_id = ?1';
+  if (kind) { vals.push(kind); where += ' AND kind = ?2'; }
+  const total = (await env.DB.prepare(`SELECT COUNT(*) AS n FROM snapshot_issue WHERE ${where}`).bind(...vals).first())?.n || 0;
+  const rows = (await env.DB.prepare(`SELECT * FROM snapshot_issue WHERE ${where} ORDER BY seq LIMIT ${limit} OFFSET ${offset}`).bind(...vals).all()).results || [];
+  return json({ ...header(s, reader), page: { offset, limit, total }, issues: rows.map(r => ({ kind: r.kind, orderName: r.order_name, ...P(r.detail, {}) })) });
+}
+
+/**
+ * Compact line set for the browser's scenario calculator. Product lines and
+ * Route only, with just the fields scenario.js reads. Order-level shipping sits
+ * on each order's first line, as the engine delivers it.
+ */
+/**
+ * Paged (Workers Free: bounded CPU per request): page j holds the scenario lines of the orders
+ * j·40 … j·40+39 in order-name order, `page.count` pages in all; the pages joined are the
+ * week's scenario input. Both storages page identically.
+ */
+export async function scenarioInput(request, env, reader, weekStart) {
+  const url = new URL(request.url);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
+  const page = intParam(url, 'page', 0, { min: 0, max: 9999 });
+  if (s.storage === 'chunked') {
+    const [cnt, row] = await env.DB.batch([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND part LIKE 'scenario:%'").bind(s.snapshot_id),
+      env.DB.prepare('SELECT body FROM snapshot_blob WHERE snapshot_id = ?1 AND part = ?2').bind(s.snapshot_id, `scenario:${page}`),
+    ]);
+    const count = cnt.results?.[0]?.n || 0;
+    if (page >= count) throw new ApiError(404, 'page_unknown', `scenario-input has ${count} page(s)`);
+    // The stored text is canonical `{"lines":[…]}`: its array is served as text, not parsed and re-serialized.
+    const t = await gunzipCapped(blobBytes(row.results[0].body), PART_CAP);
+    if (!t.startsWith('{"lines":[') || !t.endsWith(']}')) throw new ApiError(500, 'snapshot_part_invalid', 'A stored scenario part is not canonical');
+    const head = JSON.stringify({ ...header(s, reader), page: { index: page, count } });
+    return jsonText(`${head.slice(0, -1)},"lines":${t.slice(9, -1)}}`);
+  }
+  const orders = (await env.DB.prepare('SELECT order_name, ship_collected, ship_paid, business_date FROM snapshot_order WHERE snapshot_id = ?1')
+    .bind(s.snapshot_id).all()).results || [];
+  const lines = (await env.DB.prepare('SELECT * FROM snapshot_line WHERE snapshot_id = ?1 ORDER BY order_name, line_index').bind(s.snapshot_id).all()).results || [];
+  const names = [...new Set([...orders.map(o => o.order_name), ...lines.map(l => l.order_name)])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const count = Math.max(1, Math.ceil(names.length / ORDERS_PER_PART));
+  if (page >= count) throw new ApiError(404, 'page_unknown', `scenario-input has ${count} page(s)`);
+  const group = new Set(names.slice(page * ORDERS_PER_PART, (page + 1) * ORDERS_PER_PART));
+  const out = scenarioLines(orders, lines.filter(l => group.has(l.order_name)));   // shared with the Free-tier result parts
+  return json({ ...header(s, reader), page: { index: page, count }, lines: out });
+}
+
+export async function history(request, env, reader) {
+  const url = new URL(request.url);
+  const from = url.searchParams.get('from') || '0000-01-01', to = url.searchParams.get('to') || '9999-12-31';
+  if (!WEEK_RE.test(from) || !WEEK_RE.test(to)) throw new ApiError(400, 'bad_query', 'from and to must be YYYY-MM-DD');
+  const allowed = statuses(url, reader).filter(x => x !== 'superseded');
+  const rows = (await env.DB.prepare(`SELECT s.week_start, s.revision, s.status, t.* FROM snapshot s JOIN snapshot_totals t ON t.snapshot_id = s.snapshot_id
+    WHERE s.week_start >= ?1 AND s.week_start <= ?2 AND s.status IN (SELECT value FROM json_each(?3))
+    ORDER BY s.week_start, CASE s.status WHEN 'published' THEN 0 ELSE 1 END, s.revision DESC`).bind(from, to, JSON.stringify(allowed)).all()).results || [];
+  const byWeek = new Map();
+  for (const r of rows) if (!byWeek.has(r.week_start)) byWeek.set(r.week_start, { weekStart: r.week_start, revision: r.revision, status: r.status, totals: totalsFromRow(r) });
+  return json({ from, to, definition: 'operating', weeks: [...byWeek.values()] });
+}
+
+export async function compare(request, env, reader) {
+  const url = new URL(request.url);
+  const a = url.searchParams.get('from'), b = url.searchParams.get('to');
+  if (!WEEK_RE.test(a || '') || !WEEK_RE.test(b || '')) throw new ApiError(400, 'bad_query', 'from and to must be YYYY-MM-DD week starts');
+  const [sa, sb] = [await pickSnapshot(env.DB, a, url, reader, env), await pickSnapshot(env.DB, b, url, reader, env)];
+  const [ta, tb] = await Promise.all([sa, sb].map(async s => totalsFromRow(await env.DB.prepare('SELECT * FROM snapshot_totals WHERE snapshot_id = ?1').bind(s.snapshot_id).first())));
+  const keys = ['operatingRevenue', 'operatingGpAfterShipping', 'knownCostProductRevenue', 'knownCostProductGp', 'shippingExpense',
+                'shippingCollected', 'routeCollected', 'missingCostRevenue'];
+  const delta = Object.fromEntries(keys.map(k => [k, Math.round(((tb[k] || 0) - (ta[k] || 0)) * 100) / 100]));
+  const provisional = ta.profitabilityStatus !== 'complete' || tb.profitabilityStatus !== 'complete';
+  return json({ definition: 'operating', from: { ...header(sa, reader), totals: ta }, to: { ...header(sb, reader), totals: tb }, delta,
+    comparable: sa.engine_version === sb.engine_version, provisional,
+    note: provisional ? 'Provisional comparison: at least one week has incomplete cost or shipping coverage.' : null });
+}
+
+/**
+ * GET /v1/snapshot/:week/report-part/:k[?snapshot=<id>] — the stored order and line rows of part k
+ * of the week's readable snapshot (sessions and the dashboard reader: the latest PUBLISHED revision),
+ * for the dashboard's report view (the CSV report's screens, fed by stored results, and the monthly
+ * view). Bounded: one part is at most ORDERS_PER_PART orders and their lines. With ?snapshot= the
+ * caller pins the revision it started from; if the week's readable revision has changed since,
+ * 409 snapshot_changed (a report never mixes revisions of one week).
+ * Collector-computed weeks: the parts' stored text is returned as is (nothing parsed or gunzipped
+ * when the parts have text). Reads: the snapshot row, the week's part names (primary-key range) and
+ * two part rows. Body: { snapshotId, weekStart, revision, part, parts, o: { orders }, l: { lines } },
+ * rows exactly as stored (snake_case columns).
+ */
+export async function reportPart(request, env, reader, weekStart, k) {
+  const url = new URL(request.url);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
+  const pin = url.searchParams.get('snapshot');
+  if (pin && pin !== s.snapshot_id) throw new ApiError(409, 'snapshot_changed', 'The week has a newer readable revision; reload the report');
+  const head = (n) => `{"snapshotId":${JSON.stringify(s.snapshot_id)},"weekStart":${JSON.stringify(s.week_start)},"revision":${Number(s.revision)},"part":${k},"parts":${n}`;
+  if (s.storage === 'chunked') {
+    const [names, rows] = await env.DB.batch([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND part >= 'orders:' AND part < 'orders;'").bind(s.snapshot_id),
+      env.DB.prepare('SELECT part, body_text, CASE WHEN body_text IS NULL THEN body END AS body FROM snapshot_blob WHERE snapshot_id = ?1 AND part IN (?2, ?3, ?4)')
+        .bind(s.snapshot_id, `orders:${k}`, `lines:${k}`, k === 0 ? 'sections' : `lines:${k}`),
+    ]);
+    const n = names.results?.[0]?.n || 0;
+    if (k >= n) throw new ApiError(404, 'part_unknown', `This snapshot has ${n} order parts`);
+    const byName = new Map((rows.results || []).map(r => [r.part, r]));
+    const text = async name => {
+      const r = byName.get(name);
+      if (!r) throw new ApiError(500, 'snapshot_part_missing', 'A stored part of this snapshot is missing');
+      return r.body_text ?? await gunzipCapped(blobBytes(r.body), PART_CAP);
+    };
+    // Part 0 also carries the week's SKU → vendor names (from the stored SKU breakdown), for lines
+    // stored without a vendor key, so a period's vendor breakdown matches the week's.
+    const vendors = k === 0 ? skuVendors(JSON.parse(byName.get('sections')?.body_text ?? await text('sections')).breakdowns) : null;
+    return jsonText(`${head(n)},"o":${await text(`orders:${k}`)},"l":${await text(`lines:${k}`)}${vendors ? `,"skuVendors":${JSON.stringify(vendors)}` : ''}}`);
+  }
+  // Worker-computed weeks (rows): the same grouping by order name, ORDERS_PER_PART at a time.
+  const n = Math.ceil(((await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshot_order WHERE snapshot_id = ?1').bind(s.snapshot_id).first())?.n || 0) / ORDERS_PER_PART);
+  if (k >= n) throw new ApiError(404, 'part_unknown', `This snapshot has ${n} order parts`);
+  const orders = (await env.DB.prepare('SELECT * FROM snapshot_order WHERE snapshot_id = ?1 ORDER BY order_name LIMIT ?2 OFFSET ?3')
+    .bind(s.snapshot_id, ORDERS_PER_PART, k * ORDERS_PER_PART).all()).results || [];
+  const lines = orders.length ? (await env.DB.prepare('SELECT * FROM snapshot_line WHERE snapshot_id = ?1 AND order_name IN (SELECT value FROM json_each(?2)) ORDER BY order_name, line_index')
+    .bind(s.snapshot_id, JSON.stringify(orders.map(o => o.order_name))).all()).results || [] : [];
+  for (const o of orders) delete o.snapshot_id;
+  for (const l of lines) delete l.snapshot_id;
+  const vendors = k === 0 ? skuVendors((await env.DB.prepare("SELECT dimension, detail FROM snapshot_breakdown WHERE snapshot_id = ?1 AND dimension = 'sku'").bind(s.snapshot_id).all()).results || []) : null;
+  return jsonText(`${head(n)},"o":${JSON.stringify({ orders })},"l":${JSON.stringify({ lines })}${vendors ? `,"skuVendors":${JSON.stringify(vendors)}` : ''}}`);
+}
+
+/** SKU breakdown rows → { normalized SKU: vendor } (the vendor each SKU was reported under; a SKU under two vendors is left out). */
+function skuVendors(breakdowns) {
+  const m = new Map();
+  for (const b of breakdowns || []) {
+    if (b.dimension !== 'sku') continue;
+    const d = P(b.detail, null);
+    if (!d?.sku) continue;
+    const k = normalizeSku(d.sku), prev = m.get(k);
+    m.set(k, prev === undefined || prev === d.vendor ? d.vendor : null);
+  }
+  return Object.fromEntries([...m].filter(([, v]) => v));
+}

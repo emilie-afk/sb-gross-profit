@@ -1,0 +1,88 @@
+# Weekly collector orchestrator (Windows host, C7)
+
+One scheduled job drives both collectors on the office PC. **It never runs the two Playwright browsers at the same time.**
+
+1. **ShipStation Shipping Cost Report.** `automation/shipstation-export` runs with its own browser profile, then closes the browser. The sanitized report is held for upload.
+2. **Shopify rolling orders export.** `automation/shopify-export` runs with its own browser profile and requests the export.
+3. **While Shopify prepares the emailed export,** the ShipStation report is uploaded over HTTP only. If Shopify downloaded directly, or was skipped, the upload happens right after instead.
+4. **Gmail and the Shopify upload.** Gmail is polled with read-only access and the fixed search, and the sanitized Shopify export is uploaded.
+5. **Independent sources.** Each source is reported to the Worker on its own; one failing never stops the other.
+6. **Free-tier path (`"pipeline": "free_tier"`).** The PC computes every week of the rolling window whose inputs changed, with the same shared engine, uploads the results, and asks the independent verifier (`gp-verify-background` on Netlify) to recompute them. See *Free-tier path* below.
+
+Each collector keeps its own profile folder (`%LOCALAPPDATA%\sb-shipstation-export`, `%LOCALAPPDATA%\sb-shopify-export`) and its own Credential Manager entries (`sb-shipstation-export`, `sb-shopify-export`, `sb-gmail-oauth-client`, `sb-gmail-readonly`). `sb-gp-ingest` is shared. The orchestrator itself holds no credentials; it only points at the two collectors' `config.local.json` files. Set up both collectors first (their READMEs).
+
+## Missed runs and restarts
+
+The job starts at **Monday 14:05 Ho Chi Minh time** on the Free-tier path (15:05 on the csv_text path). It also starts at logon/startup, and Task Scheduler runs a missed start as soon as possible. On every start it:
+
+1. Works out the last closed reporting week (Monday–Sunday, America/Los_Angeles). A week that has not closed is never collected.
+2. Asks the Worker's week plan (`GET /v1/ingest/week-plan`, ingest secret) which sources that week still lacks (`collected`).
+3. Collects only those. A restart after a successful week opens no browser (on the Free-tier path it still runs the compute step, which skips unchanged weeks and writes nothing), and a restart after a partial week collects only the missing source. If the Worker is unreachable, the local `state.json` (sources and statuses only) decides. Uploads are idempotent either way.
+4. Holds an OS run lock (a named pipe on Windows, see `src/runLock.mjs`) so two starts never overlap. The operating system frees it when the run's process exits for any reason, so a crashed or killed run never leaves a lock that blocks the next start; a paused run keeps it. `collector.lock` only records the holder's pid and start time for other tools.
+
+## Setup
+
+```
+cd automation\collector
+npm install
+copy config.example.json config.local.json
+```
+
+Set `workerUrl` in `config.local.json`, staging first, and `privateRulesFile` to the private rules document (the same JSON as Netlify's `PRIVATE_RULES_JSON`, kept outside the repository; free-tier runs refuse to start without it). Create one task with two triggers (PowerShell, as the user that runs the collectors):
+
+```
+$a = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c cd /d C:\path\to\automation\collector && npm run collect"
+$t1 = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 14:05      # Free-tier path; PC in UTC+07:00 (07:05 UTC). csv_text path: 15:05
+$t2 = New-ScheduledTaskTrigger -AtLogOn
+$s = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 3)
+Register-ScheduledTask -TaskName "SB weekly collector" -Action $a -Trigger $t1,$t2 -Settings $s
+```
+
+Remove the older per-collector weekly tasks, if they exist ("SB ShipStation export", "SB Shopify export"). Keep both daily quarantine purges.
+
+## Free-tier path
+
+Set `"pipeline": "free_tier"` (the default in `config.example.json`). The Worker then only validates and stores; it never computes a week (Workers Free: 10 ms CPU per request, 100,000 D1 rows written per day for the whole account).
+
+1. **Sources in segments.** Each sanitized file (the Shopify rolling export and the Shipping Cost Report) is uploaded in ≤ 100-row gzip segments. The Worker checks each segment's hash, decompresses it with a size cap, runs the same privacy guards as before and only then keeps it. Any failure rejects the whole file; only an error code comes back. Raw exports still never leave the PC.
+2. **Shipping Cost Report version.** The PC builds the per-date, per-order groups with the unchanged parser. The Worker checks them against its own segment sums and applies the approved rules: review for the first version, a coverage gap, a possibly incomplete last date, any row with Shipping Cost $0.00 or above the review threshold (setting `shipping_cost_review_cap_cents`, $100), and non-zero Insurance / Duties / Taxes / Import Fee. Otherwise new dates activate, identical dates are no-ops, late costs for orders that had none are filled in, and any change or removal of an accepted cost is held for review.
+3. **Orders.** Only new or changed orders are sent (content-addressed, 10 per request).
+4. **Compute.** For every week of the rolling window the PC fetches the Worker's signed manifest (exactly the inputs the Worker's own loaders would use). A week whose newest draft already has those inputs is skipped. Otherwise it computes with the unchanged engine and uploads the result parts. The Worker re-checks that nothing changed, evaluates the gate and stores the draft (`storage = 'chunked'`).
+5. **Verification.** One call to `gp-verify-background` recomputes every new draft on Netlify from the Worker's pinned inputs, compares every order and aggregate, and re-derives the orders and shipping dates from the retained sanitized sources. The PC then polls the drafts' verification state with one batched request (`/v1/collect/verification`; per-week status against an older Worker) for up to `verifyWaitMinutes` (8). A draft stays **provisional** until it is `verified`; a late verification shows as `verification_pending`, never as met.
+
+Every step is idempotent: a restart or a repeat run writes nothing when nothing changed.
+
+**Timing.** The target is a *verified* draft by Monday 15:30 ICT. The week closes Monday 00:00 in Los Angeles, which is 14:00 ICT in summer (PDT) and 15:00 ICT in winter (PST). Start the task at **Monday 14:05 ICT**: in summer it runs at once, in winter it waits for the close (`waitForCloseMinutes`, 75). The week status names exactly what is still pending (export, review, compute or verification) and never reports the target as met without a verified draft.
+
+Credentials (Windows Credential Manager): `sb-gp-ingest` as before, and `sb-gp-verify-trigger` for `verifyUrl`.
+
+## Worker side
+
+The Worker's first compute attempt is Monday 15:30 ICT.
+
+- **Missing source:** the week's single run waits (`waiting_for_sources`) and retries every 15 minutes to 18:30, then hourly to Tuesday 15:30. After that it becomes `source_timeout`; a later valid upload still resumes the same run on the next tick.
+- **Status:** the dashboard's Reports screen shows the status.
+- **Publication:** nothing publishes automatically.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every missing source was delivered, the week was already collected, or the week has not closed yet |
+| 5 | Another instance is running |
+| 40 | Partial: at least one source failed. The run output and each collector's manifest name the source and its own exit code (see the collector READMEs) |
+| 41 | Shopify's sign-in needs a person (two-step code or a human check). The ShipStation report was uploaded first; the week's status says "Shopify needs a person to sign in". `windows/weekly-task.ps1` opens the Shopify window again every 2 minutes until that start's time is up (it ends 15 minutes before the task's 3-hour limit); the next trigger (Monday every 3 hours for 12 hours, daily 07:20, at logon) opens it again, and the run continues by itself once someone signs in there |
+| 42 | Deferred: the day's D1 budget is used up (background work stops at 60% of the Free plan's daily allowance, `GET /v1/collect/budget`). Nothing more is attempted and nothing is retried soon; no done marker. The daily 07:20 (ICT) trigger after D1's 00:00 UTC reset resumes it |
+| 43 | The private rules file (`privateRulesFile` / `GP_PRIVATE_RULES_FILE`) is missing or invalid. Nothing is collected or uploaded; `windows/weekly-task.ps1` stops without retrying. Fix the file and run again |
+
+## Mid-week Shipping Cost Report refresh
+
+The Monday report ends on the closed week's Sunday, so that week's orders that ship on Monday or later have no ShipStation cost until the next Monday's report. While the closed week is not published (the Worker's week status), the collector exports ONE extra report for that week once ship dates through the following Tuesday are complete in the report's time zone (Wednesday there: the Thursday 07:20 ICT start), with ship dates through yesterday, then recomputes. It is skipped when this PC already knows the week's ShipStation expense coverage passes the gate (`ssCoverageThreshold`, default 0.95; recorded from a compute); an unknown coverage does not prevent it. A recovery start (after the week's done marker, `--recovery`) checks this PC's own refresh even when the Worker reports nothing unfinished. Pending refresh work found in `state.json` stops the start without budget (exit 42, or 40 when the budget is unknown) before any report-status call. With budget, it takes the collector run lock (exit 5 when another run holds it), reads `state.json` again, re-reads a refresh waiting for review (read-only), records an accepted one as done or a rejected one as rejected, writes the file and releases the lock; a due refresh, including one rejected in review, counts as unfinished work (`midweek_shipping_report`), so the start resumes and exports a fresh report. An upload that returns HTTP 200 is not completion. The collector reads the uploaded version's per-date outcomes for its dates after the closed week (`POST /v1/collect/scr/days`, which returns each date's outcome, plus the accepted owners for dates identical to them): all in force → done; any held for review → awaiting (never uploaded again; every later start re-reads that version); any rejected — by the Worker's checks or by a person, also when rejecting the held dates of a partially accepted version leaves its status `accepted` → a fresh report is exported when due. The Worker must answer with per-date outcomes (deploy it before the collector); without them a refresh stays awaiting. The coverage and the refresh are recorded per week in `state.json` on this PC (counts, version id, day hashes only); a refresh that fails is tried again by the next start. `"midweekShippingReport": false` in `config.local.json` turns it off.
+
+## Windows task (weekly-task.ps1 and install-task.ps1)
+
+`windows/install-task.ps1` without `-Apply` prints the task's actual settings and triggers; with `-Apply` it sets the triggers (Monday 15:05 repeating every 3 hours for 12 hours, daily 07:20, at logon) and the limits (ExecutionTimeLimit 3 hours, MultipleInstances IgnoreNew, StartWhenAvailable). It never changes the action, the user or credentials. `weekly-task.ps1` stops itself 15 minutes before the 3-hour limit, gives each attempt at most 100 minutes (a 30-minute sign-in wait plus a 45-minute export email wait fit), and stops an attempt that overruns together with its child processes, releasing the collector lock that attempt held. Only exit 0 writes `done-<week>.txt`.
+
+## Tests
+
+`tests/collector-orchestrator.test.mjs` in the main suite covers the order of steps, one browser at a time, independent sources, catch-up, the lock and the not-closed rule. It uses fakes only. `tests/collector-free-tier.test.mjs` runs the Free-tier path end to end against the real Worker code and the real verifier (browsers and Gmail faked).

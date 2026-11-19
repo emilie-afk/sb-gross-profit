@@ -1,0 +1,344 @@
+/**
+ * lib.mjs — pure helpers for the Shopify orders collector (C5)
+ * ============================================================
+ * No Playwright and no network here, so everything is tested in the main suite.
+ *
+ * The collector (export.mjs) asks Shopify Admin for the rolling eight-week
+ * orders export, reads the "export ready" email from the export mailbox with
+ * Gmail read-only access and a FIXED search, downloads the file into memory,
+ * sanitizes it at once and uploads only the sanitized CSV to the Worker.
+ *
+ * Privacy rules this file enforces:
+ *   • the Gmail search is a constant plus a numeric time bound; config cannot
+ *     supply or extend it;
+ *   • only links on Shopify-owned hosts are accepted, and the link, the email
+ *     body and the raw export are never returned in facts or written anywhere;
+ *   • the raw export is reduced to the approved columns and minimum free-text
+ *     form (shared/adapters/shopifyCsv.js + shopifyPrivacy.js) and re-checked
+ *     with the Worker's own validators before upload;
+ *   • refusals name columns, rules and counts, never values.
+ */
+import { scrub } from '../../shipstation-export/src/redact.mjs';
+import zlib from 'node:zlib';
+import crypto from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
+import { parseCSV } from '../../../shared/calculator.js';
+import { addDays } from '../../../shared/normalized.js';
+import {
+  prepareShopifyUpload, assertSanitizedShopifyOrderRows, currenciesOf, SHOPIFY_ORDERS_CSV_REQUIRED,
+} from '../../../shared/adapters/shopifyCsv.js';
+import { assertReducedShopifyOrderRows } from '../../../shared/adapters/shopifyPrivacy.js';
+import { assertSafeLocalDir, assertNoSecretsInConfig } from '../../shipstation-export/src/lib.mjs';
+import { corporateIngestEndpoint } from './corporateUpload.mjs';
+
+export const KIND = 'shopify_orders_export';
+export const INGEST_PATH = '/v1/ingest/shopify';
+export const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+export const RETENTION_MS = 72 * 3600_000;
+
+/** Process exit codes (shared meaning with the ShipStation job where they overlap). */
+export const EXIT = Object.freeze({
+  OK: 0, CONFIG: 10, NEEDS_2FA: 20, CAPTCHA: 21, UNKNOWN_PAGE: 22, LOGIN_FAILED: 23, GMAIL_AUTH: 24,
+  EXPORT_FAILED: 30, UPLOAD_FAILED: 31, EMAIL_TIMEOUT: 32,
+});
+
+const sha = s => crypto.createHash('sha256').update(s).digest('hex');
+const us = iso => { const [y, m, d] = iso.split('-'); return `${m}/${d}/${y}`; };
+
+/** Rolling eight-week window of order dates ending on the reporting week's Sunday. */
+export function rollingWindow(week) {
+  if (!week?.weekEnd || !/^\d{4}-\d{2}-\d{2}$/.test(week.weekEnd)) throw new Error('week.weekEnd must be YYYY-MM-DD');
+  const from = addDays(week.weekEnd, -55), to = week.weekEnd;
+  return { from, to, fromUS: us(from), toUS: us(to) };
+}
+
+// ─── Gmail: fixed search ──────────────────────────────────────────────────────
+
+/** The only Gmail search this collector ever runs. Not configurable. */
+export const GMAIL_FIXED_QUERY = 'from:shopify.com subject:export';
+/** Messages received more than this long before the export request are ignored. */
+export const EMAIL_CLOCK_SKEW_MS = 5 * 60_000;
+
+/** Fixed query + a numeric lower time bound (seconds since epoch). */
+export function gmailSearchQuery(requestedAtIso) {
+  const ms = Date.parse(requestedAtIso);
+  if (!Number.isFinite(ms)) throw new Error('requestedAt must be an ISO timestamp');
+  return `${GMAIL_FIXED_QUERY} after:${Math.floor((ms - EMAIL_CLOCK_SKEW_MS) / 1000)}`;
+}
+
+/** Shopify-owned hosts a download link may point to. Extending this is a code change. */
+export const DOWNLOAD_HOST_SUFFIXES = Object.freeze(['shopify.com', 'myshopify.com', 'shopifycloud.com', 'shopifycdn.com', 'shopifysvc.com']);
+export const hostAllowed = host => {
+  const h = String(host || '').toLowerCase();
+  return DOWNLOAD_HOST_SUFFIXES.some(s => h === s || h.endsWith(`.${s}`));
+};
+const SENDER_OK = /@([a-z0-9-]+\.)*shopify\.com>?\s*$/i;
+
+const decodeEntities = s => s.replace(/&amp;/gi, '&').replace(/&#x3d;|&#61;/gi, '=').replace(/&quot;/gi, '"');
+
+/**
+ * Candidate export-download links in an email body (HTML or text), in memory.
+ * Only https links on Shopify-owned hosts whose path or query mention an
+ * export or download are returned.
+ */
+export function extractDownloadLinks(body) {
+  const text = decodeEntities(String(body || ''));
+  const found = new Set();
+  for (const m of text.matchAll(/https?:\/\/[^\s"'<>()]+/gi)) {
+    let u; try { u = new URL(m[0].replace(/[.,;]+$/, '')); } catch { continue; }
+    if (u.protocol !== 'https:' || u.username || u.password) continue;
+    if (!hostAllowed(u.hostname)) continue;
+    if (!/(export|download)/i.test(u.pathname + u.search)) continue;
+    found.add(u.toString());
+  }
+  return [...found];
+}
+
+/**
+ * Choose the export email among messages read since the request.
+ * @param {{ id, internalDate: number, from: string, subject: string, links: string[] }[]} messages
+ * @returns {{ status: 'found', message, link } | { status: 'waiting' } | { status: 'ambiguous', count }}
+ */
+export function selectExportMessage(messages, { requestedAt }) {
+  const since = Date.parse(requestedAt) - EMAIL_CLOCK_SKEW_MS;
+  const ok = (messages || []).filter(m => Number(m.internalDate) >= since && SENDER_OK.test(String(m.from || ''))
+    && /export/i.test(String(m.subject || '')) && /order/i.test(String(m.subject || '')) && (m.links || []).length === 1);
+  if (!ok.length) return { status: 'waiting' };
+  if (ok.length > 1) return { status: 'ambiguous', count: ok.length };
+  return { status: 'found', message: ok[0], link: ok[0].links[0] };
+}
+
+// ─── Export file ──────────────────────────────────────────────────────────────
+
+/** What the downloaded bytes are. Only a Shopify orders CSV is accepted. */
+export function detectExportFormat(buf, contentType = '') {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || '');
+  if (!b.length) return 'empty';
+  if (b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04) return 'zip';
+  const head = b.subarray(0, 1024).toString('utf8').replace(/^﻿/, '');
+  if (/html/i.test(contentType) || /^\s*</.test(head) || /<html/i.test(head)) return 'html';
+  const first = head.split(/\r?\n/, 1)[0];
+  if (/^"?Name"?,/.test(first)) return 'shopify_orders_csv';
+  return 'unknown';
+}
+
+/**
+ * Shopify emails large order exports as a ZIP holding one CSV. Extract that one entry in memory
+ * (stored or deflate; no encryption, CRC checked, output capped). Anything else → null.
+ * Since 2026-11-10 Shopify writes the entry's sizes as 0xFFFFFFFF with the real values in a ZIP64 extra field
+ * (id 0x0001) even for small files; those sizes (and offset) are read from that field. A ZIP64 archive
+ * (end record with 0xFFFF entries / 0xFFFFFFFF offset) is still refused.
+ */
+export const ZIP_MAX_CSV_BYTES = 512 * 1024 * 1024;
+const MAX32 = 0xffffffff;
+/** Central-directory sizes, with any 0xFFFFFFFF value taken from the ZIP64 extra field (id 0x0001). null = unreadable. */
+function zip64Sizes(extra, { usize, csize, local }) {
+  if (usize !== MAX32 && csize !== MAX32 && local !== MAX32) return { usize, csize, local };
+  for (let i = 0; i + 4 <= extra.length;) {
+    const id = extra.readUInt16LE(i), len = extra.readUInt16LE(i + 2), body = extra.subarray(i + 4, i + 4 + len);
+    if (id === 0x0001) {
+      let o = 0;
+      const next = () => { if (o + 8 > body.length) return null; const v = body.readBigUInt64LE(o); o += 8; return v > BigInt(Number.MAX_SAFE_INTEGER) ? null : Number(v); };
+      const u = usize === MAX32 ? next() : usize, c = csize === MAX32 ? next() : csize, l = local === MAX32 ? next() : local;
+      return u === null || c === null || l === null ? null : { usize: u, csize: c, local: l };
+    }
+    i += 4 + len;
+  }
+  return null;
+}
+export function unzipSingleCsv(buf, { maxBytes = ZIP_MAX_CSV_BYTES } = {}) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || '');
+  let eocd = -1;
+  for (let i = b.length - 22; i >= Math.max(0, b.length - 22 - 65535); i--) if (b.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) return null;
+  const count = b.readUInt16LE(eocd + 10), cdOffset = b.readUInt32LE(eocd + 16);
+  if (count === 0xffff || cdOffset === 0xffffffff) return null;                    // ZIP64
+  const files = [];
+  for (let n = 0, p = cdOffset; n < count; n++) {
+    if (p + 46 > b.length || b.readUInt32LE(p) !== 0x02014b50) return null;
+    const flags = b.readUInt16LE(p + 8), method = b.readUInt16LE(p + 10), crc = b.readUInt32LE(p + 16);
+    const csize = b.readUInt32LE(p + 20), usize = b.readUInt32LE(p + 24);
+    const nl = b.readUInt16LE(p + 28), el = b.readUInt16LE(p + 30), cl = b.readUInt16LE(p + 32), local = b.readUInt32LE(p + 42);
+    const name = b.subarray(p + 46, p + 46 + nl).toString('utf8');
+    const z = zip64Sizes(b.subarray(p + 46 + nl, p + 46 + nl + el), { usize, csize, local });
+    if (!z) return null;
+    if (!name.endsWith('/')) files.push({ name, flags, method, crc, ...z });
+    p += 46 + nl + el + cl;
+  }
+  if (files.length !== 1 || !/\.csv$/i.test(files[0].name)) return null;
+  const f = files[0];
+  if (f.flags & 1 || f.usize > maxBytes || f.csize > b.length || f.local + 30 > b.length) return null;   // encrypted, too large or out of range
+  if (b.readUInt32LE(f.local) !== 0x04034b50) return null;
+  const start = f.local + 30 + b.readUInt16LE(f.local + 26) + b.readUInt16LE(f.local + 28);
+  const data = b.subarray(start, start + f.csize);
+  let out;
+  if (f.method === 0) out = Buffer.from(data);
+  else if (f.method === 8) { try { out = zlib.inflateRawSync(data, { maxOutputLength: maxBytes }); } catch { return null; } }
+  else return null;
+  if (out.length !== f.usize || zlib.crc32(out) !== f.crc) { out.fill(0); return null; }
+  return { name: f.name, body: out };
+}
+
+/** Columns the collector requires beyond the Worker's minimum (C3 evidence and refunds). */
+export const COLLECTOR_REQUIRED_COLUMNS = Object.freeze([...SHOPIFY_ORDERS_CSV_REQUIRED, 'Cancelled at', 'Fulfilled at', 'Financial Status']);
+const REFUND_COLUMNS = ['Refunded Amount', 'Refunded amount'];
+
+/**
+ * Raw export text (in memory) → sanitized upload, or a refusal.
+ * @returns {{ refused: string, reason: string, detail? } | { path, payload, sanitizedText, facts }}
+ */
+export function prepareShopifyExport(text, { week, exportedAt }) {
+  const win = rollingWindow(week);
+  const raw = String(text || '').replace(/^﻿/, '');
+  const rawSha256 = sha(raw);
+  let rows;
+  try { rows = parseCSV(raw); } catch { return { refused: 'unknown_export_format', reason: 'The file is not a CSV' }; }
+  if (!rows.length) return { refused: 'no_orders', reason: 'The export has no order rows' };
+  const headers = Object.keys(rows[0]);
+  if (headers[0] !== 'Name') return { refused: 'unknown_export_format', reason: 'The first column is not Shopify’s order Name' };
+  const missing = COLLECTOR_REQUIRED_COLUMNS.filter(h => !headers.includes(h));
+  if (!REFUND_COLUMNS.some(h => headers.includes(h))) missing.push('Refunded Amount');
+  if (missing.length) return { refused: 'missing_columns', reason: `Missing columns: ${missing.join(', ')}`, detail: { missing } };
+
+  const prep = prepareShopifyUpload(rows);
+  if (prep.problems.length) {
+    const byRule = {}, newSources = {};
+    for (const p of prep.problems) {
+      const k = `${p.column}: ${p.rule}`; byRule[k] = (byRule[k] || 0) + 1;
+      if (p.sourceId) newSources[p.sourceId] = (newSources[p.sourceId] || 0) + 1;   // identifier-shaped Source only
+    }
+    return { refused: 'sanitization_failed', reason: 'Free text outside the approved form',
+             detail: { problems: byRule, ...(Object.keys(newSources).length ? { newSources } : {}) } };
+  }
+  // Belt and braces: the Worker's own checks must pass on what would be uploaded.
+  let clean;
+  try {
+    clean = parseCSV(prep.text);
+    assertSanitizedShopifyOrderRows(clean);
+    assertReducedShopifyOrderRows(clean);
+  } catch (e) {
+    return { refused: 'sanitization_failed', reason: 'Sanitized rows fail the Worker contract', detail: { code: e.code || e.name, paths: (e.paths || []).length } };
+  }
+
+  // The export must be the requested rolling window: every order date inside it. Shopify's
+  // "Orders by date" filter does not use Created at: it returned an order created at 00:10 the
+  // morning after the window, and the NEXT window's export did NOT contain it (production backfill,
+  // 2026-10-02: leaving it out lost the order). So up to BOUNDARY_SPILL_MAX orders created on the day
+  // right after the window are KEPT and uploaded (the Worker files each order under its own Created-at
+  // week) and counted. Anything else outside the window is still a wrong filter and refuses the export.
+  const firstRow = new Map();
+  for (const r of clean) { const n = String(r['Name'] || '').trim(); if (n && !firstRow.has(n)) firstRow.set(n, r); }
+  const dateOf = r => String(r['Created at'] || '').slice(0, 10);
+  const dates = [...firstRow.values()].map(dateOf);
+  const badDates = dates.filter(d => !/^\d{4}-\d{2}-\d{2}$/.test(d)).length;
+  if (badDates) return { refused: 'unknown_export_format', reason: `${badDates} order(s) have an unreadable Created at` };
+  const dayAfter = addDays(win.to, 1);
+  const spill = new Set([...firstRow].filter(([, r]) => dateOf(r) === dayAfter).map(([n]) => n));
+  const outside = dates.filter(d => d < win.from || d > win.to).length;
+  const sorted = dates.slice().sort();
+  const firstOrderDate = sorted[0] || null, lastOrderDate = sorted[sorted.length - 1] || null;
+  if (outside && (outside !== spill.size || spill.size > BOUNDARY_SPILL_MAX)) return { refused: 'export_window_mismatch',
+    reason: `${outside} order(s) fall outside ${win.from} → ${win.to}; check the export filter`, detail: { outside, firstOrderDate, lastOrderDate } };
+  const upText = prep.text, kept = clean;
+
+  const sanitizedSha256 = sha(upText);
+  return {
+    path: INGEST_PATH,
+    sanitizedText: upText,
+    payload: { format: 'csv_text', mode: 'rolling', weekStart: week.weekStart, text: upText, sanitizedSha256, exportedAt,
+               windowFrom: win.from, windowTo: win.to },
+    facts: { kind: KIND, rawSha256, sanitizedSha256, rowCount: kept.length, orderCount: firstRow.size, columns: prep.columns,
+             droppedColumns: prep.droppedColumns, currencies: currenciesOf(kept), windowFrom: win.from, windowTo: win.to,
+             firstOrderDate, lastOrderDate, ...(spill.size ? { keptAfterWindow: spill.size } : {}) },
+  };
+}
+/** At most this many orders created on the day after the window are kept instead of refusing the export. */
+export const BOUNDARY_SPILL_MAX = 10;
+
+// ─── Config and local folders ─────────────────────────────────────────────────
+
+const GMAIL_KEYS = new Set(['mailbox', 'credentialTarget', 'clientCredentialTarget', 'pollSeconds', 'timeoutMinutes', '_comment']);
+const QUERY_KEY = /^(q|query|search|searchquery|gmailquery|filter)$/i;
+
+/** Validate the collector config: no secrets, no Gmail search, sane bounds. */
+export function assertCollectorConfig(config) {
+  assertNoSecretsInConfig(config);
+  const bad = [];
+  const walk = (v, p) => {
+    if (QUERY_KEY.test(p.split('.').pop())) bad.push(p);
+    if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, `${p}.${k}`);
+  };
+  walk(config, '$');
+  if (bad.length) throw new Error(`The Gmail search is fixed in code; remove ${bad.join(', ')} from the config`);
+  const g = config.gmail || {};
+  for (const k of Object.keys(g)) if (!GMAIL_KEYS.has(k)) throw new Error(`Unknown gmail setting ${k}`);
+  if (!/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(String(g.mailbox || ''))) throw new Error('gmail.mailbox must be the export mailbox address');
+  const poll = g.pollSeconds ?? 60, timeout = g.timeoutMinutes ?? 45;
+  if (!(poll >= 15 && poll <= 600)) throw new Error('gmail.pollSeconds must be between 15 and 600');
+  if (!(timeout >= 5 && timeout <= 120)) throw new Error('gmail.timeoutMinutes must be between 5 and 120');
+  if (config.signInWaitMinutes !== undefined && !(Number.isInteger(config.signInWaitMinutes) && config.signInWaitMinutes >= 0 && config.signInWaitMinutes <= 120)) {
+    throw new Error('signInWaitMinutes must be a whole number of minutes, 0–120');
+  }
+  adminOrigin(config.adminUrl);
+  if (config.corporateIngestUrl != null && config.corporateIngestUrl !== '') corporateIngestEndpoint(config.corporateIngestUrl);
+  if (config.corporateIngestCredentialTarget != null && !/^[\w.-]{1,128}$/.test(String(config.corporateIngestCredentialTarget))) {
+    throw new Error('corporateIngestCredentialTarget must be a Credential Manager target name');
+  }
+  return { pollSeconds: poll, timeoutMinutes: timeout };
+}
+
+/** The Shopify Admin origin; export steps may only navigate inside it. */
+export function adminOrigin(adminUrl) {
+  let u; try { u = new URL(adminUrl); } catch { throw new Error('adminUrl must be the https Shopify Admin URL'); }
+  const okHost = u.hostname === 'admin.shopify.com' || u.hostname.endsWith('.myshopify.com');
+  if (u.protocol !== 'https:' || !okHost) throw new Error('adminUrl must be https://admin.shopify.com/store/<handle> or https://<shop>.myshopify.com/admin');
+  return u.origin;
+}
+
+/** Local folders outside the repository and any cloud-synced folder. */
+export function localPaths(config = {}) {
+  const base = config.localDir || path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share'), 'sb-shopify-export');
+  assertSafeLocalDir(base);
+  return { base, profile: path.join(base, config.browserChannel === 'chrome' ? 'profile-chrome' : 'profile'), runs: path.join(base, 'runs'), downloads: path.join(base, 'downloads'),
+           quarantine: path.join(base, 'quarantine') };
+}
+
+/**
+ * Error text safe for a manifest: the first line only (Playwright's "Call log" can repeat typed
+ * values), no quoted fill/type arguments, no URLs, no e-mail addresses, bounded length.
+ */
+export function safeError(e) {
+  return scrub(String(e?.message || e || 'error')).split('\n')[0]
+    .replace(/(fill|type|press|pressSequentially)\((["'`]).*?\2\)/g, '$1(<redacted>)')
+    .replace(/https?:\/\/\S+/gi, '<url>')
+    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '<email>')
+    .slice(0, 300);
+}
+
+/**
+ * Optional `browserChannel` ("msedge" or "chrome"): drive the installed Edge or Chrome instead of
+ * Playwright's bundled Chromium (on some Windows PCs the bundled build will not start). The
+ * collector's own profile folder is used either way, never the person's browser profile.
+ */
+export function browserLaunchOptions(config) {
+  const ch = config?.browserChannel ?? null;
+  if (ch === null || ch === undefined || ch === '') return {};
+  if (!['msedge', 'chrome'].includes(ch)) throw new Error('browserChannel must be "msedge", "chrome" or absent');
+  return { channel: ch };
+}
+
+/**
+ * The accessible name Shopify Admin's calendar gives a day button: "Monday August 3 2026"
+ * (prefixed with "Start of range", "End of range" or "Today" when those apply).
+ */
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+export function calendarDayLabel(ymd) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd));
+  if (!m) throw new Error('calendarDayLabel needs YYYY-MM-DD');
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  return `${WEEKDAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${d.getUTCFullYear()}`;
+}
+/** Matches a day button by its label, whatever range/today prefix it carries. */
+export const calendarDayPattern = ymd => new RegExp(`(^|\\s)${calendarDayLabel(ymd)}$`);

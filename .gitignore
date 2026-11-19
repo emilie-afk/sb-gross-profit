@@ -1,0 +1,26 @@
+__pycache__/
+node_modules/
+data/
+
+# ── Weekly automation: never commit source data, generated order data, dumps or secrets ──
+*.csv
+!tests/**/*.csv
+*.sqlite
+*.sqlite3
+*.db
+*.sql.gz
+worker/.wrangler/
+worker/.dev.vars
+.dev.vars
+.env
+.env.*
+automation/**/config.local.json
+automation/**/storage-state*.json
+automation/**/downloads/
+automation/**/runs/
+
+# Verification drafts only: makes build.py skip the catalog push. Never commit.
+CATALOG_PUSH_DISABLED
+
+# Worker release: the generated config holds the private rules. Never commit.
+worker/wrangler.release.toml

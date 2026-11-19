@@ -1,0 +1,255 @@
+#!/usr/bin/env node
+/**
+ * export.mjs — weekly ShipStation custom shipment export (Windows host)
+ * ====================================================================
+ *   node src/export.mjs --config config.local.json [--kind shipstation_shipping_cost_report|shipstation_mapping_export]
+ *                       [--week 2026-09-14] [--headed]
+ *
+ * 1. Opens a persistent browser profile kept OUTSIDE the repository
+ *    (%LOCALAPPDATA%\sb-shipstation-export\profile).
+ * 2. Classifies the page (authState.mjs). If a login form is shown, fills it
+ *    from Windows Credential Manager. If 2FA or a captcha is shown, stops with
+ *    a distinct exit code so a person can run login.mjs once.
+ * 3. Only when authenticated, runs the export steps recorded in config.
+ * 4. Refuses any file whose headers include customer columns, or that is not a
+ *    valid export (no rows, no shipment/order/cost columns).
+ * 5. Uploads the CSV straight to the Worker (/v1/ingest/shipstation) with the
+ *    ingest secret from Windows Credential Manager (delivery "worker", the
+ *    default). delivery "drive" keeps the old copy-to-folder behaviour for
+ *    rollback only.
+ * 6. Writes a run manifest (week, export time, source hash, ingest result; no
+ *    secrets, no row data) and exits with EXIT codes.
+ *
+ * Nothing here stores a password, 2FA code, session cookie or browser token.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
+import { detectAuthState, settleAuthState, NEEDS_HUMAN, EXIT } from './authState.mjs';
+import { readWindowsCredential } from './credentials.mjs';
+import { writeRunRecord, safeError } from './redact.mjs';
+import { lastCompletedWeek, weekFromStart, render, localPaths, assertNoSecretsInConfig, purgeOlderThan, resolveDelivery, browserLaunchOptions } from './lib.mjs';
+import { uploadToWorker, UPLOAD_EXIT, workerEndpoint } from './upload.mjs';
+import { readSignInBlock, writeSignInBlock, clearSignInBlock } from './signinBlock.mjs';
+
+export { safeError };
+export { writeRunRecord };
+import { prepareExport, reportWindow, KINDS, DEFAULT_KIND, assertKindEnabled, apsSteps } from './kinds.mjs';
+
+function argv() {
+  const a = process.argv.slice(2), o = {};
+  for (let i = 0; i < a.length; i++) if (a[i].startsWith('--')) o[a[i].slice(2)] = a[i + 1] && !a[i + 1].startsWith('--') ? a[++i] : true;
+  return o;
+}
+
+export async function runSteps(page, steps, vars, downloadsDir) {
+  let file = null;
+  for (const [i, s] of steps.entries()) {
+    const at = `step ${i + 1} (${s.action})`;
+    if (s.action === 'viewport') await page.setViewportSize({ width: Number(s.width) || 1500, height: Number(s.height) || 950 });   // a narrow default hides toolbar buttons
+    else if (s.action === 'goto') await page.goto(render(s.url, vars), { waitUntil: 'domcontentloaded' });
+    else if (s.action === 'click') await page.locator(s.selector).first().click({ timeout: s.timeout || 15000 });
+    else if (s.action === 'fill') await page.locator(s.selector).first().fill(render(s.value, vars), { timeout: s.timeout || 15000 });
+    else if (s.action === 'select') await page.locator(s.selector).first().selectOption(render(s.value, vars));
+    else if (s.action === 'waitFor') await page.locator(s.selector).first().waitFor({ timeout: s.timeout || 30000 });
+    else if (s.action === 'waitForLoad') await page.waitForLoadState('networkidle', { timeout: s.timeout || 30000 }).catch(() => {});   // a busy app may never go idle: bounded
+    else if (s.action === 'wait') await page.waitForTimeout(Math.min(Number(s.ms) || 0, 120000));
+    else if (s.action === 'download' && s.capture) {
+      // Take the file from the network instead of the browser's download manager: on the Windows
+      // laptop Edge 154 and Chrome 154 driven by Playwright closed ~3 s after a download started.
+      // The matching request is fetched by Playwright and answered with an empty 204 to the page.
+      // captureScope 'context': the file is opened in a NEW tab (ShipStation's shipment export), so the route is
+      // set on the browser context, not only on this page.
+      const scope = s.captureScope === 'context' ? page.context() : page;
+      let settle; const got = new Promise(r => { settle = r; });
+      await scope.route(s.capture, async route => {
+        try { const res = await route.fetch({ timeout: s.timeout || 180000 }); settle({ status: res.status(), body: await res.body() }); }
+        catch (e) { settle({ status: 0, error: String(e.message).split('\n')[0].slice(0, 120) }); }
+        await route.fulfill({ status: 204, body: '' }).catch(() => {});
+      });
+      // The capture deadline is cleared on every path (success, failure, a failed click), so a finished run exits at once
+      // instead of waiting for the timer (up to 5 minutes for the APS export).
+      let timer = null, r;
+      try {
+        await page.locator(s.selector).first().click({ timeout: 15000 });
+        r = await Promise.race([got, new Promise(res => { timer = setTimeout(() => res({ status: 0, error: 'capture_timeout' }), s.timeout || 180000); })]);
+      } finally {
+        clearTimeout(timer);
+        await scope.unroute(s.capture).catch(() => {});
+      }
+      if (r.status !== 200 || !r.body?.length) throw new Error(`${at}: report download failed (${r.status} ${r.error || 'empty'})`);
+      file = path.join(downloadsDir, `download_${Date.now()}.csv`);
+      fs.writeFileSync(file, r.body);
+      r.body.fill(0);
+    }
+    else if (s.action === 'download') {
+      // One retry: on the real Windows run the browser twice reported the download target closed
+      // ("Target page, context or browser has been closed") where a manual run of the same steps worked.
+      let firstError = null;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const [dl] = await Promise.all([page.waitForEvent('download', { timeout: s.timeout || 120000 }), page.locator(s.selector).first().click()]);
+          const failure = await dl.failure();
+          if (failure) throw new Error(`download failed (${String(failure).slice(0, 60)})`);
+          file = path.join(downloadsDir, `download_${Date.now()}.csv`);
+          await dl.saveAs(file);
+          break;
+        } catch (e) {
+          if (attempt >= 2 || page.isClosed()) throw new Error(firstError ? `${firstError} | retry: ${String(e.message).split('\n')[0]}` : String(e.message).split('\n')[0]);
+          firstError = String(e.message).split('\n')[0].slice(0, 160);
+          await page.waitForTimeout(5000);
+          if (s.reopen) await page.locator(s.reopen).first().click({ timeout: 15000 }).catch(() => {});
+        }
+      }
+    } else throw new Error(`${at}: unknown action`);
+  }
+  if (!file) throw new Error('Export steps finished without a download step');
+  return file;
+}
+
+/**
+ * One ShipStation collection. With `deferUpload` the sanitized payload is
+ * returned as `pending` instead of uploaded, so the C7 collector orchestrator
+ * can upload it while it waits for Shopify's export email (one browser at a
+ * time). finishShipStationUpload() completes it and rewrites the manifest.
+ */
+export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, headed = false, deferUpload = false, apsWindow = null, scrRows = null, scrSource = null, resolveScrRows = null, reportTo = null,
+                                         retrySignIn = process.argv.includes('--retry-shipstation') }) {
+  assertNoSecretsInConfig(config);
+  const paths = localPaths(config);
+  for (const d of Object.values(paths)) fs.mkdirSync(d, { recursive: true });
+  const { delivery } = resolveDelivery(config);                          // Worker by default; Drive only if explicit
+  if (delivery === 'worker') workerEndpoint(config.workerUrl);            // fail fast on a bad URL
+  purgeOlderThan(paths.quarantine, 72 * 3600_000);                        // also runs daily from purge.mjs
+  if (!KINDS[kind]) throw new Error(`--kind must be one of ${Object.keys(KINDS).join(', ')}`);
+  assertKindEnabled(kind, config);                                         // mapping export: dormant unless re-enabled
+  const aps = kind === 'shipstation_aps_mapping';
+  if (aps && !apsWindow) throw new Error('apsWindow is required for the APS mapping export');
+  const steps = aps ? apsSteps(config) : (config.kinds?.[kind]?.exportSteps || (kind === 'shipstation_mapping_export' ? config.exportSteps : null) || []);
+  const win = reportWindow(week, { reportTo: aps ? null : reportTo });
+  const vars = { ...week, reportFrom: win.from, reportTo: win.to, reportFromUS: win.fromUS, reportToUS: win.toUS,
+    // The saved template's recorded steps use {{weekStartUS}}–{{weekEndUS}}: for the APS mapping they are its ship-date window.
+    ...(aps ? { weekStart: apsWindow.from, weekEnd: apsWindow.to, weekStartUS: apsWindow.fromUS, weekEndUS: apsWindow.toUS,
+                apsFrom: apsWindow.from, apsTo: apsWindow.to, apsFromUS: apsWindow.fromUS, apsToUS: apsWindow.toUS } : {}) };
+  const runId = `ssx_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const manifest = { runId, kind, weekStart: week.weekStart, weekEnd: week.weekEnd, startedAt: new Date().toISOString(), status: 'running' };
+  const finish = (status, exitCode, extra = {}) => {
+    Object.assign(manifest, { status, exitCode, finishedAt: new Date().toISOString(), ...extra });
+    writeRunRecord(path.join(paths.runs, `${runId}.json`), manifest);
+    return { status, exitCode, manifest, paths };
+  };
+
+  // An earlier run's automated window could not sign in: do not open it again
+  // until a person has signed in through the normal window (npm run login).
+  const block = retrySignIn ? null : readSignInBlock(paths.base);
+  if (retrySignIn) clearSignInBlock(paths.base);
+  if (block) {
+    return finish('signin_blocked', EXIT.LOGIN_FAILED, { note: 'ShipStation sign-in needed since ' + block.since.slice(0, 10) +
+      '; the automated window was not opened. Sign in with: npm run login (automation/shipstation-export)' });
+  }
+  // Only the Shipping Cost Report job sets the block. The APS mapping export is optional (mapping only): when its
+  // window lands on a page it does not recognise, that alone must not stop next week's report (2026-11-17: the APS
+  // job reported unknown_page minutes after the report job and a check both found the session signed in).
+  const blocked = (status, code, extra = {}) => { if (!aps) writeSignInBlock(paths.base, status); return finish(status, code, extra); };
+
+  const context = await chromium.launchPersistentContext(paths.profile, { headless: !headed, acceptDownloads: true, ...browserLaunchOptions(config) });
+  try {
+    const page = context.pages()[0] || await context.newPage();
+    await page.goto(config.appUrl, { waitUntil: 'domcontentloaded' });
+    let { state, evidence } = await settleAuthState(page, config.auth);
+    manifest.authStateAtStart = state;
+
+    if (state === 'login_required' || state === 'session_expired') {
+      // One automatic attempt. If the form cannot be completed (a changed
+      // sign-in page, a Cloudflare check that refuses automated browsers), the
+      // run stops and later runs do not reopen the window (signin-block.json).
+      try {
+        if (state === 'session_expired' && config.loginUrl) await page.goto(config.loginUrl, { waitUntil: 'domcontentloaded' });
+        const { username, password } = readWindowsCredential(config.credentialTarget || 'sb-shipstation-export');
+        await page.locator(config.loginForm.usernameField).first().fill(username, { timeout: 15000 });
+        await page.locator(config.loginForm.passwordField).first().fill(password, { timeout: 15000 });
+        await page.locator(config.loginForm.submit).first().click({ timeout: 15000 });
+        await page.waitForLoadState('domcontentloaded');
+        await page.waitForTimeout(2000);
+      } catch (e) {
+        return blocked('login_failed', EXIT.LOGIN_FAILED, { error: safeError(e) });
+      }
+      ({ state, evidence } = await settleAuthState(page, config.auth));
+      if (state === 'login_required') return blocked('login_failed', EXIT.LOGIN_FAILED);
+    }
+    if (state === 'two_factor_required') return blocked('needs_2fa', EXIT.NEEDS_2FA, { note: 'Run login.mjs once to complete 2FA' });
+    if (state === 'captcha') return blocked('needs_human_captcha', EXIT.CAPTCHA);
+    if (NEEDS_HUMAN.has(state) || state !== 'authenticated') {
+      // Where the window was, for the next diagnosis: host, path and title only (no query string, no page text).
+      let where = null;
+      try { const u = new URL(page.url()); where = { host: u.host, path: u.pathname.slice(0, 80), title: (await page.title()).slice(0, 80) }; } catch { /* page gone */ }
+      return blocked('unknown_page', EXIT.UNKNOWN_PAGE, { evidence, page: where });
+    }
+    clearSignInBlock(paths.base);
+
+    const t0 = Date.now();
+    const file = await runSteps(page, steps, vars, paths.downloads);
+    manifest.exportMs = Date.now() - t0;                                  // export steps incl. the download (measured per run)
+    const buf = fs.readFileSync(file);
+    const exportedAt = new Date().toISOString();
+    let prep = prepareExport(kind, buf.toString('utf8'), { week, exportedAt, apsWindow, scrRows, scrSource, reportTo: aps ? null : reportTo });
+    // APS split dates holding both kinds of label: read the owning report versions' retained rows, then prepare again.
+    // Unreadable rows leave those orders split_cost_unverified (no cost), never guessed.
+    if (prep.needRows?.length && resolveScrRows) {
+      let rowsFor = null;
+      try { rowsFor = await resolveScrRows(prep.needRows); } catch { rowsFor = null; }
+      if (rowsFor) prep = prepareExport(kind, buf.toString('utf8'), { week, exportedAt, apsWindow, scrRows, scrSource, rowsFor, reportTo: aps ? null : reportTo });
+    }
+    if (prep.refused) {
+      fs.rmSync(file);                                                     // a refused raw file is never kept or forwarded
+      return finish(prep.refused, EXIT.EXPORT_FAILED, { reason: prep.reason, columns: prep.columns });
+    }
+    const outName = `${kind}_${week.weekStart}_${runId}.csv`;
+    const facts = { exportedAt, bytes: buf.length, ...prep.facts };
+    if (kind === 'shipstation_shipping_cost_report') fs.rmSync(file);    // raw report holds Recipient: gone once sanitized
+    if (aps) { fs.rmSync(file); prep.sanitizedText = JSON.stringify(prep.payload); }   // only the per-order classification is kept or sent
+    if (delivery === 'drive') {                                            // rollback path only (mapping export)
+      if (kind !== 'shipstation_mapping_export') return finish('drive_not_supported', EXIT.CONFIG, { note: 'Drive rollback exists only for the mapping export' });
+      fs.mkdirSync(config.outputDir, { recursive: true });
+      fs.copyFileSync(file, path.join(config.outputDir, outName));
+      fs.rmSync(file);
+      return finish('ok', EXIT.OK, { ...facts, delivery, file: outName });
+    }
+    Object.assign(manifest, facts, { delivery });
+    const pending = { config, prep, outName, file, manifest, paths, finish };
+    if (deferUpload) { manifest.status = 'prepared'; writeRunRecord(path.join(paths.runs, `${runId}.json`), manifest); return { status: 'prepared', exitCode: null, manifest, pending }; }
+    return finishShipStationUpload(pending);
+  } catch (e) {
+    return finish('export_failed', EXIT.EXPORT_FAILED, { error: safeError(e) });
+  } finally {
+    await context.close();
+  }
+}
+
+/** Upload a prepared ShipStation payload; on failure quarantine the sanitized file (72 h). */
+export async function finishShipStationUpload({ config, prep, outName, file, paths, finish }, { uploadImpl = uploadToWorker } = {}) {
+  const { password: ingestSecret } = readWindowsCredential(config.ingestCredentialTarget || 'sb-gp-ingest');
+  const ingest = await uploadImpl({ workerUrl: config.workerUrl, ingestSecret, path: prep.path, payload: prep.payload });
+  if (!ingest.ok) {
+    const q = path.join(paths.quarantine, outName);                      // ≤72h, never synced; sanitized content only for the report
+    if (prep.sanitizedText) fs.writeFileSync(q, prep.sanitizedText); else if (fs.existsSync(file)) fs.renameSync(file, q);
+    return finish('upload_failed', UPLOAD_EXIT, { ingest, quarantined: outName });
+  }
+  if (fs.existsSync(file)) fs.rmSync(file);
+  return finish('ok', EXIT.OK, { ingest });
+}
+
+async function main() {
+  const args = argv();
+  const config = JSON.parse(fs.readFileSync(args.config || 'config.local.json', 'utf8'));
+  const week = args.week ? weekFromStart(args.week) : lastCompletedWeek(new Date(), config.timeZone);
+  const kind = typeof args.kind === 'string' ? args.kind : DEFAULT_KIND;
+  const r = await runShipStationJob({ config, week, kind, headed: !!args.headed });
+  console.log(`${r.status} (exit ${r.exitCode})`);
+  process.exitCode = r.exitCode;
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  main().catch(e => { console.error(safeError(e)); process.exitCode = EXIT.CONFIG; });
+}

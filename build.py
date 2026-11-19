@@ -1,0 +1,770 @@
+"""
+build.py — Netlify build script
+================================
+Runs on every Netlify deploy. Fetches cost data from external sources
+and writes JSON files to data/ so the dashboard always has fresh costs.
+
+Auto-fetched on every deploy:
+  MCG            → Google Sheets (URL in MCG_SHEET_URL env var)
+  APS → Google Sheets (URL in AS_SHEET_URL env var)
+  L2G   → Google Sheets (URL in L2G_SHEET_URL env var)
+  HP Dropship    → Google Sheet synced daily by Make.com "HP Dropship Cost Sync" scenario
+                   URL in HP_SHEET_URL env var
+                   Columns: SKU | Cost | WeightLb
+                   Fallback: PRODUCT_COSTS_JSON1/2 + SKU_WEIGHTS_JSON env vars
+
+Required Netlify env vars:
+  SITE_PASSWORD         — dashboard login password
+  MCG_SHEET_URL         — MCG Total sheet export URL (plant costs with extra cost)
+  MCG_POTS_SHEET_URL    — MCG Pot costs sheet export URL (pot SKU → pot cost)
+  MCG_PACK_SHEET_URL    — MCG succulent-pack tab CSV export URL (SKU → Total Cost/pack)
+  AS_SHEET_URL          — APS sheet export URL
+  L2G_SHEET_URL                   — L2G tab CSV export URL
+  LG_SHEET_URL           — LG tab CSV export URL
+  CC_SHEET_URL   — CC tab CSV export URL
+  SA_SHEET_URL  — SA tab CSV export URL
+  LM_SHEET_URL            — LM tab CSV export URL
+  VENDOR_IMPORT_STRICT (optional) — set to 1 to FAIL the build when a configured
+                                    vendor tab imports zero costs (default: warn)
+  HP_SHEET_URL          — HP Dropship sheet export URL (Make.com synced sheet)
+  HP_COSTS_FOLDER_ID    — Google Drive folder ID containing Shopify product exports by date
+  GDRIVE_API_KEY        — Google API key with Drive API access (folder must be shared publicly)
+HP fallback env vars (only if HP_SHEET_URL not set):
+  PRODUCT_COSTS_JSON1, PRODUCT_COSTS_JSON2, SKU_WEIGHTS_JSON
+"""
+
+import os, re, json, csv, io, urllib.request, urllib.error
+
+# Deploy-context guard (deploy_context.py): a Deploy Preview or any other branch never reads the private
+# cost sources or pushes a catalog, whatever variables reach it. Runs before anything reads the environment.
+import deploy_context
+BUILD_ROLE, _ = deploy_context.apply(os.environ)
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# ── Private rules ─────────────────────────────────────────────────────────────
+# Supplier costs, discount tiers, rate cards and SKU/vendor mapping rules are not in this
+# public repository. PRIVATE_RULES_JSON (Netlify build variable, never a Functions
+# variable) holds them; shared/privateRules.js documents the shape. The build copies the
+# document to data/private-rules.json (served only behind the site gate, and bundled into
+# the gp-verify functions). A production build without it fails: the dashboard and the
+# verifier would otherwise compute different numbers.
+import private_rules
+PRIVATE_RULES = private_rules.load(os.environ, BUILD_ROLE)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def fetch_csv(url, label, timeout=15):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            text = r.read().decode('utf-8-sig')
+        rows = list(csv.DictReader(io.StringIO(text)))
+        print(f"  ✓ {label}: {len(rows)} rows")
+        return rows
+    except Exception as e:
+        print(f"  ✗ {label}: {e}")
+        return None
+
+def clean_money(s):
+    try:
+        return float(str(s).replace('$', '').replace(',', '').strip())
+    except:
+        return None
+
+def write_json(filename, data):
+    path = os.path.join(DATA_DIR, filename)
+    with open(path, 'w') as f:
+        json.dump(data, f, separators=(',', ':'))
+    kb = os.path.getsize(path) / 1024
+    print(f"  → {filename}: {len(data)} entries ({kb:.1f} KB)")
+
+
+# ── 1. MCG ────────────────────────────────────────────────────────────────────
+print("\n[MCG]")
+mcg_costs = {}
+mcg_url = os.environ.get('MCG_SHEET_URL')
+if mcg_url:
+    rows = fetch_csv(mcg_url, 'MCG Total sheet')
+    if rows:
+        import re as _re
+        for row in rows:
+            sku  = row.get('SKU', '').strip().upper()
+            cost = clean_money(row.get('Cost Per Item', '') or row.get('Cost_Per_Item', ''))
+            if sku and cost and cost > 0:
+                mcg_costs[sku] = cost
+                # Also index by normalized plant name for variant-SKU fallback.
+                # e.g. "<SKU> <Plant name> - 2 inch" →
+                #   key "__n__frizzle sizzle albuca spiralis 2 inch" → same cost
+                # Variant SKUs not in the sheet (e.g. "<SKU> / Dormant - Plastic Pot")
+                # are matched client-side by stripping the variant suffix.
+                desc = row.get('Description', '').strip()
+                desc_no_sku = _re.sub(r'^[A-Z0-9]{4,}\s+', '', desc, flags=_re.IGNORECASE)
+                name = desc_no_sku.split('/')[0]
+                name = _re.sub(r'[^a-z0-9\s]', ' ', name.lower())
+                name = _re.sub(r'\s+', ' ', name).strip()
+                if name:
+                    mcg_costs.setdefault('__n__' + name, cost)
+        print(f"  → {len(mcg_costs)} MCG SKUs (incl. name index)")
+else:
+    print("  ✗ MCG_SHEET_URL not set — skipping")
+
+# MCG pot costs (pot SKUs used in plant+pot bundles like <plant SKU>+<pot SKU>.BR-1)
+# Merging into mcg_costs so getCost() finds them at priority 1 when splitting '+' bundles
+pots_url = os.environ.get('MCG_POTS_SHEET_URL')
+if pots_url:
+    try:
+        with urllib.request.urlopen(pots_url, timeout=15) as r:
+            raw_text = r.read().decode('utf-8-sig')
+        raw_rows = list(csv.reader(io.StringIO(raw_text)))
+        print(f"  Pot sheet raw rows: {len(raw_rows)}, first row: {raw_rows[0] if raw_rows else []}")
+
+        # The sheet may have a title row ("MCG Product Calulator") before the real headers.
+        # Scan for the row that contains 'Pot SKU' and use it as the header row.
+        HEADER_SIGNALS = {'pot sku', 'sku', 'variant sku'}
+        header_idx = None
+        for i, row in enumerate(raw_rows):
+            row_lower = [c.strip().lower() for c in row]
+            if any(s in row_lower for s in HEADER_SIGNALS):
+                header_idx = i
+                break
+
+        if header_idx is None:
+            print("  ✗ Could not find header row in pot sheet — skipping")
+            pot_rows = []
+        else:
+            print(f"  Header row found at index {header_idx}: {raw_rows[header_idx]}")
+            header = raw_rows[header_idx]
+            pot_rows = [dict(zip(header, row)) for row in raw_rows[header_idx + 1:]]
+
+        pot_count = 0
+        for row in pot_rows:
+            sku = (row.get('Pot SKU') or row.get('SKU') or
+                   row.get('Variant SKU') or row.get('pot sku') or '').strip().upper()
+            cost = clean_money(
+                row.get('Pot Cost') or row.get('Cost') or
+                row.get('Cost per item') or row.get('Cost Per Item') or
+                row.get('Cost_Per_Item') or row.get('pot cost') or ''
+            )
+            if sku and cost and cost > 0:
+                mcg_costs[sku] = cost
+                # Also store base SKU (<pot SKU>.BR-1 → <pot SKU>) for dot-strip fallback
+                base = sku.split('.')[0]
+                if base and base != sku:
+                    mcg_costs.setdefault(base, cost)
+                pot_count += 1
+        print(f"  → {pot_count} pot SKUs merged into MCG costs")
+        if pot_count == 0:
+            print("  ✗ No pot costs parsed — verify 'Pot SKU' / 'Pot Cost' column names")
+    except Exception as e:
+        print(f"  ✗ MCG Pot Costs sheet error: {e}")
+else:
+    print("  ✗ MCG_POTS_SHEET_URL not set — pot bundle costs may be missing")
+
+
+# ── 1b. MCG pack sheet (SKU-level "Total Cost/pack"; corrected costs effective Aug 1, 2026) ──
+# Its own table, mcg_pack: SKU → Total Cost/pack. The selling price column is never read. A SKU the
+# sheet lists with a blank, non-numeric or $0 cost (e.g. a formula giving $0.00) is stored as None:
+# it stays a MISSING cost, never a zero-cost product. Two different costs for one SKU → None.
+# Volume discounts and fees are applied by the calculator exactly as before, never here.
+def parse_mcg_pack_rows(raw_rows):
+    header_idx = cost_idx = sku_idx = None
+    for i, row in enumerate(raw_rows[:10]):
+        low = [c.strip().lower() for c in row]
+        if 'total cost/pack' in low:
+            header_idx, cost_idx = i, low.index('total cost/pack')
+            break
+    if header_idx is None:
+        return None, {'error': 'no_total_cost_column'}
+    for row in raw_rows[:header_idx + 1]:
+        low = [c.strip().lower() for c in row]
+        if 'sku' in low:
+            sku_idx = low.index('sku')
+            break
+    if sku_idx is None:
+        return None, {'error': 'no_sku_column'}
+    costs, conflicts = {}, set()
+    for row in raw_rows[header_idx + 1:]:
+        sku = (row[sku_idx] if sku_idx < len(row) else '').strip().upper()
+        if not sku:
+            continue
+        cost = clean_money(row[cost_idx]) if cost_idx < len(row) else None
+        if cost is None or not (0 < cost < float('inf')):
+            cost = None
+        else:
+            cost = round(cost, 4)
+        if sku in costs and costs[sku] != cost:
+            conflicts.add(sku)
+        costs[sku] = cost
+    for sku in conflicts:
+        costs[sku] = None
+    priced = sum(1 for v in costs.values() if v is not None)
+    return costs, {'skus': len(costs), 'priced': priced, 'missing': len(costs) - priced, 'conflicting': len(conflicts)}
+
+mcg_pack = None
+pack_url = os.environ.get('MCG_PACK_SHEET_URL')
+if pack_url:
+    try:
+        with urllib.request.urlopen(pack_url, timeout=15) as r:
+            pack_text = r.read().decode('utf-8-sig')
+        mcg_pack, pack_stats = parse_mcg_pack_rows(list(csv.reader(io.StringIO(pack_text))))
+        if mcg_pack is None:
+            print(f"  ✗ MCG pack sheet: {pack_stats['error']} — not imported")
+        else:
+            print(f"  → MCG pack sheet: {pack_stats['skus']} SKUs, {pack_stats['priced']} with a cost, "
+                  f"{pack_stats['missing']} missing (blank or $0), {pack_stats['conflicting']} conflicting")
+    except Exception as e:
+        mcg_pack = None
+        print(f"  ✗ MCG pack sheet error: {e}")
+else:
+    print("  ✗ MCG_PACK_SHEET_URL not set — pack SKUs keep the earlier rules")
+
+
+# ── 1c. SKU Alias map (Succulent Box SKU ↔ Amazon alias) ─────────────────────
+# Sources (each optional): SB_SKU_ALIAS_URL, SB_SKU_ALIAS_URL_2, HP_SKU_ALIAS_URL.
+# Two sheet shapes are read:
+#   * the product tabs of the Products Master (explicit columns, ALIAS_LAYOUTS below): one row per product,
+#     the canonical SKU in 'SB Bundles SKU' (else 'MCG SKU') or 'HD SKU', and every Amazon alias of that
+#     product in one 'AMZ SB Alias SKUs' cell, one alias per line;
+#   * the older two-column alias sheet (any two of ALIAS_SIGNALS as headers, one alias per row).
+# An alias that points to two different SKUs is a conflict: it is left out and reported, never guessed.
+# A cell token with whitespace inside it is not split further; it is reported and left out.
+# Only new catalogs use the map: published weeks keep their pinned catalogs.
+print("\n[SKU Alias]")
+sku_alias = {}   # alias_sku → canonical_sku
+
+ALIAS_LAYOUTS = (
+    ('SB products', ('sb bundles sku', 'mcg sku'), 'amz sb alias skus'),
+    ('HP products', ('hd sku',), 'amz sb alias skus'),
+)
+ALIAS_SIGNALS = {'sku', 'succulent sku', 'sb sku', 'mcg sku', 'amazon sku',
+                 'amazon alias', 'seller sku', 'alias', 'internal sku', 'variant sku'}
+
+
+def find_alias_layout(raw_rows):
+    """(header index, layout) for the first row naming an explicit layout's alias column and its main
+    canonical column; else the first row with ≥2 ALIAS_SIGNALS (layout None); else (None, None)."""
+    for i, row in enumerate(raw_rows):
+        cells = [c.strip().lower() for c in row]
+        for layout in ALIAS_LAYOUTS:
+            if layout[2] in cells and layout[1][0] in cells:
+                return i, layout
+        if sum(1 for c in cells if c in ALIAS_SIGNALS) >= 2:
+            return i, None
+    return None, None
+
+
+def alias_pairs(raw_rows, label, invalid, products):
+    """[(alias, canonical), ...] from one sheet (both upper-case), and its layout name. Every product SKU the sheet
+    names (each canonical column of every row, whether or not the row lists aliases) is added to `products`."""
+    idx, layout = find_alias_layout(raw_rows)
+    if idx is None:
+        print(f"  ✗ {label}: could not find header row (expected the '{ALIAS_LAYOUTS[0][2]}' column, or ≥2 SKU-like columns)")
+        return [], None
+    header = [c.strip().lower() for c in raw_rows[idx]]
+    pairs = []
+    if layout is not None:
+        name, canon_cols, alias_col = layout
+        ci = [header.index(c) for c in canon_cols if c in header]
+        ai = header.index(alias_col)
+        for row in raw_rows[idx + 1:]:
+            cell = lambda j: row[j] if j < len(row) else ''
+            for j in ci:
+                if cell(j).strip():
+                    products.add(cell(j).strip().upper())
+            canon = next((cell(j).strip().upper() for j in ci if cell(j).strip()), '')
+            if not canon:
+                continue
+            for token in re.split(r'\r\n|\r|\n', cell(ai)):
+                t = token.strip().upper()
+                if not t:
+                    continue
+                if any(ch.isspace() for ch in t) or ',' in t or ';' in t:
+                    invalid.append(f'{label}:{t}')
+                    continue
+                if t != canon:
+                    pairs.append((t, canon))
+        return pairs, name
+    # Older two-column sheet.
+    for row in raw_rows[idx + 1:]:
+        rlow = {k: v.strip().upper() for k, v in zip(header, row) if v.strip()}
+        sb_sku = (rlow.get('succulent sku') or rlow.get('sb sku') or rlow.get('mcg sku') or
+                  rlow.get('internal sku') or rlow.get('sku') or rlow.get('variant sku') or '')
+        amz_sku = (rlow.get('amazon sku') or rlow.get('amazon alias') or rlow.get('amazon') or
+                   rlow.get('seller sku') or rlow.get('alias') or rlow.get('msku') or '')
+        if sb_sku:
+            products.add(sb_sku)
+        if sb_sku and amz_sku and sb_sku != amz_sku:
+            pairs.append((amz_sku, sb_sku))
+    return pairs, 'two-column'
+
+
+alias_targets = {}       # alias → canonical SKUs, in first-seen order
+alias_invalid = []
+alias_products = set()   # every product SKU the alias sheets name (rows with or without aliases)
+for env_key in ('SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL'):
+    alias_url = os.environ.get(env_key)
+    if not alias_url:
+        continue
+    try:
+        with urllib.request.urlopen(alias_url, timeout=15) as r:
+            raw_text = r.read().decode('utf-8-sig')
+        pairs, layout_name = alias_pairs(list(csv.reader(io.StringIO(raw_text))), env_key, alias_invalid, alias_products)
+        for a, c in pairs:
+            targets = alias_targets.setdefault(a, [])
+            if c not in targets:
+                targets.append(c)
+        if layout_name:
+            print(f"  → {len(pairs)} alias pairs from {env_key} ({layout_name})")
+    except Exception as e:
+        print(f"  ✗ {env_key}: {e}")
+
+canonical_skus = {c for targets in alias_targets.values() for c in targets}
+alias_products |= canonical_skus
+alias_conflicts = []
+for a in sorted(alias_targets):
+    targets = alias_targets[a]
+    if len(targets) > 1:
+        alias_conflicts.append(f"{a} -> {' | '.join(targets)}")
+    elif a in alias_products:     # another product's own SKU, even one listed without aliases
+        alias_conflicts.append(f"{a} -> {targets[0]} (also a product SKU)")
+    else:
+        sku_alias[a] = targets[0]
+for c in sorted(canonical_skus):
+    if c not in sku_alias and c not in alias_targets:
+        sku_alias[c] = c          # canonical → itself (a no-op lookup, kept for the dashboard's alias view)
+
+if alias_conflicts:
+    print(f"  ⚠ {len(alias_conflicts)} conflicting alias(es) left out:")
+    for line in alias_conflicts[:20]:
+        print(f"    - {line}")
+if alias_invalid:
+    print(f"  ⚠ {len(alias_invalid)} alias token(s) with whitespace inside left out: {', '.join(alias_invalid[:10])}")
+if sku_alias:
+    print(f"  → {sum(1 for k, v in sku_alias.items() if k != v)} alias mappings")
+else:
+    print("  SB_SKU_ALIAS_URL not set or no mappings found — skipping")
+
+
+# ── 2. APS ─────────────────────────────────────────────────────────
+print("\n[APS]")
+as_costs = {}
+as_url = os.environ.get('AS_SHEET_URL')
+if as_url:
+    rows = fetch_csv(as_url, 'APS sheet')
+    if rows:
+        for row in rows:
+            # The sheet header is "SKU " (trailing space) — handle both
+            sku  = (row.get('SKU ', '') or row.get('SKU', '')).strip().upper()
+            cost = clean_money(row.get('Fullfilled Price', ''))
+            if sku and cost and cost > 0:
+                as_costs[sku] = cost
+        print(f"  → {len(as_costs)} APS SKUs")
+else:
+    print("  ✗ AS_SHEET_URL not set — skipping")
+
+
+# ── 3. Vendor-scoped cost catalog ─────────────────────────────────────────────
+# L2G / LG / CC / SA.
+#
+# L2G was previously fetched here with its own inline parser. The tab
+# still uses the same headers ('SKUs' + the 'Dropship Price (…)' cost column),
+# so rather than adding a second L2G source the old parser is folded
+# into the shared vendor importer below — one fetch, one source of truth. The
+# flat l2g_costs map is derived from the vendor catalog so product_costs.json
+# keeps exactly the shape it had before.
+from vendor_sheets import (import_vendor_costs, VENDOR_ORDER, VENDOR_ENV,
+                           L2G, loose_sku, normalize_name)
+
+print("\n═══ Vendor cost catalogs ═══")
+VENDOR_STRICT = os.environ.get('VENDOR_IMPORT_STRICT', '').strip().lower() in ('1', 'true', 'yes')
+vendor_catalog, vendor_stats, vendor_warnings = import_vendor_costs(strict=VENDOR_STRICT)
+
+# Secondary lookup indexes, built once at deploy time so the browser doesn't
+# have to. Kept per vendor — never merged across vendors.
+vendor_index = {}
+for _vendor, _entries in vendor_catalog.items():
+    by_loose, by_name = {}, {}
+    for _key, _e in _entries.items():
+        lk = loose_sku(_key)
+        if lk and lk not in by_loose:
+            by_loose[lk] = _key
+        nk = normalize_name(_e.get('productName', ''))
+        if nk and nk not in by_name:
+            by_name[nk] = _key
+    vendor_index[_vendor] = {'byLooseSku': by_loose, 'byName': by_name}
+
+# Backward-compatible flat map (generic SKU-only fallback, priority 7)
+l2g_costs = {k: v['unitCost'] for k, v in vendor_catalog.get(L2G, {}).items()}
+print(f"\n  → {len(l2g_costs)} L2G SKUs merged into product_costs.json "
+      f"(generic fallback, unchanged behaviour)")
+
+
+# ── 4. HP Dropship (Google Sheet synced daily by Make.com) ────────────────────
+print("\n[HP Dropship]")
+hp_costs    = {}
+sku_weights = {}
+
+hp_url = os.environ.get('HP_SHEET_URL')
+if hp_url:
+    # Make.com scenario "HP Dropship Cost Sync" writes SKU/Cost/WeightLb here daily.
+    # The sheet appends rows each run; later rows overwrite earlier ones in the dict,
+    # so the most recent cost always wins.
+    rows = fetch_csv(hp_url, 'HP Dropship sheet')
+    if rows:
+        for row in rows:
+            sku    = row.get('SKU', '').strip().upper()
+            cost   = clean_money(row.get('Cost', ''))
+            weight = clean_money(row.get('WeightLb', ''))
+            if sku and cost and cost > 0:
+                hp_costs[sku] = cost
+            if sku and weight and weight > 0:
+                sku_weights[sku] = weight
+        print(f"  → {len(hp_costs)} HP cost SKUs, {len(sku_weights)} weight SKUs")
+else:
+    print("  ✗ HP_SHEET_URL not set — trying env var fallback")
+
+if not hp_costs:
+    # Fallback: env vars (paste JSON from old update_costs.py output)
+    p1 = json.loads(os.environ.get('PRODUCT_COSTS_JSON1', '{}'))
+    p2 = json.loads(os.environ.get('PRODUCT_COSTS_JSON2', '{}'))
+    hp_costs    = {**p1, **p2}
+    sku_weights = json.loads(os.environ.get('SKU_WEIGHTS_JSON', '{}'))
+    print(f"  → {len(hp_costs)} HP SKUs, {len(sku_weights)} weight SKUs (env var fallback)")
+
+
+# ── 5. Shopify product exports ─────────────────────────────────────────────────
+# Source priority:
+#   A. Google Drive folder (HP_COSTS_FOLDER_ID + GDRIVE_API_KEY) — picks the latest file by date
+#   B. Local data/products_export*.csv files (manual drop-in)
+#   C. Pre-existing sb_costs.json / hp_supplement.json (committed or from a previous run)
+print("\n[Shopify Product Exports]")
+import glob, urllib.parse
+
+# The house-plant dropship vendors as the products export spells them (private legend).
+HP_VENDORS_SET = {'HPD', 'HPW', 'HPS'} | ({PRIVATE_RULES['vendorLegend'][c] for c in ('HPD', 'HPW', 'HPS')} if PRIVATE_RULES else set())   # codes and full names
+
+def normalize_title(s):
+    """Lowercase, strip non-alphanumeric, collapse spaces — for name-based cost lookup."""
+    import re
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9\s]', '', s.lower())).strip()
+
+def parse_shopify_export_rows(rows, label):
+    """Parse Shopify product export rows → (sb_costs, hp_suppl, hp_by_name) dicts.
+    hp_by_name keys by normalized product title so no-SKU variants can be matched."""
+    sb, hp, hp_by_name = {}, {}, {}
+    current_vendor = ''
+    current_title  = ''
+    for row in rows:
+        v = (row.get('Vendor') or '').strip()
+        if v:
+            current_vendor = v
+        t = (row.get('Title') or '').strip()
+        if t:
+            current_title = t
+        sku  = (row.get('Variant SKU') or '').strip().upper()
+        cost = clean_money(row.get('Cost per item', ''))
+        if cost and cost > 0:
+            if sku:
+                if current_vendor == 'Succulents Box':
+                    sb[sku] = cost
+                elif current_vendor in HP_VENDORS_SET:
+                    hp[sku] = cost
+            # Build name→cost for HP even when SKU is missing (Shopify variant-ID orders)
+            if current_vendor in HP_VENDORS_SET and current_title:
+                key = normalize_title(current_title)
+                if key and key not in hp_by_name:  # first variant's cost wins
+                    hp_by_name[key] = cost
+    print(f"  ✓ {label}: {len(sb)} SB SKUs, {len(hp)} HP SKUs, {len(hp_by_name)} HP titles")
+    return sb, hp, hp_by_name
+
+sb_costs   = {}
+hp_suppl   = {}
+hp_by_name = {}
+export_source = None
+
+# ── A. Google Drive folder ──────────────────────────────────────────────────
+folder_id  = os.environ.get('HP_COSTS_FOLDER_ID', '').strip()
+gdrive_key = os.environ.get('GDRIVE_API_KEY', '').strip()
+
+if folder_id and gdrive_key:
+    print("  Checking Google Drive folder for latest export…")
+    try:
+        q = urllib.parse.quote(f"'{folder_id}' in parents and trashed=false")
+        list_url = (
+            f'https://www.googleapis.com/drive/v3/files'
+            f'?q={q}'
+            f'&orderBy=name+desc'
+            f'&pageSize=10'
+            f'&fields=files(id,name,mimeType)'
+            f'&key={gdrive_key}'
+        )
+        with urllib.request.urlopen(list_url, timeout=15) as r:
+            file_list = json.loads(r.read().decode())
+
+        drive_files = file_list.get('files', [])
+        # Prefer CSV files over Google Sheets (but accept both)
+        csv_files   = [f for f in drive_files if 'spreadsheet' not in f.get('mimeType','')]
+        sheet_files = [f for f in drive_files if 'spreadsheet'     in f.get('mimeType','')]
+        ordered     = csv_files + sheet_files  # CSVs first; newest name first within each
+
+        if ordered:
+            best = ordered[0]
+            print(f"  Latest file: {best['name']}")
+            mime = best.get('mimeType', '')
+            if 'spreadsheet' in mime:
+                dl_url = f"https://docs.google.com/spreadsheets/d/{best['id']}/export?format=csv"
+            else:
+                dl_url = (f"https://www.googleapis.com/drive/v3/files/{best['id']}"
+                          f"?alt=media&key={gdrive_key}")
+            rows = fetch_csv(dl_url, best['name'])
+            if rows:
+                sb_costs, hp_suppl, hp_by_name = parse_shopify_export_rows(rows, best['name'])
+                export_source = f"Drive ({best['name']})"
+        else:
+            print("  ✗ No files found in Drive folder")
+    except Exception as e:
+        print(f"  ✗ Drive API error: {e}")
+else:
+    print("  HP_COSTS_FOLDER_ID / GDRIVE_API_KEY not set — skipping Drive")
+
+# ── B. Local CSV files ──────────────────────────────────────────────────────
+if not export_source:
+    local_files = sorted(glob.glob(os.path.join(DATA_DIR, 'products_export*.csv')), reverse=True)
+    if local_files:
+        print(f"  Found {len(local_files)} local export file(s) — using all")
+        for export_path in local_files:
+            try:
+                with open(export_path, encoding='utf-8-sig') as f:
+                    rows = list(csv.DictReader(f))
+                sb_new, hp_new, name_new = parse_shopify_export_rows(rows, os.path.basename(export_path))
+                sb_costs.update(sb_new)
+                hp_suppl.update(hp_new)
+                hp_by_name.update(name_new)
+                export_source = 'local files'
+            except Exception as e:
+                print(f"  ✗ {os.path.basename(export_path)}: {e}")
+
+# ── C. Fall back to existing committed JSONs ────────────────────────────────
+if export_source:
+    write_json('sb_costs.json',      sb_costs)
+    write_json('hp_supplement.json', hp_suppl)
+    write_json('hp_by_name.json',    hp_by_name)
+else:
+    sb_path   = os.path.join(DATA_DIR, 'sb_costs.json')
+    hp_path   = os.path.join(DATA_DIR, 'hp_supplement.json')
+    name_path = os.path.join(DATA_DIR, 'hp_by_name.json')
+    sb_costs   = json.load(open(sb_path))   if os.path.exists(sb_path)   else {}
+    hp_suppl   = json.load(open(hp_path))   if os.path.exists(hp_path)   else {}
+    hp_by_name = json.load(open(name_path)) if os.path.exists(name_path) else {}
+    print(f"  No export source found — using existing JSONs "
+          f"({len(sb_costs)} SB, {len(hp_suppl)} HP SKUs, {len(hp_by_name)} HP titles)")
+
+
+# ── 6. Merge and write ────────────────────────────────────────────────────────
+# AS and L2G override HP if there's any SKU overlap; MCG is always separate
+product_costs = {**hp_costs, **as_costs, **l2g_costs}
+
+# ── Manual MCG cost overrides ─────────────────────────────────────────────────
+# SKUs confirmed from supplier invoices that are not in the Google Sheet (private rules).
+# The sheet value wins when both exist; the manual list only fills gaps.
+MANUAL_MCG_COSTS = private_rules.manual(PRIVATE_RULES, 'manualPrimaryCosts')   # ordered (sku, cost) pairs
+# Apply: sheet values take precedence; manual fills in what's missing
+for sku, cost in MANUAL_MCG_COSTS:
+    mcg_costs.setdefault(sku, cost)
+    mcg_costs.setdefault(sku.upper(), cost)
+print(f"  Manual overrides applied: {len(MANUAL_MCG_COSTS)} SKUs")
+
+# ── LR costs ─────────────────────────────────────────────────────────
+# Source: the Products Master LR tab.
+# Only rows where col Q (Listing Shopify) is CHECKED → col E (LR SKU), col G (LR cost).
+# Unchecked rows are sold via other vendors whose costs are covered in other sheets.
+MANUAL_LR_COSTS = private_rules.manual(PRIVATE_RULES, 'manualListCosts')   # ordered (sku, cost) pairs
+for sku, cost in MANUAL_LR_COSTS:
+    mcg_costs[sku] = cost                   # LR cost = source of truth for these SKUs
+    mcg_costs[sku.upper()] = cost
+print(f"  LR costs applied: {len(MANUAL_LR_COSTS)} SKUs")
+
+print("\nWriting data files...")
+write_json('mcg_total.json',     mcg_costs)
+write_json('product_costs.json', product_costs)
+write_json('sku_weights.json',   sku_weights)
+write_json('sku_alias.json',     sku_alias)
+write_json('vendor_costs.json',  vendor_catalog)
+write_json('vendor_index.json',  vendor_index)
+if mcg_pack is not None:
+    write_json('mcg_pack.json',    mcg_pack)
+write_json('vendor_import_report.json', {
+    'generatedAt': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+    'stats': vendor_stats,
+    'warnings': vendor_warnings,
+})
+# sb_costs.json and hp_supplement.json written above (or kept from repo)
+
+print("\n─── Vendor import summary ───")
+for st in vendor_stats:
+    label = st['vendor']
+    if not st.get('configured'):
+        print(f"  {label:<24} NOT CONFIGURED ({VENDOR_ENV[label]} unset)")
+    else:
+        print(f"  {label:<24} {st.get('imported', 0)} SKUs imported")
+if vendor_warnings:
+    print("\n  ⚠ Vendor import warnings:")
+    for w in vendor_warnings:
+        print(f"    - {w}")
+
+total = len(mcg_costs) + len(product_costs) + len(sb_costs) + len(hp_suppl)
+vendor_total = sum(len(v) for v in vendor_catalog.values())
+print(f"\nBuild complete — {total} total SKUs across legacy sources, "
+      f"{vendor_total} vendor-scoped SKUs.")
+
+
+# ── Optional: push the generated cost catalog to the weekly-automation Worker ──
+# No-op unless both CATALOG_PUSH_URL and SB_INGEST_SECRET are set in the Netlify
+# environment. The Worker validates and versions the catalog; a shrunken or
+# empty one is rejected there and never replaces the last accepted catalog.
+# A push failure is reported but never fails the dashboard build.
+def _hook_refresh_id(raw):
+    from catalog_hook import refresh_id_from_hook_body
+    return refresh_id_from_hook_body(raw)
+
+
+CATALOG_UA = 'sb-gp-build/1.0 (+netlify build.py catalog push)'
+
+
+def _worker_call(url, secret, method, path, payload):
+    req = urllib.request.Request(url.rstrip('/') + path, data=json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8'), method=method,
+                                 headers={'Content-Type': 'application/json', 'X-Ingest-Secret': secret,
+                                          # Cloudflare answers the default 'Python-urllib/x.y' agent with
+                                          # 403 'error code: 1010' before the Worker runs, so name the client.
+                                          'User-Agent': CATALOG_UA})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read().decode('utf-8'))
+
+
+SEAL_RETRY_WAITS = (5, 30, 35)   # seconds; a seal left 'sealing' by a Worker that stopped is taken over after 60 s
+
+
+def _seal_catalog_upload(url, secret, uid, waits=SEAL_RETRY_WAITS, sleep=None):
+    """Seal, retrying when the answer is lost or another seal holds the upload.
+    A repeated seal of a sealed upload replays its stored answer, so retrying is safe."""
+    import time
+    sleep = sleep or time.sleep
+    for attempt in range(len(waits) + 1):
+        try:
+            return _worker_call(url, secret, 'POST', f'/v1/ingest/catalog/uploads/{uid}/seal', {})
+        except urllib.error.HTTPError as e:
+            code = ''
+            try:
+                code = json.loads(e.read().decode('utf-8')).get('error', '')
+            except Exception:
+                pass
+            retry = e.code >= 500 or (e.code == 409 and code in ('seal_in_progress', 'seal_conflict'))
+            if not retry or attempt == len(waits):
+                raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if attempt == len(waits):
+                raise
+        sleep(waits[attempt])
+
+
+def _push_catalog_chunked(url, secret, tables, body):
+    """Chunked push (catalog_push.py). True when the Worker sealed it; False → use the one-request push."""
+    from catalog_push import catalog_chunks
+    try:
+        layout, chunks = catalog_chunks(tables)
+    except ValueError as e:
+        print(f"\nCatalog push (chunked): not possible ({e}); using the one-request push")
+        return False
+    try:
+        opened = _worker_call(url, secret, 'POST', '/v1/ingest/catalog/uploads',
+                              {'layout': layout, 'meta': body['meta'], **({'mcgExtraCsv': body['mcgExtraCsv']} if 'mcgExtraCsv' in body else {})})
+        uid = opened['uploadId']
+        for table, part, group, entries in chunks:
+            _worker_call(url, secret, 'PUT', f'/v1/ingest/catalog/uploads/{uid}/chunks/{table}/{part}',
+                         {'entries': entries, **({'group': group} if group is not None else {})})
+        res = _seal_catalog_upload(url, secret, uid)
+    except urllib.error.HTTPError as e:
+        print(f"\nCatalog push (chunked): HTTP {e.code}; using the one-request push")
+        return False
+    except Exception as e:
+        print(f"\nCatalog push (chunked): failed ({type(e).__name__}); using the one-request push")
+        return False
+    status = 'accepted' if res.get('accepted') else 'REJECTED'
+    print(f"\nCatalog push (chunked, {len(chunks)} chunks): {status} {res.get('catalogRev')} (active: {res.get('activeCatalogRev')})")
+    for reason in res.get('reasons') or []:
+        print(f"    - {reason}")
+    return True
+
+
+CATALOG_PUSH_DISABLED_MARKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'CATALOG_PUSH_DISABLED')
+
+
+def push_catalog():
+    # A verification draft (a manual upload, never a Git build) carries this marker file so its build makes
+    # no catalog write to the Worker, whatever the production variables say. Never committed (.gitignore).
+    if os.path.exists(CATALOG_PUSH_DISABLED_MARKER):
+        print("\nCatalog push: disabled for this build (CATALOG_PUSH_DISABLED marker); no catalog write to the Worker")
+        return
+    url = os.environ.get('CATALOG_PUSH_URL', '').strip()
+    secret = os.environ.get('SB_INGEST_SECRET', '').strip()
+    if not url or not secret:
+        print("\nCatalog push: skipped (CATALOG_PUSH_URL / SB_INGEST_SECRET not set)")
+        return
+    if not url.startswith('https://'):
+        print("\nCatalog push: skipped (CATALOG_PUSH_URL must be https)")
+        return
+    _target_problem = deploy_context.push_target_problem(url, BUILD_ROLE)
+    if _target_problem:
+        print(f"\nCatalog push: skipped ({_target_problem})")
+        return
+    tables = {}
+    for name in ['mcg_total', 'product_costs', 'sku_weights', 'sb_costs', 'hp_supplement',
+                 'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index', 'mcg_pack']:
+        path = os.path.join(DATA_DIR, f'{name}.json')
+        if os.path.exists(path):
+            with open(path) as f:
+                tables[name] = json.load(f)
+    body = {'tables': tables, 'meta': {
+        'source': 'build_push',
+        'builtAt': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+        'commit': os.environ.get('COMMIT_REF', ''),
+    }}
+    # A build-hook caller may trigger this build with a Netlify build hook whose JSON body
+    # carries the Worker's catalog refresh id. Netlify exposes that body as
+    # INCOMING_HOOK_BODY; echoing the id lets the Worker verify THIS build's
+    # catalog reached it (Revision 6). Anything that is not a refresh id is ignored.
+    refresh_id = _hook_refresh_id(os.environ.get('INCOMING_HOOK_BODY', ''))
+    if refresh_id:
+        body['meta']['refreshId'] = refresh_id
+        print(f"\nCatalog push: answering catalog refresh {refresh_id}")
+    extra_url = os.environ.get('MCG_EXTRA_SHEET_URL', '').strip()
+    if extra_url:
+        try:
+            with urllib.request.urlopen(extra_url, timeout=15) as r:
+                body['mcgExtraCsv'] = r.read().decode('utf-8', errors='replace')
+        except Exception as e:
+            print(f"  ⚠ MCG extra sheet fetch failed ({e}); pushing catalog without it")
+    # Workers Free: push in bounded chunks; fall back to the one-request push if the Worker
+    # does not offer chunked uploads (404) or a chunk is refused.
+    if _push_catalog_chunked(url, secret, tables, body):
+        return
+    try:
+        req = urllib.request.Request(url.rstrip('/') + '/v1/ingest/catalog',
+                                     data=json.dumps(body).encode('utf-8'), method='POST',
+                                     headers={'Content-Type': 'application/json', 'X-Ingest-Secret': secret,
+                                              # Cloudflare answers the default 'Python-urllib/x.y' agent with
+                                              # 403 'error code: 1010' before the Worker runs, so name the client.
+                                              'User-Agent': CATALOG_UA})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            res = json.loads(r.read().decode('utf-8'))
+        status = 'accepted' if res.get('accepted') else 'REJECTED'
+        print(f"\nCatalog push: {status} {res.get('catalogRev')} (active: {res.get('activeCatalogRev')})")
+        for reason in res.get('reasons') or []:
+            print(f"    - {reason}")
+    except Exception as e:
+        print(f"\nCatalog push: failed ({type(e).__name__}); the dashboard build is unaffected")
+
+
+push_catalog()

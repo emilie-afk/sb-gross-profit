@@ -1,0 +1,274 @@
+/**
+ * weeklyReports.js — the automated weekly reports, read from the production Worker
+ * ===============================================================================
+ * Read-only. Reaches the Worker only through workerClient.js (same-origin /api/v1 proxy). The site
+ * password is the only sign-in: the proxy reads published weeks for anyone past the password gate, so
+ * there is no second password here. Lists the published (or, once approved, provisionally published)
+ * weeks — unpublished drafts never reach the dashboard — and opens a
+ * week: headline figures with their labels, channel and vendor tables, and the orders with
+ * expandable line items. No upload, no recompute, no customer fields (the Worker serves none).
+ * Every value is escaped; money is shown as stored.
+ */
+import * as api from './workerClient.js';
+import { monthsOf, periodPlan, monthLabel, fmtRange, daysBetween, addDays, checkRange, publishedSpan, rangeLabel } from './storedReport.js';
+
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = n => (typeof n === 'number' && Number.isFinite(n)) ? (n < 0 ? '−$' : '$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+// The Worker stores margins and coverage as percentages (53.3 means 53.3%).
+const pct = n => (typeof n === 'number' && Number.isFinite(n)) ? `${n.toFixed(1)}%` : '—';
+const WEEK_RE = /^\d{4}-\d{2}-\d{2}$/;
+export const PAGE_SIZE = 100;
+
+const STATUS_LABEL = { published: 'Published', provisional: 'Provisional', validated: 'Draft', blocked: 'Draft (not published)', draft: 'Draft' };
+const PROFIT_LABEL = {
+  complete: 'Complete', provisional: 'Provisional', provisional_missing_costs: 'Provisional — some product costs missing',
+  provisional_missing_shipping: 'Provisional — some shipping costs missing', provisional_missing_costs_and_shipping: 'Provisional — some product and shipping costs missing',
+};
+/** A week is labelled provisional unless the Worker says its profitability is complete. */
+export const isProvisional = s => !(s && s.profitabilityStatus === 'complete' && s.narrative?.provisional === false);
+const verificationText = v => v?.status === 'verified' ? 'Independently verified' : v?.status ? `Verification: ${String(v.status).replace(/_/g, ' ')}` : 'Verification not recorded';
+
+/**
+ * Shipping-cost coverage in plain words. Orders without a Shipping Cost Report cost are left out of
+ * shipping expense (never counted as $0), so GP after shipping is overstated by their missing cost.
+ */
+export function shippingCoverageText(c) {
+  const need = c?.ordersRequiringCost ?? c?.ordersRequiringShipStationRate, have = c?.ordersWithCost ?? c?.ordersWithValidShipStationRate;
+  if (!(Number.isFinite(need) && Number.isFinite(have)) || need <= 0) return null;
+  if (have >= need) return `Shipping cost present on all ${need} orders that need it.`;
+  return `Shipping cost missing on ${need - have} of ${need} orders (${pct(have / need * 100)} covered). GP after shipping leaves out their shipping expense (not counted as $0), so it is overstated.`;
+}
+const shortCoverage = c => {
+  const need = c?.ordersRequiringCost, have = c?.ordersWithCost;
+  return Number.isFinite(need) && Number.isFinite(have) && need > 0 ? `${pct(have / need * 100)}${have < need ? ' ⚠' : ''}` : '—';
+};
+const FLAG_TEXT = {
+  first_version: 'first report for these dates', coverage_gap: 'report does not join earlier reports', zero_shipping_cost: '$0.00 shipping rows',
+  over_review_cap: 'unusually large shipping rows', nonzero_insurance_cost: 'insurance charges (disclosed, not added)', nonzero_duties: 'duties',
+  nonzero_taxes: 'taxes', nonzero_import_fee: 'import fees', changed_cost: 'shipping costs of this week\'s orders changed by a later report',
+  accepted_cost_removed: 'a later report omitted accepted shipping costs of this week\'s orders (the accepted costs are kept)',
+};
+export function reportFlagsText(status) {
+  const sr = status?.sources?.shippingReport || {};
+  const flags = (sr.flags || []).map(f => FLAG_TEXT[f] || String(f).replace(/_/g, ' '));
+  const parts = [];
+  if (flags.length) parts.push(`Shipping Cost Report flags: ${flags.join('; ')}.`);
+  if ((sr.changedDates || []).length) parts.push(`Late cost corrections on ${sr.changedDates.join(', ')}.`);
+  if ((sr.omittedDates || []).length) parts.push(`Accepted costs kept after a later report omitted them on ${sr.omittedDates.join(', ')}.`);
+  return parts.join(' ') || null;
+}
+
+export function renderWeekList(weeks) {
+  const list = (Array.isArray(weeks) ? weeks : []).filter(w => WEEK_RE.test(w?.weekStart || ''));
+  if (!list.length) return `<p class="meta">No weekly reports are visible yet. Computed and verified weeks stay hidden until their publication is approved; manual uploads remain available below.</p>`;
+  const rows = list.map(w => {
+    const r = (w.revisions || [])[0] || {};
+    return `<tr><td><button class="logout-btn" onclick="weeklyReports.openReport('week', '${esc(w.weekStart)}')" title="Open the full report">${esc(w.weekStart)}</button></td>
+      <td>${esc(STATUS_LABEL[r.status] || r.status || '—')}</td><td>${esc(PROFIT_LABEL[r.profitabilityStatus] || r.profitabilityStatus || '—')}</td>
+      <td style="text-align:right">${money(r.operatingRevenue)}</td><td style="text-align:right">${money(r.operatingGpAfterShipping)}</td><td style="text-align:right">${pct(r.operatingGpMargin)}</td>
+      <td style="text-align:right">${esc(shortCoverage(r.shippingCoverage))}</td><td style="text-align:right">${pct(r.costCoverageByRevenue)}</td>
+      <td>${esc(verificationText(r.verification))}${r.partialWeek ? ` · partial week (${esc(r.partialWeek.from)}–${esc(r.partialWeek.to)})` : ''}</td></tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto"><table class="gp-auto-weeks" style="width:100%;border-collapse:collapse;font-size:.85rem">
+    <thead><tr><th style="text-align:left">Week (Mon–Sun, LA)</th><th style="text-align:left">Status</th><th style="text-align:left">Profitability</th><th style="text-align:right">Operating revenue</th><th style="text-align:right">GP after shipping</th><th style="text-align:right">Margin</th><th style="text-align:right">Shipping cost coverage</th><th style="text-align:right">Product cost coverage</th><th style="text-align:left">Verification</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+/**
+ * Calendar months (Los Angeles) that published weeks touch, newest first, with the days published
+ * weeks cover. Amounts are shown in the opened report (they are summed from the month's own orders).
+ */
+export function renderMonthList(weeks) {
+  const list = Array.isArray(weeks) ? weeks : [];
+  const months = monthsOf(list);
+  if (!months.length) return '<p class="meta">No monthly reports yet: a month appears once a published week covers part of it.</p>';
+  const rows = months.map(m => {
+    const plan = periodPlan('month', m, list);
+    const days = daysBetween(plan.period.from, plan.period.to);
+    const covered = plan.weeks.reduce((n, w) => n + daysBetween(w.days.from, w.days.to), 0);
+    const gaps = plan.gaps.map(g => `${fmtRange(g)} (${g.reason === 'before_reporting' ? 'before reporting starts' : 'not published'})`).join('; ');
+    return `<tr><td><button class="logout-btn" onclick="weeklyReports.openReport('month', '${esc(m)}')" title="Open the full report">${esc(monthLabel(m))}</button></td>
+      <td>${esc(plan.weeks.map(w => `${fmtRange(w.days)} (r${w.published.revision})`).join(', '))}</td>
+      <td style="text-align:right">${covered} of ${days}${covered < days ? ' · partial' : ''}</td><td>${esc(gaps || '—')}</td></tr>`;
+  }).join('');
+  return `<div style="overflow-x:auto"><table class="gp-auto-months" style="width:100%;border-collapse:collapse;font-size:.85rem">
+    <thead><tr><th style="text-align:left">Month (LA time)</th><th style="text-align:left">Published weeks (days in the month, revision)</th><th style="text-align:right">Days covered</th><th style="text-align:left">Not included</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>
+    <p class="meta">A month counts the orders dated inside it: weeks crossing the month boundary are split, and margins are recomputed from the month's amounts.</p>`;
+}
+
+export function renderSelector(mode) {
+  const b = (m, label) => `<button type="button" aria-pressed="${mode === m}" onclick="weeklyReports.setMode('${m}')">${label}</button>`;
+  return `<div class="gp-seg" role="group" aria-label="Report period" style="margin-bottom:10px">${b('week', 'Weekly')}${b('month', 'Monthly')}${b('range', 'Custom dates')}</div>`;
+}
+
+/**
+ * Custom dates: any start and end day (Los Angeles), opened like a month: orders count by their own date, weeks
+ * crossing either end are split, margins are recomputed from the range's amounts, and days no published week
+ * covers are listed. `value` keeps what was typed; `error` is shown above the button.
+ */
+export function renderRangeForm(weeks, { from = '', to = '', error = '', provisional = false } = {}) {
+  const list = Array.isArray(weeks) ? weeks : [];
+  const span = publishedSpan(list);
+  if (!span) return '<p class="meta">No published reports yet: custom dates open once a week is published.</p>';
+  const f = from || addDays(span.to, -6), t = to || span.to;
+  return `<form class="gp-range-form" onsubmit="weeklyReports.openRange(); return false" style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end">
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem">From
+        <input type="date" id="wr-range-from" value="${esc(f)}" required></label>
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:.85rem">To
+        <input type="date" id="wr-range-to" value="${esc(t)}" required></label>
+      <label style="display:flex;gap:6px;align-items:center;font-size:.85rem;padding-bottom:6px" title="Weeks calculated and independently verified but not yet published">
+        <input type="checkbox" id="wr-range-prov"${provisional ? ' checked' : ''}> Include provisional data</label>
+      <button type="submit" class="logout-btn">Open report</button>
+    </form>
+    ${error ? `<p class="error-msg" role="alert" style="margin-top:8px">${esc(error)}</p>` : ''}
+    <p class="meta" style="margin-top:10px">Published reports cover ${esc(rangeLabel(span))} (Los Angeles dates). Orders count by their own date: weeks crossing either end are split and margins are recomputed from the chosen days. Days without a published week are listed in the report and left out of its figures.
+      <strong>Include provisional data</strong> adds weeks that are calculated and independently verified but not yet published; the report is then marked Provisional and lists those days, their coverage and why each week is held. Viewing or exporting it publishes nothing.</p>`;
+}
+
+function breakdownTable(title, rows) {
+  const body = (rows || []).map(r => `<tr><td>${esc(r.key)}</td><td style="text-align:right">${esc(r.units ?? '')}</td><td style="text-align:right">${money(r.knownCostRevenue)}</td>
+    <td style="text-align:right">${money(r.knownCostGp)}</td><td style="text-align:right">${pct(r.knownCostMargin)}</td><td style="text-align:right">${money(r.missingCostRevenue)}</td></tr>`).join('');
+  return `<h4>${esc(title)}</h4><table style="width:100%;border-collapse:collapse;font-size:.8rem"><thead><tr><th style="text-align:left">${esc(title.split(' ')[0])}</th><th style="text-align:right">Units</th>
+    <th style="text-align:right">Known-cost revenue</th><th style="text-align:right">Known-cost GP</th><th style="text-align:right">Margin</th><th style="text-align:right">Revenue with missing cost</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+export function renderWeek(s, status = null) {
+  if (!s || !WEEK_RE.test(s.weekStart || '')) return '<p class="meta">This week could not be read.</p>';
+  const t = s.totals || {}, labels = t.labels || {};
+  const notes = (labels.notes || []).map(n => `<li>${esc(n)}</li>`).join('');
+  const disclosures = [
+    labels.partialWeek ? `Partial reporting week: orders from ${labels.partialWeek.from} to ${labels.partialWeek.to} only (reporting starts ${labels.partialWeek.reportingStart}).` : null,
+    shippingCoverageText(t),
+    labels.costCoverage || null,
+    s.catalog?.freshness?.status === 'reused_accepted' ? 'Product costs: the cost catalog pinned to this week, accepted as correct for this period.' : null,
+    reportFlagsText(status),
+  ].filter(Boolean).map(d => `<li>${esc(d)}</li>`).join('');
+  const points = (s.narrative?.points || []).map(p => `<li>${esc(p)}</li>`).join('');
+  const prov = isProvisional(s);
+  return `<div class="gp-auto-week">
+    <p><strong>Week of ${esc(s.weekStart)}</strong> · revision ${esc(s.revision)} · ${esc(STATUS_LABEL[s.status] || s.status)} · ${esc(verificationText(s.verification))}
+      ${prov ? '<span class="chip" style="margin-left:6px">Provisional</span>' : ''}</p>
+    <div class="gp-kpi-row" style="display:flex;gap:16px;flex-wrap:wrap">
+      <div><div class="meta">${esc(labels.headline || 'Operating GP after shipping')}</div><div style="font-size:1.3rem;font-weight:600">${money(t.operatingGpAfterShipping)}</div></div>
+      <div><div class="meta">Operating revenue</div><div style="font-size:1.3rem;font-weight:600">${money(t.operatingRevenue)}</div></div>
+      <div><div class="meta">Margin</div><div style="font-size:1.3rem;font-weight:600">${pct(t.operatingGpMargin)}</div></div>
+      <div><div class="meta">${esc(labels.productGp || 'Known-cost product GP')}</div><div style="font-size:1.3rem;font-weight:600">${money(t.knownCostProductGp)}</div></div>
+      <div><div class="meta">Shipping expense</div><div style="font-size:1.3rem;font-weight:600">${money(t.shippingExpense)}</div></div>
+    </div>
+    <p class="meta">${esc(PROFIT_LABEL[s.profitabilityStatus] || s.profitabilityStatus || '')}${labels.costCoverage ? ` · ${esc(labels.costCoverage)}` : ''}${labels.hpdShipping ? ` · ${esc(labels.hpdShipping)}` : ''}</p>
+    ${disclosures ? `<h4>Coverage and disclosures</h4><ul class="meta gp-auto-disclosures">${disclosures}</ul>` : ''}
+    ${notes ? `<ul class="meta">${notes}</ul>` : ''}
+    ${points ? `<details><summary class="meta">Summary</summary><ul class="meta">${points}</ul></details>` : ''}
+    ${breakdownTable('Channel', s.breakdowns?.channel)}
+    ${breakdownTable('Vendor', s.breakdowns?.vendor)}
+    <h4>Orders</h4><div id="auto-orders"><p class="meta">Loading orders…</p></div>
+  </div>`;
+}
+
+export function renderOrders(list, { week, offset = 0 } = {}) {
+  const orders = list?.orders || [], total = list?.page?.total ?? orders.length;
+  const rows = orders.map((o, i) => `<tr class="gp-auto-order" data-i="${i}"><td><button class="logout-btn" onclick="weeklyReports.toggleOrder('${esc(week)}', ${i})">${esc(o.orderName)}</button></td>
+    <td>${esc(o.businessDate)}</td><td>${esc(o.channel)}</td><td style="text-align:right">${money(o.operatingRevenue)}</td><td style="text-align:right">${money(o.knownProductCogs)}</td>
+    <td style="text-align:right">${money(o.shipPaid)}</td><td style="text-align:right">${money(o.operatingGp)}</td><td>${esc(String(o.profitabilityStatus || '').replace(/_/g, ' '))}</td></tr>
+    <tr class="gp-auto-lines" id="auto-lines-${i}" hidden><td colspan="8"></td></tr>`).join('');
+  const prev = offset > 0 ? `<button class="logout-btn" onclick="weeklyReports.ordersPage('${esc(week)}', ${Math.max(0, offset - PAGE_SIZE)})">← Previous</button>` : '';
+  const next = offset + orders.length < total ? `<button class="logout-btn" onclick="weeklyReports.ordersPage('${esc(week)}', ${offset + PAGE_SIZE})">Next →</button>` : '';
+  return `<p class="meta">Orders ${orders.length ? offset + 1 : 0}–${offset + orders.length} of ${esc(total)} ${prev} ${next}</p>
+    <table style="width:100%;border-collapse:collapse;font-size:.8rem"><thead><tr><th style="text-align:left">Order</th><th style="text-align:left">Date</th><th style="text-align:left">Channel</th>
+    <th style="text-align:right">Revenue</th><th style="text-align:right">Product cost</th><th style="text-align:right">Shipping paid</th><th style="text-align:right">GP</th><th style="text-align:left">Profitability</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+}
+
+export function renderLines(detail) {
+  const lines = detail?.lines || [];
+  if (!lines.length) return '<p class="meta">No line items.</p>';
+  return `<table style="width:100%;border-collapse:collapse;font-size:.75rem"><thead><tr><th style="text-align:left">SKU</th><th style="text-align:left">Product</th><th style="text-align:left">Vendor</th>
+    <th style="text-align:right">Qty</th><th style="text-align:right">Revenue</th><th style="text-align:right">Cost</th><th style="text-align:right">GP</th><th style="text-align:left">Cost source</th></tr></thead><tbody>${
+    lines.map(l => `<tr><td>${esc(l.sku)}</td><td>${esc(l.product)}</td><td>${esc(l.vendorKey)}</td><td style="text-align:right">${esc(l.qty)}</td>
+      <td style="text-align:right">${money(l.contractRevenue)}</td><td style="text-align:right">${l.missingCost ? 'missing' : money(l.lineCogs)}</td>
+      <td style="text-align:right">${money(l.knownCostGp)}</td><td>${esc(l.costSource)}</td></tr>`).join('')}</tbody></table>`;
+}
+
+/** "Wed 7 Oct, 07:00" in Vietnam time (Asia/Ho_Chi_Minh) from an ISO instant, or null. */
+export function vietnamTime(iso) {
+  const d = new Date(iso);
+  if (!iso || isNaN(d)) return null;
+  return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Ho_Chi_Minh', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(d);
+}
+/**
+ * What a failed call means for the reader. A service failure never reads as a sign-in problem:
+ *   401 signed_out / session_revoked → the gate session ended (expired, signed out elsewhere): reload to sign in;
+ *   other 401 / 503 reader_not_configured → the dashboard's access to the reporting service is not set up
+ *   (nothing for the reader to enter); 503 d1_daily_limit_reached → daily database allowance used up,
+ *   with the reset in Vietnam time; 503 proxy_not_configured → not connected; anything else → unavailable.
+ */
+export const NOT_CONNECTED = 'The dashboard is not connected to the reporting service yet.';
+export const SIGNED_OUT = 'Your sign-in has ended. Reload the page to sign in again.';
+export function failureMessage(e) {
+  if (e?.status === 401 && (e?.code === 'signed_out' || e?.code === 'session_revoked')) return SIGNED_OUT;
+  if (e?.status === 401 || (e?.status === 503 && e?.code === 'reader_not_configured')) return "The dashboard's access to the weekly reports is not set up yet.";
+  if (e?.status === 503 && e?.code === 'd1_daily_limit_reached') {
+    const at = vietnamTime(e?.detail?.resetAt);
+    return `The reporting service has used its free daily database allowance. It is available again after ${at ? `${at} (Vietnam time)` : '07:00 Vietnam time'}.`;
+  }
+  if (e?.status === 503 && e?.code === 'proxy_not_configured') return NOT_CONNECTED;
+  return 'The weekly reports are unavailable right now.';
+}
+
+/** Controller: renders into `root` (and the orders container inside it). `client` defaults to workerClient. */
+export function createWeeklyReports(root, client = api, { onOpen = null } = {}) {
+  let orders = [], weekList = null, mode = 'week';
+  const show = html => { root.innerHTML = html; };
+  const fail = e => show(`<p class="meta">${esc(failureMessage(e))}</p>`);
+  const list = (form = {}) => show(renderSelector(mode) + (mode === 'month' ? renderMonthList(weekList) : mode === 'range' ? renderRangeForm(weekList, form) : renderWeekList(weekList)));
+  const ctl = {
+    async load() {
+      try { weekList = (await client.weeks()).weeks || []; list(); } catch (e) { fail(e); }
+    },
+    setMode(m) { mode = m === 'month' || m === 'range' ? m : 'week'; if (weekList) list(); },
+    /** Custom dates: validate the form, then open the range (or show why it cannot open). */
+    async openRange() {
+      const from = root.querySelector('#wr-range-from')?.value || '', to = root.querySelector('#wr-range-to')?.value || '';
+      const provisional = !!root.querySelector('#wr-range-prov')?.checked;
+      let src = weekList || [];
+      if (provisional) {
+        // Published weeks plus each unpublished week's latest verified revision (marked provisional by the Worker).
+        try { src = (await client.weeks({ provisional: true })).weeks || []; }
+        catch (e) { list({ from, to, provisional, error: failureMessage(e) }); return null; }
+      }
+      const c = checkRange(from, to, src, { provisional });
+      if (!c.ok) { list({ from, to, provisional, error: c.message }); root.querySelector('#wr-range-from')?.focus(); return null; }
+      return ctl.openReport('range', c.key, provisional ? { provisional: true, weekList: src } : {});
+    },
+    /** Open the full report (the CSV report's screens, fed by stored results) for a week, an LA calendar month or a date range. */
+    async openReport(kind, key, { provisional = false, weekList: src = null } = {}) {
+      if (onOpen) return onOpen(kind, key, src || weekList || [], { provisional });
+      if (kind === 'week') return ctl.openWeek(key);
+    },
+    get weekList() { return weekList; },
+    async openWeek(week) {
+      if (!WEEK_RE.test(week)) return;
+      try {
+        const [snap, status] = await Promise.all([client.snapshot(week), client.weekStatus ? client.weekStatus(week).catch(() => null) : null]);
+        show(`<p><button class="logout-btn" onclick="weeklyReports.load()">← All weeks</button></p>${renderWeek(snap, status)}`); await ctl.ordersPage(week, 0);
+      }
+      catch (e) { fail(e); }
+    },
+    async ordersPage(week, offset) {
+      const el = root.querySelector('#auto-orders');
+      if (!el || !WEEK_RE.test(week)) return;
+      try { const l = await client.orders(week, { offset, limit: PAGE_SIZE }); orders = l.orders || []; el.innerHTML = renderOrders(l, { week, offset }); }
+      catch (e) { el.innerHTML = '<p class="meta">Orders are unavailable right now.</p>'; }
+    },
+    async toggleOrder(week, i) {
+      const row = root.querySelector(`#auto-lines-${Number(i)}`), o = orders[Number(i)];
+      if (!row || !o) return;
+      if (!row.hidden) { row.hidden = true; return; }
+      row.hidden = false;
+      try { row.firstElementChild.innerHTML = renderLines(await client.order(week, o.orderName)); }
+      catch { row.firstElementChild.innerHTML = '<p class="meta">Line items are unavailable right now.</p>'; }
+    },
+  };
+  return ctl;
+}

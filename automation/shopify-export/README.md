@@ -1,0 +1,111 @@
+# Shopify orders export (Windows host, C5)
+
+Each Monday this job asks Shopify Admin for the **rolling eight-week orders export**, which covers orders created in the 56 days ending on the reporting Sunday. It reads Shopify's "export ready" email from the export mailbox with **Gmail read-only** access and a **fixed search**. It then downloads the file into memory, removes every customer field on this PC, and uploads only the sanitized CSV to the Worker (`POST /v1/ingest/shopify`, `mode: "rolling"`).
+
+The Worker records that one upload as two inputs for the week: the week's orders, and the updated-order scan (earlier orders that were refunded or changed are in the same window).
+
+No Shopify API, Admin API token, custom app or Shopify connector is used. **Nothing secret lives in this folder or in the repository.**
+
+## Known limitation: eight-week updated-order window
+
+The updated-order scan is this same rolling eight-week export. A refund or cancellation applied to an order **older than eight weeks** is not detected automatically. Run a broader manual or backfill export to pick it up.
+
+## What never leaves this PC, and what is never kept
+
+| Item | Handling |
+| --- | --- |
+| Raw export (names, emails, addresses, phones, notes, raw tags and discount codes) | Held in memory only. It is reduced at once to the approved columns and minimum free-text form (`shared/adapters/shopifyCsv.js`, `shopifyPrivacy.js`) and re-checked with the Worker's own validators. The buffer is then zeroed. A small export that downloads directly is written to `downloads\` just long enough to be read, then deleted. |
+| Email body, subject, sender, download link | Read in memory to find the one Shopify download link. They are never logged, stored or written to the manifest; the manifest keeps only the link's host and a hash of the message id. |
+| Shopify login, Gmail tokens, Worker secret | Windows Credential Manager only. |
+| Browser session | Persistent profile under `%LOCALAPPDATA%\sb-shopify-export\profile`, outside the repository and any cloud-synced folder (the job refuses otherwise). |
+| Failed uploads | The **sanitized** CSV only, in `quarantine\`, deleted after 72 hours. |
+| Corporate gifting payload (optional) | Built in memory from the same export before the buffer is zeroed, sent once, never written to disk. See below. |
+
+## Gmail access
+
+- **Scope:** `https://www.googleapis.com/auth/gmail.readonly` only. A token carrying any other scope is refused before any mailbox call.
+- **Calls:** three read calls, all under `users/me`: `profile`, which checks that the authorized mailbox is `gmail.mailbox`; one fixed search; and one message read. Nothing is labelled, moved, sent or deleted.
+- **Search:** fixed in code (`lib.mjs`): `from:shopify.com subject:export after:<request time − 5 min>`. The config cannot set or extend it, and a config that contains a `query`/`search`/`filter` key is refused.
+- **Matching:** the job accepts exactly one email received after the export request. It must come from a `shopify.com` sender, have "export" and "order" in the subject, and contain exactly one https download link on a Shopify-owned host (`shopify.com`, `myshopify.com`, `shopifycloud.com`, `shopifycdn.com`, `shopifysvc.com`). No email means a timeout (exit 32). Two matching emails is ambiguous (exit 30), and the job does not guess.
+
+**Browser.** If Playwright's bundled Chromium does not start on the PC (seen on one Windows 11 laptop: "side-by-side configuration is incorrect"), set `"browserChannel": "msedge"` (or `"chrome"`) in `config.local.json`; the collector then drives the installed browser with its own profile folder (`profile-chrome` for Chrome: Chrome cannot read Edge's saved session, so the two never share one). On the Windows laptop Edge 154 crashed whenever a ShipStation CSV download started; Chrome is the fallback there. Record steps with `npx playwright codegen --channel=msedge <url>`.
+
+## One-time setup
+
+1. Install Node.js 20+ and, in this folder, run `npm install`, then `npx playwright install chromium`.
+2. **Dedicated Shopify staff account** with the minimum permission to view and export orders. Store its login:
+   ```
+   Install-Module CredentialManager -Scope CurrentUser
+   New-StoredCredential -Target sb-shopify-export -UserName <staff email> -Password <password> -Persist LocalMachine
+   New-StoredCredential -Target sb-gp-ingest -UserName worker -Password <Worker INGEST_SECRET> -Persist LocalMachine
+   ```
+   (`sb-gp-ingest` is shared with the ShipStation job; skip it if it already exists.)
+3. **Export mailbox.** Shopify emails the export to the staff account's address. Make it reach the export mailbox, either by using that address for the staff account or with an automatic forward.
+4. **Gmail OAuth client.** In a Google Cloud project, create an OAuth client of type *Desktop app*. On the consent screen, add only the `gmail.readonly` scope. Store the client:
+   ```
+   New-StoredCredential -Target sb-gmail-oauth-client -UserName <client id> -Password <client secret> -Persist LocalMachine
+   ```
+5. `copy config.example.json config.local.json` (gitignored). Set `adminUrl`, `workerUrl` (staging first) and `gmail.mailbox`.
+6. Authorize Gmail once: `npm run gmail-authorize`. Open the printed address and sign in to the export mailbox. The script checks the granted scope and the mailbox, then stores the refresh token under `sb-gmail-readonly`.
+7. Sign in to Shopify once with a visible browser and complete 2FA yourself: `npm run login`.
+8. Record the export clicks with `npm run codegen`:
+   - Open Orders.
+   - Filter *Date created* from `{{windowFrom}}` to `{{windowTo}}` (or the `…US` MM/DD/YYYY forms).
+   - Choose Export → *Current search* → CSV.
+   - Replace every `REPLACE:` selector in `exportSteps`. The last step must be `requestExport`, the "Export orders" button.
+
+   Navigation is limited to the Admin origin.
+9. Test one week: `npm run export -- --week 2026-09-14 --headed`. Check the manifest in `%LOCALAPPDATA%\sb-shopify-export\runs`.
+
+## Checks before upload (the job stops rather than guesses)
+
+- **Sign-in state:** an expired session is signed in again from Credential Manager. When Shopify then asks for its two-step code (or a human check), a visible run (the weekly task runs headed) reports it to the Worker — the week's status shows "Shopify needs a person to sign in" — and waits `signInWaitMinutes` (default 30) in the open window. Once someone enters the code there, the same run continues the export. If nobody does, it stops with exit 20/21 and the weekly task opens the window again a few minutes later (for up to 12 hours). A headless run stops at once. The job stops on any page it does not recognise, including an Admin-looking page outside the Admin origin.
+- **File format:** the download must be a Shopify orders CSV. Shopify emails large exports as a ZIP holding one CSV: that one entry is extracted in memory (stored or deflate, CRC checked, size capped) and handled exactly like the CSV. An HTML page (usually a sign-in), any other ZIP or anything else is refused.
+- **Required columns:** the Worker minimum plus `Cancelled at`, `Fulfilled at`, `Financial Status` and `Refunded Amount`.
+- **Order dates:** every order's `Created at` must fall inside the rolling window. If any does not, the export filter is wrong (`export_window_mismatch`).
+- **Free text:** any free text outside the approved form, such as an unapproved Source or Channel value, stops the job (`sanitization_failed`). The refusal names columns and rules, never values.
+
+## Corporate gifting orders (optional)
+
+When `corporateIngestUrl` is set in `config.local.json`, each run also sends a minimal orders payload (`sbcg-orders-v1`) to the corporate gifting app (`POST …/api/ingest/shopify-orders`, `Authorization: Bearer <secret>`). It is built by `src/corporateOrders.mjs`, an unchanged copy of `shared/corporateOrders.js` in `sb-corporate-gifts`, from the **same in-memory export**. There is no second download, browser or scheduled task.
+
+- **Kept per order:** name/id, dates, financial status, currency, order-level amounts, line items (SKU, title, quantity, price, discount), Source, Tags and Billing Company. Tags or a company that look like an email, URL or phone number are dropped. Customer names, emails, addresses, phones, notes and discount codes are never read.
+- **Independent of GP:** it is sent after the GP upload, whether that succeeded or failed, and also after a GP refusal for an unapproved Source or a missing GP column. It is not sent after a window mismatch, an empty export or unreadable dates. Its outcome is recorded only as `corporate` in the run manifest (`sent` with counts, `skipped_not_configured`, `refused:<reason>`, `upload_failed`). It never changes the GP status or exit code.
+- **Delivery:** 60 s timeout; network errors and 5xx are retried twice, a 4xx is final. Payloads over 6 MB are not sent (`refused:too_large`). Re-sending the same export is a no-op on the app.
+- **Setup (once):**
+  ```
+  New-StoredCredential -Target sb-corporate-ingest -UserName corporate -Password '<secret>' -Persist LocalMachine
+  ```
+  then set `"corporateIngestUrl": "https://sb-corporate-gifts.netlify.app/api/ingest/shopify-orders"` in `config.local.json`. Check the next run's manifest for `corporate.status = "sent"`; the app shows the run under **Revenue → Import history**.
+
+## Schedule
+
+> **C7:** schedule the combined job in `automation/collector` (ShipStation, then Shopify, one browser at a time, with catch-up after missed starts) instead of scheduling this job on its own. The commands below still work for manual and test runs.
+
+Run it after the store's week closes. That is Monday 07:00 UTC in summer and 08:00 UTC in winter, so schedule it for **Monday 15:05 Ho Chi Minh time (08:05 UTC)**, alongside the ShipStation job:
+
+```
+schtasks /Create /TN "SB Shopify export" /SC WEEKLY /D MON /ST 15:05 /TR "cmd /c cd /d C:\path\to\automation\shopify-export && npm run export"
+schtasks /Create /TN "SB Shopify quarantine cleanup" /SC DAILY /ST 09:05 /TR "cmd /c cd /d C:\path\to\automation\shopify-export && npm run purge"
+```
+
+The email can take a while, so the job polls for up to `gmail.timeoutMinutes` (default 45). The Worker's readiness check keeps waiting for the input, and nothing is estimated.
+
+## Exit codes
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| 0 | Uploaded (`source_received` or `source_no_change`) | nothing |
+| 10 | Config error (including a Gmail search in the config) | fix `config.local.json` |
+| 20 | Shopify 2FA required and nobody signed in during the wait | Enter the code in the collector's Shopify window when it opens again (or `npm run login`) |
+| 21 | Captcha shown and not finished during the wait | Finish the check in the collector's Shopify window (or `npm run login`) |
+| 22 | Unrecognised page | open Shopify Admin; update `auth.selectors` if the layout changed |
+| 23 | Login rejected | update the `sb-shopify-export` credential |
+| 24 | Gmail authorization missing, not read-only, or the wrong mailbox | `npm run gmail-authorize` |
+| 30 | Export steps failed, ambiguous email, unknown link or file, missing columns, window mismatch, or sanitization refused | see the manifest; fix the steps or extend the approved lists deliberately |
+| 31 | Upload to the Worker failed after retries | the sanitized file is in `quarantine` for 72 h; rerun the job |
+| 32 | No export email arrived in time | check the forward to the export mailbox; rerun |
+
+## Tests
+
+`npm test` runs the sign-in detection and the Playwright adapter against synthetic offline pages. It skips when Chromium is not installed. The pure helpers, the Gmail client and the whole run (with fakes and the in-process Worker) are tested in the repository's main suite: `tests/shopify-collector.test.mjs`.

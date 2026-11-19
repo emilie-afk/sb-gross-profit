@@ -1,0 +1,353 @@
+{
+  "version": "synthetic-2026-11",
+  "_note": "Invented values for tests only: codes, prefixes, vendor names and spellings, amounts, minimums, dates and pre-code identifier names are made up.",
+  "volumeDiscountTiers": [
+    {
+      "min": 30,
+      "disc": 0.4
+    },
+    {
+      "min": 12,
+      "disc": 0.22
+    },
+    {
+      "min": 3,
+      "disc": 0.1
+    }
+  ],
+  "tierCosts": {
+    "2inch": 3.1,
+    "2inch_pot": 1.4,
+    "4inch": 6.3,
+    "4inch_pot": 2.6,
+    "sub": 2.7,
+    "sub_pot": 3.3,
+    "faire_pack": 9.5,
+    "faire_2": 2.9,
+    "faire_4": 5.65,
+    "pack": 1.7,
+    "airplant": 2.4,
+    "random_assorted": 1.6,
+    "random_pack": 1.9
+  },
+  "primarySkuPrefixes": [
+    "K2",
+    "M2",
+    "K4",
+    "M4",
+    "KV",
+    "KW",
+    "MV",
+    "VAPO",
+    "VBPO",
+    "VCPO",
+    "STUDIOPOT",
+    "WP-",
+    "WS-",
+    "RKQA",
+    "RKQB",
+    "RKQC",
+    "RKQD",
+    "TRQC",
+    "XQZZ",
+    "RNQ",
+    "TLQA",
+    "TLQB",
+    "T7700",
+    "RQ",
+    "SUB",
+    "GSUB"
+  ],
+  "dropshipShipRates": [
+    [
+      0.7,
+      7.15
+    ],
+    [
+      1.6,
+      8.1
+    ],
+    [
+      2.7,
+      9.2
+    ],
+    [
+      4.2,
+      10.6
+    ],
+    [
+      6.4,
+      12.9
+    ],
+    [
+      9.5,
+      15.3
+    ],
+    [
+      14.5,
+      19.8
+    ],
+    [
+      22.5,
+      24.5
+    ],
+    [
+      36,
+      33.0
+    ],
+    [
+      58,
+      41.7
+    ]
+  ],
+  "dropshipSizeFallbackLb": {
+    "2": 0.6,
+    "3": 0.9,
+    "4": 1.3,
+    "6": 2.4,
+    "8": 3.6,
+    "AIR": 0.3,
+    "BUNDLE": 2.0
+  },
+  "giftSkuPatternsCalc": [
+    "HOPE BOX",
+    "CALM KIT",
+    "GLOW SET",
+    "BLOOM CRATE",
+    "THANKS TIN"
+  ],
+  "giftSkuPatternsCatalog": [
+    "HOPE BOX",
+    "CALM KIT",
+    "GLOW SET",
+    "BLOOM CRATE",
+    "THANKS TIN",
+    "CHEER JAR"
+  ],
+  "vendorAliases": {
+    "hope gifts co": "L2G",
+    "hope gift": "L2G",
+    "leafy goods": "LG",
+    "rooted partner": "LG",
+    "leafy-goods": "LG",
+    "canopy collective": "CC",
+    "canopy co": "CC",
+    "shoreline arrangements": "SA",
+    "shoreline arrangement": "SA",
+    "maker lane": "LM",
+    "makerlane": "LM"
+  },
+  "vendorSkuPrefixes": [
+    [
+      "^QCC-",
+      "i",
+      "CC"
+    ],
+    [
+      "^QSA-",
+      "i",
+      "SA"
+    ],
+    [
+      "^QLG-",
+      "i",
+      "LG"
+    ],
+    [
+      "^QLM-",
+      "i",
+      "LM"
+    ]
+  ],
+  "vendorMinimums": {
+    "L2G": 20,
+    "LG": 6,
+    "CC": 12,
+    "SA": 10,
+    "LM": 8
+  },
+  "vendorTotalMinimum": 56,
+  "manualPrimaryCosts": [
+    [
+      "VAPO1001",
+      1.85
+    ],
+    [
+      "VAPO1002",
+      2.15
+    ],
+    [
+      "VBPO2001.WH",
+      2.45
+    ],
+    [
+      "K2QA0001",
+      3.05
+    ],
+    [
+      "K4QB0002",
+      6.4
+    ],
+    [
+      "STUDIOPOT-S",
+      4.75
+    ]
+  ],
+  "manualListCosts": [
+    [
+      "QLR_FERN_4IN1",
+      11.4
+    ],
+    [
+      "QLR_IVY_6IN2",
+      16.2
+    ],
+    [
+      "QLR_PALM_8IN1",
+      27.9
+    ],
+    [
+      "QLR_CACTUS_3IN3",
+      8.65
+    ],
+    [
+      "QLR_MONSTERA_6IN1",
+      19.35
+    ],
+    [
+      "QLR_HOYA_4IN2",
+      12.1
+    ]
+  ],
+  "vendorFirstPaidShippingDates": {
+    "APS": "2026-03-02",
+    "L2G": "2026-04-13",
+    "SA": "2026-05-18"
+  },
+  "scenarioDiscountDefaults": [
+    [
+      1,
+      0.1
+    ],
+    [
+      2,
+      0.2
+    ],
+    [
+      3,
+      0.35
+    ],
+    [
+      4,
+      0.45
+    ]
+  ],
+  "skuGrammar": {
+    "potPrefixes": [
+      "VAPO",
+      "VBPO",
+      "VCPO"
+    ],
+    "otherPotPrefixes": [
+      "STUDIOPOT"
+    ],
+    "wholesalePackPrefixes": [
+      "WP-"
+    ],
+    "wholesaleSinglePrefixes": [
+      "WS-"
+    ],
+    "wholesaleMarkers": [
+      "TRADE"
+    ],
+    "rackPackPrefixes": [
+      "RKQA",
+      "RKQB",
+      "RKQC",
+      "RKQD",
+      "TRQC",
+      "XQZZ"
+    ],
+    "rackPackNameOnlyPrefixes": [
+      "RNQ"
+    ],
+    "size2Prefixes": [
+      "K2",
+      "M2"
+    ],
+    "size2ExtraPrefixes": [
+      "T7700"
+    ],
+    "size4Prefixes": [
+      "K4",
+      "M4",
+      "KV",
+      "KW",
+      "MV"
+    ],
+    "airplantPrefixes": [
+      "TLQA",
+      "TLQB"
+    ],
+    "upgradeMarkers": [
+      "POT",
+      "UPGRADE"
+    ],
+    "randomAssortedPattern": "^RQ\\d"
+  },
+  "vendorLegend": {
+    "L2G": "Hope Gifts Co",
+    "LG": "Leafy Goods",
+    "LR": "Rooted Partner",
+    "CC": "Canopy Collective",
+    "SA": "Shoreline Arrangements",
+    "LM": "Maker Lane",
+    "HPD": "Houseplant Direct",
+    "HPW": "Houseplant Direct Wholesale",
+    "HPS": "Houseplant Direct Shop",
+    "APS": "Airy Plants",
+    "MCG": "Summit Ridge Nursery"
+  },
+  "legacyNames": {
+    "LG_SHEET_URL": "OLD_LG_TAB_URL",
+    "CC_SHEET_URL": "OLD_CC_TAB_URL",
+    "SA_SHEET_URL": "OLD_SA_TAB_URL",
+    "LM_SHEET_URL": "OLD_LM_TAB_URL",
+    "lr_cost_source": "old_lr_cost_source",
+    "lr": "oldLr"
+  },
+  "scenarioAssumptionDefaults": {
+    "sitewideDiscount": 0.08,
+    "adRate": 0.12,
+    "monthlyLabor": 8200,
+    "targetMargin": 0.18
+  },
+  "scenarioInputDefaults": {
+    "sc-cost-reduce": 0.35,
+    "sc-cur-thresh": 79,
+    "sc-new-thresh": 59,
+    "aps-disc-2": 2,
+    "aps-disc-3": 3.5,
+    "aps-disc-4": 4.5,
+    "aps-pct-2": 8,
+    "aps-pct-3": 12,
+    "aps-pct-4": 18
+  },
+  "scenarioRules": {
+    "discountExcludedFlags": [
+      "isGiftCard",
+      "isRoute"
+    ],
+    "discountExcludedCostSources": [],
+    "passThroughFlags": [
+      "isRoute"
+    ],
+    "allocation": {
+      "shipping": "baseRevenue",
+      "advertising": "scenarioRevenue",
+      "labor": "lineRevenue",
+      "laborShare": "lineRevenue",
+      "selectionShipping": "baseRevenue"
+    }
+  }
+}

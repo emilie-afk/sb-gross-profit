@@ -1,0 +1,15 @@
+{
+  "_comment": "Copy to config.local.json (gitignored). Points at the two collectors' own config.local.json files; each keeps its own browser profile and Credential Manager entries. No credentials here. privateRulesFile: the private business rules (same document as Netlify's PRIVATE_RULES_JSON); keep it outside the repository.",
+  "shipstationConfig": "../shipstation-export/config.local.json",
+  "shopifyConfig": "../shopify-export/config.local.json",
+  "workerUrl": "https://sb-gp-worker-staging.<account>.workers.dev",
+  "ingestCredentialTarget": "sb-gp-ingest",
+  "timeZone": "America/Los_Angeles",
+  "localDir": null,
+  "pipeline": "free_tier",
+  "privateRulesFile": "C:\\path\\outside\\the\\repository\\gp-private-rules.json",
+  "verifyUrl": "https://<site>.netlify.app/.netlify/functions/gp-verify-background",
+  "verifyTriggerCredentialTarget": "sb-gp-verify-trigger",
+  "waitForCloseMinutes": 75,
+  "verifyWaitMinutes": 8
+}

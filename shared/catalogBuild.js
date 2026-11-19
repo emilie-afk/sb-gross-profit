@@ -1,0 +1,501 @@
+/**
+ * catalogBuild.js — build.py's cost tables, built from fetched sheet text
+ * =======================================================================
+ * A line-for-line port of the table building in build.py and vendor_sheets.py
+ * so the Worker can fetch the cost sheets itself (C6) and produce the same
+ * catalog the dashboard uses. No network here: the caller passes the text of
+ * each configured source, keyed by the build.py environment variable name.
+ *
+ *   buildCatalogTables({ MCG_SHEET_URL: text, ..., productExport: { name, text } })
+ *     → { tables, mcgExtra, report }
+ *
+ * Python semantics that change results are reproduced (pyCompat.js): csv
+ * module parsing, str.strip, float(), round(x, 4), dict insertion order and
+ * first-wins / last-wins rules. Parity with build.py itself is checked by
+ * tools/catalog-parity/ and tests/catalog-build.test.mjs.
+ *
+ * Never pass URLs or keys in here; this module only sees sheet contents.
+ */
+import { pyCsvRows, pyDictRows, pyZipDict, pyGet, pyOr, pyTruthy, pyStrip, pyStripStr, pyFloat, pyRound, PY_WS, PyCompatError } from './pyCompat.js';
+import { manualPrimaryCosts, manualListCosts } from './catalogManual.js';
+import { parseMcgExtraCsv } from './catalog.js';
+import { CATALOG_VENDORS, L2G, LG, CC, SA, LM, HP_STORES, vendorName } from './vendors.js';
+
+export { PyCompatError };
+
+/** Every source build.py reads, by its environment variable name. */
+export const URL_SOURCES = Object.freeze([
+  'MCG_SHEET_URL', 'MCG_POTS_SHEET_URL', 'SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL',
+  'AS_SHEET_URL', 'L2G_SHEET_URL', 'LG_SHEET_URL', 'CC_SHEET_URL',
+  'SA_SHEET_URL', 'LM_SHEET_URL', 'HP_SHEET_URL', 'MCG_EXTRA_SHEET_URL', 'MCG_PACK_SHEET_URL',
+]);
+export const LR_MODES = Object.freeze(['manual_list', 'sheet']);
+export const JSON_SOURCES = Object.freeze(['PRODUCT_COSTS_JSON1', 'PRODUCT_COSTS_JSON2', 'SKU_WEIGHTS_JSON']);
+export const DRIVE_SOURCES = Object.freeze(['HP_COSTS_FOLDER_ID', 'GDRIVE_API_KEY']);
+
+// Vendors by code (shared/vendors.js); the full names are in the private legend.
+export { L2G };
+export const VENDOR_ORDER = CATALOG_VENDORS;
+export const VENDOR_ENV = Object.freeze({
+  [L2G]: 'L2G_SHEET_URL', [LG]: 'LG_SHEET_URL', [CC]: 'CC_SHEET_URL', [SA]: 'SA_SHEET_URL', [LM]: 'LM_SHEET_URL',
+});
+
+const has = v => typeof v === 'string';
+const WS = `[${PY_WS}]`;
+const RE = {
+  ws: new RegExp(`${WS}+`, 'g'),
+  mcgDescSku: new RegExp(`^[A-Z0-9]{4,}${WS}+`, 'i'),
+  notAlnumWs: new RegExp(`[^a-z0-9${PY_WS}]`, 'g'),
+  notSkuChar: /[^A-Z0-9]/g,
+};
+const lower = s => s.toLowerCase();
+const upper = s => s.toUpperCase();
+
+/** build.py clean_money: float(str(s) without $ and ,) or None. */
+function buildMoney(s) {
+  const v = pyFloat(pyStrip((s === null || s === undefined ? 'None' : String(s)).replace(/\$/g, '').replace(/,/g, '')));
+  return v;
+}
+/** vendor_sheets clean_money: None for None / empty, else float or None. */
+function vendorMoney(s) {
+  if (s === null || s === undefined) return null;
+  const t = pyStrip(String(s).replace(/\$/g, '').replace(/,/g, ''));
+  if (!t) return null;
+  return pyFloat(t);
+}
+function finiteOrThrow(v, where) {
+  if (v !== null && typeof v === 'number' && !Number.isFinite(v) && !Number.isNaN(v)) throw new PyCompatError('non_finite_cost', `${where}: an infinite cost cannot be stored`);
+  return v;
+}
+const pos = v => v !== null && pyTruthy(v) && v > 0;           // `cost and cost > 0`
+
+// ─── vendor_sheets.py ─────────────────────────────────────────────────────────
+export const normalizeSku = s => upper(pyStrip(s || '').replace(RE.ws, ' '));
+export const looseSku = s => normalizeSku(s).replace(RE.notSkuChar, '');
+export function normalizeName(s) {
+  const parts = (s || '').split('\n');
+  return pyStrip(lower(parts[parts.length - 1]).replace(RE.notAlnumWs, ' ').replace(RE.ws, ' '));
+}
+function displayName(s) {
+  const parts = (s || '').split('\n').map(p => pyStrip(p)).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+function findHeaderRow(rows, required, maxScan = 6) {
+  const want = required.map(lower);
+  for (let i = 0; i < Math.min(rows.length, maxScan); i++) {
+    const cells = rows[i].map(c => lower(pyStrip(c)));
+    if (want.every(w => cells.some(c => w === c || c.includes(w)))) return i;
+  }
+  return null;
+}
+function colIndex(header, candidates) {
+  const norm = header.map(c => lower(pyStrip(c || '')).replace(RE.ws, ' '));
+  // A candidate starting with '^' matches as a prefix in both passes (vendor_sheets.col_index).
+  const cands = candidates.map(c => ({ pre: c.startsWith('^'), c: lower(pyStrip(c.replace(/^\^/, ''))).replace(RE.ws, ' ') }));
+  for (const { pre, c } of cands) for (let i = 0; i < norm.length; i++) if (norm[i] === c || (pre && norm[i].startsWith(c))) return i;
+  for (const { c } of cands) for (let i = 0; i < norm.length; i++) if (norm[i].startsWith(c)) return i;
+  return null;
+}
+const VENDOR_SPECS = {
+  [L2G]: { headerRequired: ['sku'], sku: ['SKUs', 'SKU'], cost: ['^Dropship Price (', 'Dropship Price', 'Cost'], name: ['Shopify Name', 'Product'], carryName: true, active: null },
+  [LG]: { headerRequired: ['sku', 'cost per item'], sku: ['SKU'], cost: ['Cost per item'], name: ['Title'], carryName: false, active: ['Listing Shopify'] },
+  // The vendor tabs name the cost column 'Cost (what <vendor> receives)': matched on its prefix.
+  [CC]: { headerRequired: ['sku', 'cost'], sku: ['SKU'], cost: ['^Cost (what ', 'Cost'], name: ['Product'], carryName: true, active: null },
+  [SA]: { headerRequired: ['sb sku'], sku: ['SB SKU', 'SKU'], cost: ['^Cost (what ', 'Cost'], name: ['Product'], carryName: true, active: null },
+  [LM]: { headerRequired: ['sku', 'cost'], sku: ['SKU'], cost: ['^Cost (what ', 'Cost'], name: ['Product'], carryName: true, active: null },
+};
+
+/** vendor_sheets.parse_vendor_tab → { catalog: Map, stats, errors } */
+export function parseVendorTab(vendor, rows) {
+  const spec = VENDOR_SPECS[vendor];
+  const stats = { vendor, rows_fetched: Math.max(0, rows.length - 1), rows_accepted: 0, unique_skus: 0, duplicate_skus: 0, blank_skus: 0,
+    invalid_costs: 0, zero_or_negative: 0, inactive_skipped: 0, conflicting_duplicates: 0, imported: 0 };
+  const errors = [];
+  const hdr = findHeaderRow(rows, spec.headerRequired);
+  if (hdr === null) { errors.push(`${vendor}: could not locate a header row`); return { catalog: new Map(), stats, errors }; }
+  const header = rows[hdr];
+  const iSku = colIndex(header, spec.sku), iCost = colIndex(header, spec.cost), iName = spec.name ? colIndex(header, spec.name) : null;
+  let iAct = null;
+  if (spec.active) for (const r of rows.slice(0, hdr + 1)) { iAct = colIndex(r, spec.active); if (iAct !== null) break; }
+  if (iSku === null || iCost === null) { errors.push(`${vendor}: SKU or cost column not found`); return { catalog: new Map(), stats, errors }; }
+  const data = rows.slice(hdr + 1);
+  stats.rows_fetched = data.length;
+  const cell = (row, idx) => (idx !== null && idx < row.length ? pyStrip(row[idx]) : '');
+  const collected = new Map();
+  let currentName = '';
+  for (const row of data) {
+    if (!row.some(c => pyStrip(c))) continue;
+    const nameCell = cell(row, iName);
+    if (nameCell) currentName = nameCell;
+    const rawSku = cell(row, iSku);
+    if (!rawSku) { stats.blank_skus++; continue; }
+    if (iAct !== null) {
+      const flag = upper(pyStrip(cell(row, iAct)));
+      if (!['TRUE', 'YES', 'X', '1', 'CHECKED'].includes(flag)) { stats.inactive_skipped++; continue; }
+    }
+    const cost = finiteOrThrow(vendorMoney(cell(row, iCost)), vendor);
+    if (cost === null) { stats.invalid_costs++; continue; }
+    if (cost <= 0) { stats.zero_or_negative++; continue; }
+    if (Number.isNaN(cost)) throw new PyCompatError('non_finite_cost', `${vendor}: a NaN cost cannot be stored`);
+    const pname = !spec.carryName ? nameCell : (nameCell || currentName);
+    const key = normalizeSku(rawSku);
+    if (!collected.has(key)) collected.set(key, []);
+    collected.get(key).push([pyRound(cost, 4), rawSku, displayName(pname)]);
+    stats.rows_accepted++;
+  }
+  const catalog = new Map();
+  for (const [key, entries] of collected) {
+    const costs = new Set(entries.map(e => e[0]));
+    if (entries.length > 1) stats.duplicate_skus++;
+    if (costs.size > 1) { stats.conflicting_duplicates++; errors.push(`${vendor}: a SKU has conflicting costs — not imported`); continue; }
+    const [cost, rawSku, pname] = entries[0];
+    catalog.set(key, { unitCost: cost, sku: rawSku, productName: pname, source: `${vendor} sheet`, matchType: 'exact_sku' });
+  }
+  stats.unique_skus = collected.size;
+  stats.imported = catalog.size;
+  return { catalog, stats, errors };
+}
+
+// ─── build.py ────────────────────────────────────────────────────────────────
+// The house-plant dropship vendors as the products export spells them (private legend).
+const hpVendorNames = () => new Set([...HP_STORES, ...HP_STORES.map(vendorName)]);   // codes and full names
+const normalizeTitle = s => pyStrip(lower(s).replace(RE.notAlnumWs, '').replace(RE.ws, ' '));
+
+function parseShopifyExportRows(rows) {
+  const sb = new Map(), hp = new Map(), hpByName = new Map();
+  let vendor = '', title = '';
+  const HP_VENDORS_NOW = hpVendorNames();
+  for (const row of rows) {
+    const v = pyStrip(pyOr(pyGet(row, 'Vendor'), '') ?? ''); if (v) vendor = v;
+    const t = pyStrip(pyOr(pyGet(row, 'Title'), '') ?? ''); if (t) title = t;
+    const sku = upper(pyStrip(pyOr(pyGet(row, 'Variant SKU'), '') ?? ''));
+    const cost = finiteOrThrow(buildMoney(pyGet(row, 'Cost per item', '')), 'product export');
+    if (pos(cost)) {
+      if (sku) { if (vendor === 'Succulents Box') sb.set(sku, cost); else if (HP_VENDORS_NOW.has(vendor)) hp.set(sku, cost); }
+      if (HP_VENDORS_NOW.has(vendor) && title) { const k = normalizeTitle(title); if (k && !hpByName.has(k)) hpByName.set(k, cost); }
+    }
+  }
+  return { sb, hp, hpByName };
+}
+
+// SKU alias sheets (build.py 1c, same rules): the Products Master product tabs with explicit columns, or the older
+// two-column sheet. An alias pointing to two SKUs, or that is itself a product SKU, is left out and reported.
+const ALIAS_LAYOUTS = [
+  ['SB products', ['sb bundles sku', 'mcg sku'], 'amz sb alias skus'],
+  ['HP products', ['hd sku'], 'amz sb alias skus'],
+];
+const ALIAS_SIGNALS = new Set(['sku', 'succulent sku', 'sb sku', 'mcg sku', 'amazon sku', 'amazon alias', 'seller sku', 'alias', 'internal sku', 'variant sku']);
+const ALIAS_BAD_TOKEN = new RegExp(`[${PY_WS},;]`);
+function findAliasLayout(rawRows) {
+  for (let i = 0; i < rawRows.length; i++) {
+    const cells = rawRows[i].map(c => lower(pyStrip(c)));
+    for (const layout of ALIAS_LAYOUTS) if (cells.includes(layout[2]) && cells.includes(layout[1][0])) return [i, layout];
+    if (cells.filter(c => ALIAS_SIGNALS.has(c)).length >= 2) return [i, null];
+  }
+  return [null, null];
+}
+/**
+ * [[alias, canonical], ...] (upper case) from one sheet and the layout name (null: no header); invalid tokens appended.
+ * Every product SKU the sheet names (each canonical column of every row, with or without aliases) goes into `products`.
+ */
+function aliasPairs(rawRows, label, invalid, products) {
+  const [idx, layout] = findAliasLayout(rawRows);
+  if (idx === null) return [[], null];
+  const header = rawRows[idx].map(c => lower(pyStrip(c)));
+  const pairs = [];
+  if (layout) {
+    const [name, canonCols, aliasCol] = layout;
+    const ci = canonCols.filter(c => header.includes(c)).map(c => header.indexOf(c));
+    const ai = header.indexOf(aliasCol);
+    for (const row of rawRows.slice(idx + 1)) {
+      const cell = j => (j < row.length ? row[j] : '');
+      for (const j of ci) if (pyStrip(cell(j))) products.add(upper(pyStrip(cell(j))));
+      const j0 = ci.find(j => pyStrip(cell(j)));
+      const canon = j0 === undefined ? '' : upper(pyStrip(cell(j0)));
+      if (!canon) continue;
+      for (const token of cell(ai).split(/\r\n|\r|\n/)) {
+        const t = upper(pyStrip(token));
+        if (!t) continue;
+        if (ALIAS_BAD_TOKEN.test(t)) { invalid.push(`${label}:${t}`); continue; }
+        if (t !== canon) pairs.push([t, canon]);
+      }
+    }
+    return [pairs, name];
+  }
+  for (const row of rawRows.slice(idx + 1)) {
+    const rlow = new Map();
+    header.forEach((k, j) => { if (j < row.length && pyStrip(row[j])) rlow.set(k, upper(pyStrip(row[j]))); });
+    const g = k => pyGet(rlow, k);
+    const sb = pyOr(g('succulent sku'), g('sb sku'), g('mcg sku'), g('internal sku'), g('sku'), g('variant sku'), '');
+    const amz = pyOr(g('amazon sku'), g('amazon alias'), g('amazon'), g('seller sku'), g('alias'), g('msku'), '');
+    if (sb) products.add(sb);
+    if (sb && amz && sb !== amz) pairs.push([amz, sb]);
+  }
+  return [pairs, 'two-column'];
+}
+
+// ─── LR tab ───────────────────────────────────────────────────────────────────
+// The Products Master tab that build.py imports as vendor LG (LG_SHEET_URL;
+// the private vendor spellings map the LR Shopify vendor to it) is the
+// LR tab, and build.py describes it
+// as "only rows where col Q (Listing Shopify) is CHECKED → col E (LR SKU),
+// col G (LR cost)". build.py ALSO writes a hand-copied MANUAL_LR_COSTS list into
+// mcg_total, which the engine consults first. Each fetch compares the two.
+const LR_SPEC = { headerRequired: ['sku', 'cost per item'], sku: ['SKU'], cost: ['Cost per item'], active: ['Listing Shopify'] };
+const LR_EXPECTED_COLUMNS = Object.freeze({ sku: 'E', cost: 'G', listed: 'Q' });
+const colLetter = i => (i === null ? null : (i >= 26 ? String.fromCharCode(64 + Math.floor(i / 26)) : '') + String.fromCharCode(65 + (i % 26)));
+
+/** LR tab → { costs: Map(sku → cost) | null, stats, errors, columns } */
+export function parseLrTab(rows) {
+  const stats = { rows: 0, listed: 0, notListed: 0, blankSku: 0, invalidCost: 0, conflicting: 0, imported: 0 };
+  const errors = [];
+  const hdr = findHeaderRow(rows, LR_SPEC.headerRequired);
+  if (hdr === null) return { costs: null, stats, errors: ['LR: header row not found'], columns: null };
+  const header = rows[hdr];
+  const iSku = colIndex(header, LR_SPEC.sku), iCost = colIndex(header, LR_SPEC.cost);
+  let iAct = null;
+  for (const r of rows.slice(0, hdr + 1)) { iAct = colIndex(r, LR_SPEC.active); if (iAct !== null) break; }
+  const columns = { sku: colLetter(iSku), cost: colLetter(iCost), listed: colLetter(iAct) };
+  if (iSku === null || iCost === null || iAct === null) return { costs: null, stats, errors: ['LR: SKU, cost or Listing Shopify column not found'], columns };
+  if (columns.sku !== LR_EXPECTED_COLUMNS.sku || columns.cost !== LR_EXPECTED_COLUMNS.cost || columns.listed !== LR_EXPECTED_COLUMNS.listed)
+    errors.push(`LR: columns are ${columns.sku}/${columns.cost}/${columns.listed}, expected E/G/Q`);
+  const cell = (row, idx) => (idx < row.length ? pyStrip(row[idx]) : '');
+  const collected = new Map();
+  for (const row of rows.slice(hdr + 1)) {
+    if (!row.some(c => pyStrip(c))) continue;
+    stats.rows++;
+    if (!['TRUE', 'YES', 'X', '1', 'CHECKED'].includes(upper(cell(row, iAct)))) { stats.notListed++; continue; }
+    stats.listed++;
+    const sku = normalizeSku(cell(row, iSku));
+    if (!sku) { stats.blankSku++; continue; }
+    const cost = finiteOrThrow(vendorMoney(cell(row, iCost)), 'LR');
+    if (cost === null || Number.isNaN(cost) || !(cost > 0)) { stats.invalidCost++; continue; }
+    if (!collected.has(sku)) collected.set(sku, new Set());
+    collected.get(sku).add(cost);
+  }
+  const costs = new Map();
+  for (const [sku, set] of collected) {
+    if (set.size > 1) { stats.conflicting++; errors.push('LR: a SKU has conflicting costs — not imported'); continue; }
+    costs.set(sku, [...set][0]);
+  }
+  stats.imported = costs.size;
+  return { costs, stats, errors, columns };
+}
+
+/** Counts only: how the tab compares with build.py's MANUAL_LR_COSTS. */
+export function compareLrTab(costs) {
+  const manual = new Map(manualListCosts().map(([k, v]) => [upper(k), v]));
+  let same = 0, changed = 0, onlyManual = 0, onlySheet = 0;
+  for (const [k, v] of manual) { if (!costs.has(k)) onlyManual++; else if (Math.round(costs.get(k) * 100) === Math.round(v * 100)) same++; else changed++; }
+  for (const k of costs.keys()) if (!manual.has(k)) onlySheet++;
+  return { manualList: manual.size, sheet: costs.size, same, changed, onlyManualList: onlyManual, onlySheet, identical: changed === 0 && onlyManual === 0 && onlySheet === 0 };
+}
+
+const toObj = m => Object.fromEntries(m);
+
+/**
+ * @param {object} src  { <ENV NAME>: text } for configured URL sources,
+ *                      { PRODUCT_COSTS_JSON1|2, SKU_WEIGHTS_JSON: json text },
+ *                      productExport: { name, text } | undefined (Drive's latest export)
+ */
+export function buildCatalogTables(src, { lrSource = 'manual_list' } = {}) {
+  if (!LR_MODES.includes(lrSource)) throw new Error(`lrSource must be one of ${LR_MODES.join(', ')}`);
+  const warnings = [];
+  const report = { sources: {}, vendorStats: [], warnings };
+
+  // 1. MCG
+  const mcg = new Map();
+  if (has(src.MCG_SHEET_URL)) {
+    const rows = pyDictRows(src.MCG_SHEET_URL);
+    for (const row of rows) {
+      const sku = upper(pyStripStr(pyGet(row, 'SKU', '')));
+      const cost = finiteOrThrow(buildMoney(pyOr(pyGet(row, 'Cost Per Item', ''), pyGet(row, 'Cost_Per_Item', ''))), 'MCG');
+      if (sku && pos(cost)) {
+        mcg.set(sku, cost);
+        const desc = pyStripStr(pyGet(row, 'Description', ''));
+        let name = desc.replace(RE.mcgDescSku, '').split('/')[0];
+        name = pyStrip(lower(name).replace(RE.notAlnumWs, ' ').replace(RE.ws, ' '));
+        if (name && !mcg.has('__n__' + name)) mcg.set('__n__' + name, cost);
+      }
+    }
+    report.sources.MCG_SHEET_URL = { rows: rows.length };
+  }
+  if (has(src.MCG_POTS_SHEET_URL)) {
+    const raw = pyCsvRows(src.MCG_POTS_SHEET_URL);
+    const SIGNALS = ['pot sku', 'sku', 'variant sku'];
+    const hi = raw.findIndex(r => { const low = r.map(c => lower(pyStrip(c))); return SIGNALS.some(s => low.includes(s)); });
+    let potCount = 0;
+    if (hi >= 0) {
+      for (const r of raw.slice(hi + 1)) {
+        const row = pyZipDict(raw[hi], r);
+        const sku = upper(pyStrip(pyOr(pyGet(row, 'Pot SKU'), pyGet(row, 'SKU'), pyGet(row, 'Variant SKU'), pyGet(row, 'pot sku'), '')));
+        const cost = finiteOrThrow(buildMoney(pyOr(pyGet(row, 'Pot Cost'), pyGet(row, 'Cost'), pyGet(row, 'Cost per item'), pyGet(row, 'Cost Per Item'),
+          pyGet(row, 'Cost_Per_Item'), pyGet(row, 'pot cost'), '')), 'MCG pots');
+        if (sku && pos(cost)) {
+          mcg.set(sku, cost);
+          const base = sku.split('.')[0];
+          if (base && base !== sku && !mcg.has(base)) mcg.set(base, cost);
+          potCount++;
+        }
+      }
+    } else warnings.push('MCG pots: header row not found');
+    report.sources.MCG_POTS_SHEET_URL = { rows: raw.length, potSkus: potCount };
+  }
+
+  // 1c. SKU alias
+  const alias = new Map();
+  const aliasTargets = new Map(), aliasInvalid = [], aliasProducts = new Set();
+  for (const key of ['SB_SKU_ALIAS_URL', 'SB_SKU_ALIAS_URL_2', 'HP_SKU_ALIAS_URL']) {
+    if (!has(src[key])) continue;
+    const [pairs, layoutName] = aliasPairs(pyCsvRows(src[key]), key, aliasInvalid, aliasProducts);
+    if (layoutName === null) warnings.push(`${key}: header row not found`);
+    for (const [a, c] of pairs) { const t = aliasTargets.get(a) || aliasTargets.set(a, []).get(a); if (!t.includes(c)) t.push(c); }
+    report.sources[key] = { layout: layoutName, pairs: pairs.length };
+  }
+  const canonicalSkus = new Set([...aliasTargets.values()].flat());
+  for (const c of canonicalSkus) aliasProducts.add(c);
+  const aliasConflicts = [];
+  for (const a of [...aliasTargets.keys()].sort()) {
+    const t = aliasTargets.get(a);
+    if (t.length > 1) aliasConflicts.push(`${a} -> ${t.join(' | ')}`);
+    else if (aliasProducts.has(a)) aliasConflicts.push(`${a} -> ${t[0]} (also a product SKU)`);
+    else alias.set(a, t[0]);
+  }
+  for (const c of [...canonicalSkus].sort()) if (!alias.has(c) && !aliasTargets.has(c)) alias.set(c, c);
+  report.skuAlias = { mappings: [...alias].filter(([k, v]) => k !== v).length, conflicts: aliasConflicts, invalid: aliasInvalid };
+  if (aliasConflicts.length) warnings.push(`SKU alias: ${aliasConflicts.length} conflicting alias(es) left out`);
+  if (aliasInvalid.length) warnings.push(`SKU alias: ${aliasInvalid.length} token(s) with whitespace inside left out`);
+
+  // 2. APS
+  const as = new Map();
+  if (has(src.AS_SHEET_URL)) {
+    for (const row of pyDictRows(src.AS_SHEET_URL)) {
+      const sku = upper(pyStripStr(pyOr(pyGet(row, 'SKU ', ''), pyGet(row, 'SKU', ''))));
+      const cost = finiteOrThrow(buildMoney(pyGet(row, 'Fullfilled Price', '')), 'APS');
+      if (sku && pos(cost)) as.set(sku, cost);
+    }
+    report.sources.AS_SHEET_URL = { skus: as.size };
+  }
+
+  // 3. Vendor catalogs
+  const vendorCatalog = new Map(VENDOR_ORDER.map(v => [v, new Map()]));
+  for (const vendor of VENDOR_ORDER) {
+    const env = VENDOR_ENV[vendor];
+    if (!has(src[env])) { warnings.push(`${env} not set — no ${vendor} costs imported`); report.vendorStats.push({ vendor, configured: false, imported: 0 }); continue; }
+    const { catalog, stats, errors } = parseVendorTab(vendor, pyCsvRows(src[env]));
+    vendorCatalog.set(vendor, catalog);
+    report.vendorStats.push({ ...stats, configured: true });
+    warnings.push(...errors);
+    if (stats.imported === 0) warnings.push(`${vendor}: configured but produced ZERO valid costs`);
+  }
+  const vendorIndex = new Map();
+  for (const [vendor, entries] of vendorCatalog) {
+    const byLoose = new Map(), byName = new Map();
+    for (const [key, e] of entries) {
+      const lk = looseSku(key); if (lk && !byLoose.has(lk)) byLoose.set(lk, key);
+      const nk = normalizeName(e.productName || ''); if (nk && !byName.has(nk)) byName.set(nk, key);
+    }
+    vendorIndex.set(vendor, { byLooseSku: toObj(byLoose), byName: toObj(byName) });
+  }
+  const l2g = new Map([...vendorCatalog.get(L2G)].map(([k, v]) => [k, v.unitCost]));
+
+  // 4. HP Dropship sheet (later rows win), then the env-var fallback
+  let hp = new Map(), weights = new Map();
+  if (has(src.HP_SHEET_URL)) {
+    for (const row of pyDictRows(src.HP_SHEET_URL)) {
+      const sku = upper(pyStripStr(pyGet(row, 'SKU', '')));
+      const cost = finiteOrThrow(buildMoney(pyGet(row, 'Cost', '')), 'HP sheet');
+      const w = finiteOrThrow(buildMoney(pyGet(row, 'WeightLb', '')), 'HP sheet');
+      if (sku && pos(cost)) hp.set(sku, cost);
+      if (sku && pos(w)) weights.set(sku, w);
+    }
+    report.sources.HP_SHEET_URL = { costSkus: hp.size, weightSkus: weights.size };
+  }
+  if (!hp.size) {
+    const j = k => (has(src[k]) ? JSON.parse(src[k]) : {});
+    hp = new Map([...Object.entries(j('PRODUCT_COSTS_JSON1')), ...Object.entries(j('PRODUCT_COSTS_JSON2'))]);
+    weights = new Map(Object.entries(j('SKU_WEIGHTS_JSON')));
+    report.sources.hpFallback = { costSkus: hp.size, weightSkus: weights.size };
+  }
+
+  // 5. Shopify product export (Drive's latest). Without one build.py writes no
+  //    sb_costs / hp_supplement / hp_by_name files, so the push omits them.
+  let exportTables = null;
+  if (src.productExport && has(src.productExport.text)) {
+    const rows = pyDictRows(src.productExport.text);
+    if (rows.length) {
+      const e = parseShopifyExportRows(rows);
+      exportTables = { sb_costs: toObj(e.sb), hp_supplement: toObj(e.hp), hp_by_name: toObj(e.hpByName) };
+      report.sources.productExport = { name: src.productExport.name || null, sb: e.sb.size, hp: e.hp.size, hpTitles: e.hpByName.size };
+    }
+  }
+
+  // 6. Merge, manual MCG (fills gaps), manual LR (overrides)
+  const product = new Map(hp);
+  for (const [k, v] of as) product.set(k, v);
+  for (const [k, v] of l2g) product.set(k, v);
+  for (const [sku, cost] of manualPrimaryCosts()) { if (!mcg.has(sku)) mcg.set(sku, cost); if (!mcg.has(upper(sku))) mcg.set(upper(sku), cost); }
+  // LR in mcg_total: build.py's fixed list, unless the operator
+  // switched to the tab (lr_cost_source = 'sheet'). The tab (the
+  // LG source) is always parsed and compared so the switch rests on evidence.
+  let lrTab = null;
+  if (has(src.LG_SHEET_URL)) {
+    lrTab = parseLrTab(pyCsvRows(src.LG_SHEET_URL));
+    report.lr = { mode: lrSource, columns: lrTab.columns, stats: lrTab.stats, errors: lrTab.errors,
+                          comparison: lrTab.costs ? compareLrTab(lrTab.costs) : null };
+  } else report.lr = { mode: lrSource, configured: false };
+  if (lrSource === 'sheet') {
+    if (!lrTab || !lrTab.costs || !lrTab.costs.size) throw new PyCompatError('lr_unavailable', 'The LR tab is the cost source but could not be read');
+    for (const [sku, cost] of lrTab.costs) { mcg.set(sku, cost); mcg.set(upper(sku), cost); }
+  } else {
+    for (const [sku, cost] of manualListCosts()) { mcg.set(sku, cost); mcg.set(upper(sku), cost); }
+  }
+
+  const tables = {
+    mcg_total: toObj(mcg), product_costs: toObj(product), sku_weights: toObj(weights), sku_alias: toObj(alias),
+    vendor_costs: Object.fromEntries([...vendorCatalog].map(([v, m]) => [v, toObj(m)])), vendor_index: toObj(vendorIndex),
+    ...(exportTables || {}),
+  };
+  // build.py 1b: the MCG pack sheet, its own table (only when the source is configured and readable).
+  if (has(src.MCG_PACK_SHEET_URL)) {
+    const pack = parseMcgPackRows(pyCsvRows(src.MCG_PACK_SHEET_URL));
+    report.sources.MCG_PACK_SHEET_URL = pack.stats;
+    if (pack.costs) tables.mcg_pack = toObj(pack.costs);
+    else report.warnings.push(`MCG pack sheet: ${pack.stats.error} — not imported`);
+  }
+  const mcgExtra = has(src.MCG_EXTRA_SHEET_URL) ? parseMcgExtraCsv(src.MCG_EXTRA_SHEET_URL) : {};
+  return { tables, mcgExtra, report };
+}
+
+/**
+ * build.py parse_mcg_pack_rows: csv rows → { costs: Map SKU → Total Cost/pack | null, stats }.
+ * Header: the first of the first ten rows with a "Total Cost/pack" cell; SKU column: the first
+ * "SKU" cell at or above it. Blank, non-numeric, $0 or negative → null (a missing cost, never zero).
+ * Two different costs for one SKU → null. The selling price is never read.
+ */
+export function parseMcgPackRows(rows) {
+  let headerIdx = null, costIdx = null, skuIdx = null;
+  const lows = row => row.map(c => lower(pyStrip(c)));
+  for (let i = 0; i < Math.min(10, rows.length); i++) {
+    const j = lows(rows[i]).indexOf('total cost/pack');
+    if (j >= 0) { headerIdx = i; costIdx = j; break; }
+  }
+  if (headerIdx === null) return { costs: null, stats: { error: 'no_total_cost_column' } };
+  for (let i = 0; i <= headerIdx; i++) {
+    const j = lows(rows[i]).indexOf('sku');
+    if (j >= 0) { skuIdx = j; break; }
+  }
+  if (skuIdx === null) return { costs: null, stats: { error: 'no_sku_column' } };
+  const costs = new Map(), conflicts = new Set();
+  for (const row of rows.slice(headerIdx + 1)) {
+    const sku = upper(pyStrip(skuIdx < row.length ? row[skuIdx] : ''));
+    if (!sku) continue;
+    let cost = costIdx < row.length ? buildMoney(row[costIdx]) : null;
+    cost = cost === null || !(cost > 0 && cost < Infinity) ? null : pyRound(cost, 4);
+    if (costs.has(sku) && costs.get(sku) !== cost) conflicts.add(sku);
+    costs.set(sku, cost);
+  }
+  for (const sku of conflicts) costs.set(sku, null);
+  const priced = [...costs.values()].filter(v => v !== null).length;
+  return { costs, stats: { skus: costs.size, priced, missing: costs.size - priced, conflicting: conflicts.size } };
+}

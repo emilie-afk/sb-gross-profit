@@ -1,0 +1,71 @@
+# SB GP Worker — Cloudflare configuration
+#
+# This file is public (the repository is public). It holds NO secrets.
+# Secrets are set with `wrangler secret put <NAME>` and live only in Cloudflare:
+#   INGEST_SECRET            collector ingestion routes     (>= 32 chars)
+#   ADMIN_SECRET             admin / compute routes         (>= 32 chars, different)
+#   SESSION_SIGNING_KEY      dashboard session HMAC key     (>= 32 chars, different)
+#   DASHBOARD_PASSWORD_HASH  output of tools/hash-password.mjs (never the password)
+#   VERIFY_SECRET            Free-tier verifier (gp-verify) routes (>= 32 chars, different;
+#                            optional: without it /v1/verify/* answers 503)
+#   DASHBOARD_READER_SECRET  the dashboard proxy's published reads (>= 32 chars, different; the same
+#                            value is Netlify's SB_WORKER_READER_SECRET; without it reads need a session).
+#                            Reads with it also need X-Gate-Session: a gate session not revoked at logout.
+#   GATE_SECRET              the site-password gate's sign-in attempts and revocations (>= 32 chars, different;
+#                            the same value is Netlify's SB_WORKER_GATE_SECRET; without it sign-in answers 503)
+# See DEPLOYMENT.md → "Weekly automation Worker" and "Free-tier weekly path".
+
+name = "sb-gp-worker"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sb-gp"
+# Set after `wrangler d1 create sb-gp`. A database id is an identifier, not a credential.
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[vars]
+# Exact origins allowed to call read routes with credentials. No wildcards.
+ALLOWED_ORIGINS = "https://sb-profit.netlify.app"
+# Strict when the dashboard reaches the Worker through the Netlify /api/v1 proxy
+# (same origin, recommended). Use None only for a direct cross-origin setup.
+COOKIE_SAMESITE = "Strict"
+# Second go-live lock. Leave "false" until the Revision 5 go-live gate passes.
+PUBLICATION_ALLOWED = "false"
+# Owner decisions 2026-10-05: reporting starts Jan 1, 2026 (the week of Dec 29 is a partial week of
+# Jan 1–4; earlier weeks are not reported), and weeks before Aug 3, 2026 are never published because
+# their product costs predate the MCG volume discount (Aug 1) and are not period-accurate yet.
+REPORTING_START_DATE = "2026-01-01"
+PUBLICATION_EARLIEST_WEEK = "2026-08-03"
+# Fifth control: scheduled computation. Leave "false" until the automation commit is approved.
+AUTOMATION_ENABLED = "false"
+D1_QUOTA_BYTES = "5000000000"
+# C8 isolation guard: this Worker only serves a D1 database bound to "production"
+# (POST /v1/admin/environment/bind once after the migrations).
+SB_ENVIRONMENT = "production"
+# Staging only: SESSION_TTL_SECONDS = "60" lets tools/proxy-smoke.mjs --expired-wait test
+# session expiry. Leave unset in production (12 hours).
+
+# ── Staging (deploy-preview acceptance only; docs/deploy-preview-acceptance.md) ──
+# `wrangler deploy --env staging`. Environments do not inherit bindings or vars,
+# so everything is repeated here and points at a SEPARATE D1 database. Secrets
+# are set per environment: `wrangler secret put INGEST_SECRET --env staging`, etc.
+[env.staging]
+name = "sb-gp-worker-staging"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "sb-gp-staging"
+database_id = "REPLACE_WITH_STAGING_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[env.staging.vars]
+ALLOWED_ORIGINS = "https://weekly-automation-phase1--sb-profit.netlify.app"
+COOKIE_SAMESITE = "Strict"
+PUBLICATION_ALLOWED = "false"
+AUTOMATION_ENABLED = "false"
+D1_QUOTA_BYTES = "5000000000"
+SESSION_TTL_SECONDS = "60"
+SB_ENVIRONMENT = "staging"
