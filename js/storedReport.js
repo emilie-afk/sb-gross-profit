@@ -247,7 +247,7 @@ export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder
     }
     subscriptionFields(g, byName.get(g[0].orderNum), basisOf);
   }
-  return out;
+  return markSeveralSubscriptions(out);
 }
 
 // ─── Subscription fields (Subscription P&L and the Subscriptions table) ──────────────────────────────────
@@ -262,7 +262,9 @@ export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder
 // order-level discounts (the CSV calculator never spreads those). Stored lines keep it exactly: contract revenue
 // + allocated order discount + allocated refund = price × qty − line discount (Route: collected + refund). Gift-card
 // and influencer-sample lines keep no line discount, so their price × qty is used. One known rounding limit: the
-// stored ship_collected is rounded per month, so a multi-month subscription sharing an order can differ by 1¢.
+// stored ship_collected is rounded per month, so a multi-month subscription sharing an order with regular items
+// can differ by 1¢. Orders with several subscriptions are not split at all (below).
+// Orders with several subscription lines: shipping is not split (markSeveralSubscriptions, both paths).
 const SUB_SHIP_NORMAL = 6.99, SUB_SHIP_POT = 7.99;                    // calculator.js: rates effective until Jul 2026
 export const isSubSku = sku => /^(SUB|GSUB)/i.test(sku || '');
 export function subMonthsOf(sku) {
@@ -270,6 +272,24 @@ export function subMonthsOf(sku) {
   if (!isSubSku(s)) return 1;
   const nums = s.split('-').map(p => parseInt(p, 10)).filter(n => !isNaN(n) && n >= 1 && n <= 24);
   return nums.length ? nums[nums.length - 1] : 1;
+}
+/**
+ * Orders with more than one subscription line: their shipping split is unavailable, on CSV and automatic reports
+ * alike. Shopify's export fills Shipping on an order's first row only, so the CSV calculator gives every later
+ * subscription $0 of the order's shipping, and the label cost is the whole order's on each line; the stored rows
+ * keep the order's shipping only per month of the first line. Neither gives each subscription's own share, so
+ * shipping collected, label cost and loss per month are null (left out of the averages) and the lines are marked
+ * subShipUnavailable. Months and the expected fee are the SKU's own and stay. Mutates and returns `lines`.
+ */
+export function markSeveralSubscriptions(lines) {
+  const subs = new Map();
+  for (const li of lines) if (isSubSku(li.sku)) subs.set(li.orderNum, (subs.get(li.orderNum) || 0) + 1);
+  for (const li of lines) {
+    if (!isSubSku(li.sku)) continue;
+    li.subShipUnavailable = subs.get(li.orderNum) > 1;
+    if (li.subShipUnavailable) Object.assign(li, { subShipMo: null, subSSCostMo: null, subShipLoss: null });
+  }
+  return lines;
 }
 function subscriptionFields(g, o, basisOf) {
   for (const li of g) Object.assign(li, { subShipMo: null, expSubShipMo: null, subSSCostMo: null, subShipLoss: null });
