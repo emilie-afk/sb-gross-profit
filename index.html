@@ -9,6 +9,43 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="./css/app.css">
+<!-- Every module the page script imports, fetched in parallel at once instead of three import levels one after the
+     other (each level is another round trip on a slow connection). tests/welcome-loading.test.mjs keeps this list equal
+     to the import graph. -->
+<link rel="modulepreload" href="./js/calculator.js">
+<link rel="modulepreload" href="./js/shippingCostReport.js">
+<link rel="modulepreload" href="./js/shippingPolicy.js">
+<link rel="modulepreload" href="./shared/adapters/shopifyCsv.js">
+<link rel="modulepreload" href="./js/unmatchedShipping.js">
+<link rel="modulepreload" href="./shared/catalog.js">
+<link rel="modulepreload" href="./js/scenarioUI.js">
+<link rel="modulepreload" href="./js/workerClient.js">
+<link rel="modulepreload" href="./js/apsModel.js">
+<link rel="modulepreload" href="./shared/apsMapping.js">
+<link rel="modulepreload" href="./js/weeklyReports.js">
+<link rel="modulepreload" href="./js/storedReport.js">
+<link rel="modulepreload" href="./js/shippingBreakdown.js">
+<link rel="modulepreload" href="./js/refunds.js">
+<link rel="modulepreload" href="./js/scenarioModels.js">
+<link rel="modulepreload" href="./js/shippingScenarios.js">
+<link rel="modulepreload" href="./js/automationStatus.js">
+<link rel="modulepreload" href="./js/shell.js">
+<link rel="modulepreload" href="./js/privateRules.js">
+<link rel="modulepreload" href="./shared/calculator.js">
+<link rel="modulepreload" href="./shared/adapters/shippingCostReport.js">
+<link rel="modulepreload" href="./shared/shippingPolicy.js">
+<link rel="modulepreload" href="./shared/normalized.js">
+<link rel="modulepreload" href="./shared/adapters/shopifyPrivacy.js">
+<link rel="modulepreload" href="./shared/unmatchedShipping.js">
+<link rel="modulepreload" href="./shared/privateRules.js">
+<link rel="modulepreload" href="./shared/vendors.js">
+<link rel="modulepreload" href="./js/scenario.js">
+<link rel="modulepreload" href="./js/vendorCosts.js">
+<link rel="modulepreload" href="./shared/adapters/shipstation.js">
+<link rel="modulepreload" href="./shared/metrics.js">
+<link rel="modulepreload" href="./shared/vendorCosts.js">
+<link rel="modulepreload" href="./shared/shippingDiagnostic.js">
+<link rel="modulepreload" href="./shared/scenario.js">
 <style>
 /* ── Legacy token bridge ───────────────────────────────────────────────────
    The original palette was a fixed dark theme. Re-pointing those variables at
@@ -84,6 +121,8 @@ button{cursor:pointer;font-family:inherit}
 .wl-btn:hover{border-color:var(--wl-em2)}
 .wl-link{margin-top:10px;background:none;border:0;padding:4px;color:var(--wl-muted);font:inherit;font-size:.95rem;text-decoration:underline;text-underline-offset:3px;cursor:pointer}
 .wl-link:hover,.wl-link:focus-visible{color:var(--wl-text)}
+.wl-btn[aria-busy="true"],.wl-link[aria-busy="true"]{cursor:progress;opacity:.8}
+.wl-loading{margin:0;color:var(--wl-text);font-size:.95rem;text-align:center;grid-column:1/-1}
 .wl-btn.primary{background:var(--wl-em);border-color:var(--wl-em);color:#fff}
 .wl-btn.primary:hover{background:var(--wl-em2);color:var(--wl-em-ink)}
 .wl-btn:focus-visible,.wl-account:focus-visible,.wl-back:focus-visible{outline:3px solid var(--wl-em2);outline-offset:3px}
@@ -335,11 +374,50 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
           <p>Upload CSV files for a separate report.</p>
           <button type="button" class="wl-btn" onclick="openUpload()">Upload files</button>
         </section>
+        <p id="wl-loading" class="wl-loading" role="status" aria-live="polite" hidden></p>
         <p class="wl-note">Saved reports update automatically. No upload needed.</p>
       </div>
     </main>
     <footer class="wl-foot">Saved reports update automatically.</footer>
   </div>
+
+  <script>
+  // Welcome buttons before the page code is ready. The welcome screen shows at once, but the page script (the module
+  // at the end, its imports and the business rules) can take several seconds on a slow connection; a click in that gap
+  // used to fail silently ("openSaved is not defined"). Until the script is ready a click is kept: the button reads
+  // "Loading…" and the choice opens as soon as the page script calls window.__gpReady().
+  (function () {
+    var pending = null, timer = null, clicked = null;
+    function note(text) { var el = document.getElementById('wl-loading'); if (el) { el.textContent = text; el.hidden = !text; } }
+    function busy(on) {
+      var b = document.querySelectorAll('#welcome-screen .wl-btn, #welcome-screen .wl-link');
+      for (var i = 0; i < b.length; i++) { if (on) b[i].setAttribute('aria-busy', 'true'); else b[i].removeAttribute('aria-busy'); }
+    }
+    function later(name) {
+      return function () {
+        pending = { name: name, args: Array.prototype.slice.call(arguments) };
+        var e = window.event, b = e && e.currentTarget && e.currentTarget.tagName === 'BUTTON' ? e.currentTarget : null;
+        if (clicked && clicked !== b) { clicked.textContent = clicked.getAttribute('data-label'); clicked = null; }
+        if (b && !clicked) { b.setAttribute('data-label', b.textContent); b.textContent = 'Loading\u2026'; clicked = b; }
+        busy(true);
+        note('Loading the dashboard\u2026');
+        clearTimeout(timer);
+        timer = setTimeout(function () {
+          note('Still loading: the connection is slow. Your choice opens as soon as the page is ready. If nothing happens, reload the page.');
+        }, 15000);
+      };
+    }
+    window.openSaved = later('openSaved');
+    window.openUpload = later('openUpload');
+    window.logout = function () { window.location.href = '/__logout'; };
+    window.__gpReady = function () {
+      clearTimeout(timer); note(''); busy(false);
+      if (clicked) { clicked.textContent = clicked.getAttribute('data-label'); clicked.removeAttribute('data-label'); clicked = null; }
+      var p = pending; pending = null;
+      if (p && typeof window[p.name] === 'function') window[p.name].apply(null, p.args);
+    };
+  })();
+  </script>
 
   <div id="upload-screen" style="display:none">
     <div class="screen-bar"><button type="button" class="wl-back" onclick="showHome()">← Home</button></div>
@@ -5666,6 +5744,9 @@ function showLoading(msg) {
 function hideLoading() { document.getElementById('loading').classList.remove('active'); }
 function setLoadingMsg(m) { document.getElementById('loading-msg').textContent = m; }
 window.setLoadingMsg = setLoadingMsg;
+
+// Everything the welcome buttons call is defined: open a choice made while the page was still loading.
+window.__gpReady?.();
 </script>
 </body>
 </html>
