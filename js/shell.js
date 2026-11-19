@@ -283,6 +283,35 @@ export function renderShipping(s) {
   }
 }
 
+// ─── Shipping: where the net comes from, and by vendor (js/shippingBreakdown.js) ─────────────────────
+
+/** Renders the two breakdown tables; `b` is shippingBreakdown(lines) or null (cards hidden). */
+export function renderShippingBreakdown(b) {
+  const tone = n => n < 0 ? ' style="color:var(--gp-neg)"' : (n > 0 ? ' style="color:var(--gp-pos)"' : ' style="color:var(--gp-text3)"');
+  const num = (r, extra = '') => `<td class="num">${r.orders.toLocaleString()}</td><td class="num">${money(r.collected)}</td>
+      <td class="num">${money(r.paid)}</td>${extra}<td class="num"${tone(r.net)}>${money(r.net)}</td>`;
+  for (const id of ['ship-cause-card', 'ship-vendor-card']) { const el = $(id); if (el) el.hidden = !b; }
+  if (!b) return;
+  const t = b.total;
+  const cause = $('ship-cause-table');
+  if (cause) cause.innerHTML = `
+    <thead><tr><th>Where the shipping net comes from</th><th class="num">Orders</th><th class="num">Collected</th>
+      <th class="num">Paid</th><th class="num">Net</th></tr></thead>
+    <tbody>${b.causes.map(r => `<tr><td>${esc(r.label)}</td>${num(r)}</tr>`).join('')}</tbody>
+    <tfoot><tr><td>Total</td>${num(t)}</tr></tfoot>`;
+  const loss = b.causes.filter(r => r.net < 0).reduce((s, r) => s + r.net, 0);
+  const cm = $('ship-cause-meta');
+  if (cm) cm.textContent = `Every order's shipping sorted by cause · losses ${money(loss)} · total net ${money(t.net)}`;
+  const vend = $('ship-vendor-table');
+  if (vend) vend.innerHTML = `
+    <thead><tr><th>Vendor (who ships)</th><th class="num">Orders</th><th class="num">Collected</th>
+      <th class="num">Paid</th><th class="num">Avg paid / order</th><th class="num">Net</th></tr></thead>
+    <tbody>${b.vendors.map(r => `<tr${r.measured ? '' : ' style="color:var(--gp-text3)"'}><td>${esc(r.label)}</td>${num(r, `<td class="num">${r.measured ? money(r.avgPaid) : '—'}</td>`)}</tr>`).join('')}</tbody>
+    <tfoot><tr><td>Total</td>${num(t, '<td class="num"></td>')}</tr></tfoot>`;
+  const vm = $('ship-vendor-meta');
+  if (vm) vm.textContent = 'Label cost by the vendor whose items were shipped; orders with several shipping vendors are shown as mixed, not split; pass-through shipping is not measured';
+}
+
 // ─── Reports screen ───────────────────────────────────────────────────────────
 
 const TILES = [

@@ -586,6 +586,18 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
               <span class="meta" id="ship-profile-meta"></span></div>
             <div class="gp-table-wrap"><table class="gp-table" style="min-width:720px" id="ship-profile-table"></table></div>
           </div>
+          <div class="gp-card" id="ship-cause-card" hidden>
+            <div class="gp-card-head"><h3>Where the shipping net comes from</h3>
+              <span class="meta" id="ship-cause-meta"></span>
+              <button type="button" class="gp-btn gp-btn-ghost" onclick="downloadShipBreakdown('causes')">Export CSV</button></div>
+            <div class="gp-table-wrap"><table class="gp-table" style="min-width:720px" id="ship-cause-table"></table></div>
+          </div>
+          <div class="gp-card" id="ship-vendor-card" hidden>
+            <div class="gp-card-head"><h3>Shipping by vendor</h3>
+              <span class="meta" id="ship-vendor-meta"></span>
+              <button type="button" class="gp-btn gp-btn-ghost" onclick="downloadShipBreakdown('vendors')">Export CSV</button></div>
+            <div class="gp-table-wrap"><table class="gp-table" style="min-width:820px" id="ship-vendor-table"></table></div>
+          </div>
           <div class="gp-card" id="carrier-split"></div>
           <div class="gp-card" id="ship-cost-bridge" hidden></div>
           <div class="gp-card" id="unmatched-shipping" hidden></div>
@@ -1495,11 +1507,13 @@ import { orderFacts, thresholdImpact, itemCountImpact, plantCostReduction, apply
 import { renderAutomationStatus, automationStatusError } from './js/automationStatus.js';
 import { SCREENS, initTheme, toggleTheme, initRouter, showScreen, currentScreen,
          buildAlerts, renderAlerts, renderStoreBars, renderChannelDonut,
-         renderShipping as renderShippingScreen, renderReports, markNegatives, disclosureHint } from './js/shell.js';
+         renderShipping as renderShippingScreen, renderShippingBreakdown, renderReports, markNegatives, disclosureHint } from './js/shell.js';
+import { shippingBreakdown, breakdownCsv } from './js/shippingBreakdown.js';
 import { loadPrivateRules, privateRulesError, applyScenarioDiscountDefaults, applyScenarioInputDefaults, renderVendorLegend } from './js/privateRules.js';
 
 // Private business rules (supplier costs, tiers, rate cards, SKU mappings) load before anything calculates.
 await loadPrivateRules();
+let _lastShipBreakdown = null;   // the Shipping screen's breakdown tables (js/shippingBreakdown.js), for their CSV export
 applyScenarioDiscountDefaults();
 applyScenarioInputDefaults();
 renderVendorLegend();
@@ -2696,6 +2710,9 @@ function renderDashboard(lines) {
   renderStoreBars(s.byStore);
   renderChannelDonut(s.byChannel);
   renderShippingScreen(s);
+  // Where the shipping net comes from, and by vendor: the same lines sorted, never a new amount.
+  try { _lastShipBreakdown = shippingBreakdown(lines); } catch { _lastShipBreakdown = null; }
+  renderShippingBreakdown(_lastShipBreakdown);
   renderReports(lines, s, openReport);
   if (st) { const b = document.querySelector('[data-report="subpl"]'); if (b) { b.disabled = true; b.textContent = 'CSV upload only'; b.title = 'Available for CSV uploads only.'; } }
   renderChannelBreakdown(s, Object.values(s.byChannel).reduce((a, v) => a + v.revenue, 0));
@@ -3115,6 +3132,17 @@ window.downloadOrderViewCSV = () => {
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
   a.download = `orders_${suffix ? suffix + '_' : ''}${from}_to_${to}.csv`;
+  a.click();
+};
+
+window.downloadShipBreakdown = kind => {
+  const b = _lastShipBreakdown;
+  if (!b) return;
+  const rows = kind === 'vendors' ? b.vendors : b.causes;
+  const total = { label: 'Total', ...b.total, avgPaid: 0, measured: true };
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(breakdownCsv([...rows, total], kind)));
+  a.download = kind === 'vendors' ? 'shipping_by_vendor.csv' : 'shipping_net_by_cause.csv';
   a.click();
 };
 
