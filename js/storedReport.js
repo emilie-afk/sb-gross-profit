@@ -181,7 +181,7 @@ export function periodPlan(kind, key, weekList, { earliest = PUBLICATION_EARLIES
  */
 export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder = 0 } = {}) {
   const byName = new Map(orders.map(o => [o.order_name, o]));
-  const seen = new Set(), out = [];
+  const seen = new Set(), out = [], shareBasis = new Map();
   const sorted = [...lines].sort((a, b) => (a.order_name < b.order_name ? -1 : a.order_name > b.order_name ? 1 : a.line_index - b.line_index));
   for (const l of sorted) {
     const o = byName.get(l.order_name);
@@ -196,6 +196,11 @@ export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder
     const shipPaid = first ? o.ship_paid : null;
     const shipPaidSS = first ? (o.ship_paid_ss ?? null) : null, shipPaidHP = first ? (o.ship_paid_hp ?? null) : null;
     const lr = first && o.ship_paid !== null && o.ship_paid !== undefined ? d$(c(o.ship_paid) - c(o.ship_paid_ss) - c(o.ship_paid_hp)) : null;
+    // The calculator's revenue-share basis for subscription shipping: the line price less its line discount, before
+    // any refund and before order discounts are allocated (cents; see subscriptionFields).
+    shareBasis.set(out.length, Math.max(0, flags.isRoute ? c(l.route_collected) + c(l.refund_allocated)
+      : flags.isGiftCard || flags.isInfluencerSample ? c((l.unit_price ?? 0) * (l.qty ?? 0))
+      : c(l.contract_revenue) + c(l.discount_allocated) + c(l.refund_allocated)));
     out.push({
       orderNum: l.order_name, date: o.business_date, source: flags.isSubRenewal ? (o.channel || null) : (l.channel || o.channel || null),
       // Weeks saved before the vendor codes carry full names: read them as codes so old and new weeks group together.
@@ -231,7 +236,7 @@ export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder
     if (c(refundsNotPerOrder) > 0 && !(lineRefund.get(li.orderNum) > 0) && !(productBefore.get(li.orderNum) > 0)) li.refundUnknown = true;
   }
   // Net GP: the order's shipping difference spread over its lines by revenue (the calculator's post-pass).
-  const groups = new Map();
+  const groups = new Map(), basisOf = new Map(out.map((li, i) => [li, shareBasis.get(i)]));
   for (const li of out) (groups.get(li.orderNum) || groups.set(li.orderNum, []).get(li.orderNum)).push(li);
   for (const g of groups.values()) {
     const delta = g[0].shipDelta ?? 0, tot = g.reduce((s, li) => s + (li.lineRevenue || 0), 0);
@@ -240,7 +245,7 @@ export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder
       li.lineNetGp = li.lineGp !== null ? Math.round((li.lineGp + Math.round(delta * share * 100) / 100) * 100) / 100 : null;
       li.lineNetGpPct = li.lineNetGp !== null && li.lineRevenue ? Math.round(li.lineNetGp / li.lineRevenue * 1000) / 10 : null;
     }
-    subscriptionFields(g, byName.get(g[0].orderNum));
+    subscriptionFields(g, byName.get(g[0].orderNum), basisOf);
   }
   return out;
 }
@@ -253,8 +258,11 @@ export function storedLines(orders, lines, skuVendors = {}, { refundsNotPerOrder
 //                 order's shipping ÷ the first line's months (the calculator's rule), so it is multiplied back.
 //   subSSCostMo   the order's ShipStation label cost (each box ships on its own label; null when not in yet)
 //   expSubShipMo  the expected monthly shipping fee; subShipLoss = label cost − shipping collected per month
-// Revenue share uses each line's revenue before refunds (the calculator's line price less line discount;
-// order discounts are spread in proportion, so the share is the same).
+// Revenue share: the calculator's basis, each line's price less its own line discount, before refunds and before
+// order-level discounts (the CSV calculator never spreads those). Stored lines keep it exactly: contract revenue
+// + allocated order discount + allocated refund = price × qty − line discount (Route: collected + refund). Gift-card
+// and influencer-sample lines keep no line discount, so their price × qty is used. One known rounding limit: the
+// stored ship_collected is rounded per month, so a multi-month subscription sharing an order can differ by 1¢.
 const SUB_SHIP_NORMAL = 6.99, SUB_SHIP_POT = 7.99;                    // calculator.js: rates effective until Jul 2026
 export const isSubSku = sku => /^(SUB|GSUB)/i.test(sku || '');
 export function subMonthsOf(sku) {
@@ -263,11 +271,11 @@ export function subMonthsOf(sku) {
   const nums = s.split('-').map(p => parseInt(p, 10)).filter(n => !isNaN(n) && n >= 1 && n <= 24);
   return nums.length ? nums[nums.length - 1] : 1;
 }
-function subscriptionFields(g, o) {
+function subscriptionFields(g, o, basisOf) {
   for (const li of g) Object.assign(li, { subShipMo: null, expSubShipMo: null, subSSCostMo: null, subShipLoss: null });
   if (!o || !g.some(li => isSubSku(li.sku))) return;
   const rawShip = c(o.ship_collected) * subMonthsOf(g[0].sku);                    // cents, the whole order's shipping
-  const basis = li => Math.max(0, c(li.lineRevenue) + c(li.refundAllocated));
+  const basis = li => basisOf.get(li) ?? 0;
   const tot = g.reduce((s, li) => s + basis(li), 0);
   const ss = o.ship_paid_ss !== null && o.ship_paid_ss !== undefined && Number(o.ship_paid_ss) > 0 ? Number(o.ship_paid_ss) : null;
   for (const li of g) {

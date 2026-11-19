@@ -22,8 +22,18 @@ const ORDERS = [
   csvOrder({ name: '#803', subtotal: 0, shipping: 0, total: 0, lines: [{ sku: 'GSUB3-1-6', price: 0, vendor: 'Succulents Box' }] }),
   // no label cost yet
   csvOrder({ name: '#804', subtotal: 25, shipping: 6.99, total: 31.99, lines: [{ sku: 'SUB1-1-1', price: 25, vendor: 'Succulents Box' }] }),
-].map((rows, i) => rows.map(r => ({ ...r, 'Created at': `2026-09-1${5 + i} 10:00:00 -0700` })));
-const LABELS = { '801': '7.40', '802': '8.10', '803': '6.25' };
+  // an order discount of nearly the whole merchandise: allocated to the lines on stored reports, never in the CSV
+  // calculator's revenue share (line price less line discount), so the shipping split stays $30 : $20
+  csvOrder({ name: '#805', subtotal: 0.01, shipping: 9, total: 9.01, discountAmount: 49.99, lines: [
+    { sku: 'SUB2-1-1', price: 30, vendor: 'Succulents Box' }, { sku: 'MG-ALOE', price: 20, vendor: 'Succulents Box' }] }),
+  // a line discount and a refund: the share uses the line price less its line discount, before the refund
+  csvOrder({ name: '#806', subtotal: 45, shipping: 10, total: 55, refunded: 20, lines: [
+    { sku: 'SUB3-1-1', price: 30, discount: 5, vendor: 'Succulents Box' }, { sku: 'MG-JADE', price: 20, vendor: 'Succulents Box' }] }),
+  // the known rounding limit: a 12-month subscription first in a shared order ($10 shipping is stored as $0.83 a month)
+  csvOrder({ name: '#807', subtotal: 400, shipping: 10, total: 410, lines: [
+    { sku: 'SUB2-1-12', price: 300, vendor: 'Succulents Box' }, { sku: 'MG-JADE', price: 100, vendor: 'Succulents Box' }] }),
+].map((rows, i) => rows.map(r => ({ ...r, 'Created at': `2026-09-${String(15 + i).padStart(2, '0')} 10:00:00 -0700` })));
+const LABELS = { '801': '7.40', '802': '8.10', '803': '6.25', '805': '8.40', '806': '7.10' };
 const FIELDS = ['subMonths', 'subShipMo', 'expSubShipMo', 'subSSCostMo', 'subShipLoss'];
 
 test('subscription SKU months: the last number of 1–24; 1 for other SKUs', () => {
@@ -33,14 +43,14 @@ test('subscription SKU months: the last number of 1–24; 1 for other SKUs', () 
 test('stored lines carry the same subscription fields as the CSV calculator', () => {
   const rows = ORDERS.flat();
   const csvLines = calculate(rows, new Map(Object.entries(LABELS).map(([k, v]) => [k, Number(v)])),
-    {}, {}, {}, { 'MG-ALOE': 4.5 }, {}, {}, null, {}, null, null, {});
+    {}, {}, {}, { 'MG-ALOE': 4.5, 'MG-JADE': 6 }, {}, {}, null, {}, null, null, {});
   const ship = normalizeShipStationRows(Object.entries(LABELS).flatMap(([order, fee], i) =>
     ssCustom({ shipment: `S${i}`, order, fee, items: [{ sku: 'X', qty: 1 }] }))).shipments;
   const snap = buildSnapshot({ weekStart: '2026-09-14', orders: csvRowsToNormalizedOrders(rows), shipments: ship, catalog: FIXTURE_CATALOG });
   const stored = storedLines(snap.orders.map(orderRow), snap.lines.map(lineRow));
   const subs = csvLines.filter(l => /^(SUB|GSUB)/i.test(l.sku));
-  assert.equal(subs.length, 4);
-  for (const c of subs) {
+  assert.equal(subs.length, 7);
+  for (const c of subs.filter(x => x.orderNum !== '#807')) {
     const s = stored.find(x => x.orderNum === c.orderNum && x.sku === c.sku);
     assert.ok(s, c.orderNum);
     assert.deepEqual(FIELDS.map(k => s[k]), FIELDS.map(k => c[k]), `${c.orderNum} ${c.sku}`);
@@ -49,5 +59,10 @@ test('stored lines carry the same subscription fields as the CSV calculator', ()
   assert.equal(by('#801').subShipMo, 6.99, '83.88 over 12 months');
   assert.equal(by('#802').subShipMo, 5.4, '60% of $9');
   assert.equal(by('#804').subSSCostMo, null, 'no label cost yet');
+  assert.equal(by('#805').subShipMo, 5.4, '$30 of $50 before the order discount: 60% of $9');
+  assert.ok(by('#805').lineRevenue < 30, 'the stored line carries the allocated order discount');
+  assert.equal(by('#806').subShipMo, 5.56, '$25 of $45 (after the line discount, before the refund) of $10');
   assert.equal(stored.find(x => x.sku === 'MG-ALOE').subShipMo, null, 'not a subscription line');
+  const c807 = subs.find(x => x.orderNum === '#807'), s807 = by('#807');
+  assert.ok(Math.abs(Math.round(s807.subShipMo * 100) - Math.round(c807.subShipMo * 100)) <= 1, `within 1¢: ${s807.subShipMo} vs ${c807.subShipMo}`);
 });
