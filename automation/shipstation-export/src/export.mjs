@@ -142,8 +142,11 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
 
   // An earlier run's automated window could not sign in: do not open it again
   // until a person has signed in through the normal window (npm run login).
-  const block = retrySignIn ? null : readSignInBlock(paths.base);
+  let block = retrySignIn ? null : readSignInBlock(paths.base);
   if (retrySignIn) clearSignInBlock(paths.base);
+  // A block left by an unrecognised page (no sign-in form, 2FA or challenge seen) is not evidence of a sign-out:
+  // drop it so the run tries again (2026-11-19: such a block was reported as "signed out" while the session was fine).
+  if (block && block.reason === 'unknown_page') { clearSignInBlock(paths.base); block = null; }
   if (block) {
     return finish('signin_blocked', EXIT.LOGIN_FAILED, { note: 'ShipStation sign-in needed since ' + block.since.slice(0, 10) +
       '; the automated window was not opened. Sign in with: npm run login (automation/shipstation-export)' });
@@ -159,6 +162,12 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
     await page.goto(config.appUrl, { waitUntil: 'domcontentloaded' });
     let { state, evidence } = await settleAuthState(page, config.auth);
     manifest.authStateAtStart = state;
+    if (state === 'unknown') {
+      // ShipStation can sit on its root page while the app still loads or redirects: load it once more and re-check.
+      await page.goto(config.appUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      ({ state, evidence } = await settleAuthState(page, config.auth));
+      manifest.authStateAfterReload = state;
+    }
 
     if (state === 'login_required' || state === 'session_expired') {
       // One automatic attempt. If the form cannot be completed (a changed
@@ -184,7 +193,9 @@ export async function runShipStationJob({ config, week, kind = DEFAULT_KIND, hea
       // Where the window was, for the next diagnosis: host, path and title only (no query string, no page text).
       let where = null;
       try { const u = new URL(page.url()); where = { host: u.host, path: u.pathname.slice(0, 80), title: (await page.title()).slice(0, 80) }; } catch { /* page gone */ }
-      return blocked('unknown_page', EXIT.UNKNOWN_PAGE, { evidence, page: where });
+      // No sign-in form, 2FA or challenge was seen, so this is not a sign-out: it does not set the sign-in block
+      // (which is what the "signed out" alert reads). The next run tries again.
+      return finish('unknown_page', EXIT.UNKNOWN_PAGE, { evidence, page: where });
     }
     clearSignInBlock(paths.base);
 

@@ -64,7 +64,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const a = process.argv.slice(2);
   const since = a.includes('--since') ? a[a.indexOf('--since') + 1] : null;
   const root = process.env.LOCALAPPDATA || path.join(os.homedir(), '.local', 'share');
-  const rows = readManifests([path.join(root, 'sb-shipstation-export', 'runs'), path.join(root, 'sb-shopify-export', 'runs')], { since });
+  // Each exporter's working folder: "localDir" in its config.local.json (outside %LOCALAPPDATA% on the laptop), else the default.
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const dirOf = (name, folder) => { try { return JSON.parse(fs.readFileSync(path.join(here, '..', '..', name, 'config.local.json'), 'utf8')).localDir || path.join(root, folder); } catch { return path.join(root, folder); } };
+  const rows = readManifests([path.join(dirOf('shipstation-export', 'sb-shipstation-export'), 'runs'), path.join(dirOf('shopify-export', 'sb-shopify-export'), 'runs')], { since });
   if (a.includes('--json')) console.log(JSON.stringify(rows, null, 2));
   else for (const r of rows) console.log(Object.entries(r).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('|') : v}`).join('  '));
 }

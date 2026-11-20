@@ -246,8 +246,22 @@ test('mid-week refresh: due from Wednesday (report time zone) while the closed w
   assert.equal(midweekReportDue({ week, entry: {}, now: THU_0720_ICT, published: true }), null, 'a published week needs no refresh');
   assert.equal(midweekReportDue({ week, entry: LOW, now: THU_0720_ICT, published: true }), null);
   assert.equal(midweekReportDue({ week, entry: { shipStationCoverage: { required: 0, valid: 0 } }, now: THU_0720_ICT }), null);
-  assert.equal(midweekReportDue({ week, entry: { ...LOW, midweekReport: { to: '2026-09-22', status: 'ok' } }, now: THU_0720_ICT }), null, 'once per closed week');
+  assert.equal(midweekReportDue({ week, entry: { ...LOW, midweekReport: { to: '2026-09-22', status: 'ok' } }, now: THU_0720_ICT }), null, 'once per ship date');
   assert.equal(midweekReportDue({ week, entry: LOW, now: THU_0720_ICT, threshold: 0.6 }), null, 'threshold from config');
+});
+
+test('mid-week refresh: repeated on later days while the recorded coverage stays below the gate, through the Saturday after the week', () => {
+  const day = d => Date.parse(`2026-09-${d}T00:20:00Z`);                     // 07:20 ICT = the previous evening in Los Angeles
+  const done = to => ({ ...LOW, midweekReport: { to, status: 'ok' } });
+  assert.equal(midweekReportDue({ week, entry: done('2026-09-22'), now: day(25) }), '2026-09-23', 'next day: a refresh through the new yesterday');
+  assert.equal(midweekReportDue({ week, entry: done('2026-09-23'), now: day(25) }), null, 'not twice for the same day');
+  assert.equal(midweekReportDue({ week, entry: done('2026-09-25'), now: day(28) }), '2026-09-26', 'through Saturday after the week');
+  assert.equal(midweekReportDue({ week, entry: done('2026-09-26'), now: day(29) }), null, 'from Sunday on, the next Monday report covers it');
+  assert.equal(midweekReportDue({ week, entry: { midweekReport: { to: '2026-09-22', status: 'ok' } }, now: day(25) }), null, 'coverage unknown after a refresh: not repeated');
+  assert.equal(midweekReportDue({ week, entry: { shipStationCoverage: { required: 200, valid: 195 }, midweekReport: { to: '2026-09-22', status: 'ok' } }, now: day(25) }), null, 'passed the gate');
+  assert.equal(midweekReportDue({ week, entry: done('2026-09-22'), now: day(25), published: true }), null);
+  assert.equal(midweekReportDue({ week, entry: { ...LOW, midweekReport: { to: '2026-09-22', status: 'awaiting' } }, now: day(25) }), null, 'waiting for review');
+  assert.equal(midweekReportDue({ week, entry: { ...LOW, midweekReport: { to: '2026-09-22', status: 'rejected' } }, now: day(25) }), '2026-09-23', 'rejected: due again');
 });
 
 test('mid-week refresh: its last ship date is never the export date, so the Worker does not refuse it as incomplete', () => {
@@ -513,4 +527,16 @@ test('recovery start: the state update holds the collector lock, so a concurrent
   assert.equal(decC.exitCode, null);
   assert.equal(c.state().midweekReport.status, 'rejected');
   assert.equal(TEST_LOCK.isHeld(c.d.lockFile), false, 'released after the update');
+});
+
+test('ShipStation needs a person to sign in: the run tells the Worker (source shipstation, auth state only); other outcomes do not', async () => {
+  for (const [ssStatus, expected] of [['login_failed', 'login_required'], ['signin_blocked', 'login_required'], ['needs_2fa', 'two_factor_required'],
+                                       ['needs_human_captcha', 'captcha'], ['unknown_page', null], ['export_failed', null]]) {
+    const { d } = rig({ ssStatus });
+    const events = [];
+    d.signInEvent = async (status, detail) => { events.push([status, detail?.source ?? 'shopify', detail?.authState ?? null]); };
+    const r = await runWeeklyCollection(d);
+    assert.equal(r.exitCode, EXIT.PARTIAL, ssStatus);
+    assert.deepEqual(events, expected ? [['needs_person', 'shipstation', expected]] : [], ssStatus);
+  }
 });

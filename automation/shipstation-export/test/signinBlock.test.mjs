@@ -29,7 +29,10 @@ test('export: the block is checked before any browser opens; failed sign-ins set
   const src = fs.readFileSync(path.join(HERE, '..', 'src', 'export.mjs'), 'utf8');
   const check = src.indexOf('readSignInBlock(paths.base)'), launch = src.indexOf('chromium.launchPersistentContext');
   assert.ok(check > 0 && launch > check);
-  for (const s of ["blocked('login_failed'", "blocked('needs_2fa'", "blocked('needs_human_captcha'", "blocked('unknown_page'"]) assert.ok(src.includes(s), s);
+  for (const s of ["blocked('login_failed'", "blocked('needs_2fa'", "blocked('needs_human_captcha'"]) assert.ok(src.includes(s), s);
+  // An unrecognised page is not a sign-out: it never sets the block, and an old unknown_page block is dropped.
+  assert.ok(!src.includes("blocked('unknown_page'"), 'unknown_page must not set the sign-in block');
+  assert.match(src, /block\.reason === 'unknown_page'\) \{ clearSignInBlock\(paths\.base\); block = null; \}/);
   const login = fs.readFileSync(path.join(HERE, '..', 'src', 'login.mjs'), 'utf8');
   assert.match(login, /clearSignInBlock\(paths\.base\)/);
   assert.match(login, /spawn\(exe, \[`--user-data-dir=/, 'the default sign-in is a normal (non-automated) window');
@@ -38,6 +41,7 @@ test('export: the block is checked before any browser opens; failed sign-ins set
 test('export: only the Shipping Cost Report job sets the block; an unknown page records where it was', () => {
   const src = fs.readFileSync(path.join(HERE, '..', 'src', 'export.mjs'), 'utf8');
   assert.match(src, /const blocked = \(status, code, extra = \{\}\) => \{ if \(!aps\) writeSignInBlock\(paths\.base, status\)/);
-  assert.match(src, /blocked\('unknown_page', EXIT\.UNKNOWN_PAGE, \{ evidence, page: where \}\)/);
+  assert.match(src, /finish\('unknown_page', EXIT\.UNKNOWN_PAGE, \{ evidence, page: where \}\)/);
+  assert.match(src, /if \(state === 'unknown'\) \{[\s\S]{0,300}settleAuthState/, 'an unknown page is loaded once more before giving up');
   assert.ok(!/page\.url\(\)[^;]*search/.test(src), 'no query string recorded');
 });

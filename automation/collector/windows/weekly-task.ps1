@@ -28,24 +28,39 @@
       42  deferred: the day's D1 budget is used up (background work stops at 60% of the Free plan's daily
           allowance). Stop now, no retries (they would only add load), no done marker: the daily
           07:20 ICT trigger after the 00:00 UTC reset resumes it.
+  * A recovery start that ends partial (40: e.g. a mid-week report refresh whose ShipStation window landed on a
+    page it did not recognise) is tried again after -RetryMinutes, at most -RecoveryRetries times (default 2);
+    every other recovery outcome ends the start. Each retry starts with the same cheap Worker check.
   * Logs (codes and counts only) go to <BaseDir>\logs; logs older than 90 days are removed.
-  Parameters: -RepoDir, -Retries, -RetryMinutes, -SignInRetryMinutes, -TaskLimitMinutes, -SafetyMinutes,
-  -AttemptMinutes, -MinAttemptMinutes. -BaseDir, -NodePath and -Week exist for tests.
+  * <BaseDir> is the collector's working folder: -BaseDir, else "localDir" in automation\collector\config.local.json,
+    else %LOCALAPPDATA%\sb-collector. Keep it outside %LOCALAPPDATA%: the Claude desktop app runs its commands in an
+    app package that sees its own private copy of %LOCALAPPDATA%, so a check or sign-in started from a Claude
+    session would read or change a different copy than this task uses (2026-11-20).
+  Parameters: -RepoDir, -Retries, -RecoveryRetries, -RetryMinutes, -SignInRetryMinutes, -TaskLimitMinutes,
+  -SafetyMinutes, -AttemptMinutes, -MinAttemptMinutes, -BaseDir. -NodePath and -Week exist for tests.
 #>
 param(
   [string]$RepoDir = (Join-Path $env:USERPROFILE 'sb-gp'),
   [int]$Retries = 6,
+  [int]$RecoveryRetries = 2,
   [double]$RetryMinutes = 15,
   [double]$SignInRetryMinutes = 2,
   [double]$TaskLimitMinutes = 180,
   [double]$SafetyMinutes = 15,
   [double]$AttemptMinutes = 100,
   [double]$MinAttemptMinutes = 5,
-  [string]$BaseDir = (Join-Path ([string]$env:LOCALAPPDATA) 'sb-collector'),
+  [string]$BaseDir = '',
   [string]$NodePath = 'node',
   [string]$Week = ''
 )
 $ErrorActionPreference = 'Continue'
+if (-not $BaseDir) {
+  # The collector's own config names its working folder (localDir); run.mjs reads the same value.
+  foreach ($c in @((Join-Path $RepoDir 'automation\collector\config.local.json'), (Join-Path $RepoDir 'automation/collector/config.local.json'))) {
+    if (-not $BaseDir -and (Test-Path $c)) { try { $BaseDir = [string](Get-Content $c -Raw | ConvertFrom-Json).localDir } catch { $BaseDir = '' } }
+  }
+  if (-not $BaseDir) { $BaseDir = Join-Path ([string]$env:LOCALAPPDATA) 'sb-collector' }
+}
 $started = Get-Date
 $deadline = $started.AddMinutes($TaskLimitMinutes - $SafetyMinutes)
 $logs = Join-Path $BaseDir 'logs'
@@ -83,6 +98,7 @@ $collector = Join-Path $RepoDir 'automation\collector'
 if (-not (Test-Path $collector)) { $collector = Join-Path $RepoDir 'automation/collector' }
 $code = 1
 $attempt = 0
+$recoveryAttempt = 0
 while ($true) {
   $remaining = ($deadline - (Get-Date)).TotalMinutes
   if ($remaining -lt $MinAttemptMinutes) { Note "time is up for this start (exit $code); the next trigger continues"; break }
@@ -105,7 +121,15 @@ while ($true) {
     $code = $p.ExitCode
     Note "attempt exit $code"
   }
-  if ($recovery) { Note "recovery start: exit $code"; break }   # one attempt; the next trigger checks again
+  if ($recovery) {
+    Note "recovery start: exit $code"
+    # Partial (40) is tried again a few times in this start; anything else waits for the next trigger.
+    if ($code -ne 40 -or $recoveryAttempt -ge $RecoveryRetries) { break }
+    if (($deadline - (Get-Date)).TotalMinutes -lt ($RetryMinutes + $MinAttemptMinutes)) { Note 'no time left for another recovery attempt in this start'; break }
+    $recoveryAttempt++
+    Start-Sleep -Milliseconds ([int]($RetryMinutes * 60000))
+    continue
+  }
   if ($code -eq 0) { Set-Content -Path $done -Value ([DateTime]::UtcNow.ToString('o')); break }
   if ($code -eq 5) { break }          # another instance is running (lock): it owns this week's run
   if ($code -eq 43) { Note 'private rules file missing or invalid: set privateRulesFile in the collector config.local.json; not retried'; break }

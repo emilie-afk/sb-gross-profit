@@ -52,6 +52,20 @@ test('task wrapper: partial runs retry; only exit 0 writes the done marker', { s
   assert.deepEqual([again.code, again.attempts, again.done], [40, 3, false]);
 });
 
+test('task wrapper: without -BaseDir the working folder comes from the collector config (localDir)', { skip: SKIP }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wtask-cfg-'));
+  const repo = path.join(dir, 'repo'), base = path.join(dir, 'data', 'sb-collector');
+  fs.mkdirSync(path.join(repo, 'automation', 'collector'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'automation', 'collector', 'config.local.json'), JSON.stringify({ localDir: base }));
+  const fake = path.join(dir, 'fake-node');
+  fs.writeFileSync(fake, '#!/bin/bash\nexit 0\n'); fs.chmodSync(fake, 0o755);
+  const r = spawnSync(PWSH, ['-NoProfile', '-File', path.join(REPO, 'automation/collector/windows/weekly-task.ps1'), '-RepoDir', repo, '-NodePath', fake,
+    '-Week', '2026-10-05', '-MinAttemptMinutes', '0.01'], { encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0);
+  assert.ok(fs.existsSync(path.join(base, 'done-2026-10-05.txt')), 'done marker in the configured folder');
+  assert.ok(fs.existsSync(path.join(base, 'logs', 'task-2026-10-05.log')));
+});
+
 test('task wrapper: a quota deferral (42) stops at once without a done marker', { skip: SKIP }, () => {
   const r = rig([42, 0]).run([]);
   assert.deepEqual([r.code, r.attempts, r.done], [42, 1, false]);
@@ -79,12 +93,19 @@ test('task wrapper: a start ends before its own deadline (the task limit minus t
   assert.equal(r.done, false);
 });
 
-test('task wrapper: a week already done makes a recovery start: one cheap --recovery attempt, never a loop or a full collection', { skip: SKIP }, () => {
+test('task wrapper: a week already done makes a recovery start: cheap --recovery attempts, a partial one retried a bounded number of times, never a full collection', { skip: SKIP }, () => {
   const nothing = rig([0], { done: true }).run([]);
   assert.deepEqual([nothing.code, nothing.attempts, nothing.done], [0, 1, true]);
   assert.match(nothing.args[0], /--recovery/);
   const work = rig([40, 0], { done: true }).run([]);
-  assert.deepEqual([work.code, work.attempts, work.done], [40, 1, true], 'one attempt; the next trigger checks again');
+  assert.deepEqual([work.code, work.attempts, work.done], [0, 2, true], 'a partial recovery is tried again in the same start');
+  assert.ok(work.args.every(a => a.includes('--recovery')));
+  const stuck = rig([40, 40, 40, 40, 40], { done: true }).run([]);
+  assert.deepEqual([stuck.code, stuck.attempts], [40, 3], 'at most -RecoveryRetries (2) more attempts');
+  const none = rig([40, 0], { done: true }).run(['-RecoveryRetries', '0']);
+  assert.deepEqual([none.code, none.attempts], [40, 1]);
+  const deferred = rig([42, 0], { done: true }).run([]);
+  assert.deepEqual([deferred.code, deferred.attempts], [42, 1], 'a deferral is never retried in the start');
   const first = rig([0]).run([]);
   assert.ok(!first.args[0].includes('--recovery'), 'a week not yet done is a normal start');
 });

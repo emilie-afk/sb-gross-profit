@@ -624,9 +624,10 @@ export function freeTierPipeline({ workerUrl, ingestSecret, verifyUrl = null, tr
     }
     return unknown ? 'unknown' : waiting ? 'awaiting' : 'accepted';
   }
-  /** Shopify's sign-in needs a person (or was finished): shown on the closed week's status. Codes and numbers only. */
-  async function signInEvent(status, { authState, waitMinutes } = {}) {
-    await c.call('POST', `/v1/collect/weeks/${closedWeek}/signin`, { json: { status, ...(authState ? { authState } : {}), ...(Number.isInteger(waitMinutes) ? { waitMinutes } : {}) } });
+  /** A sign-in needs a person (or was finished): shown on the closed week's status. source: shopify (default) or shipstation. Codes and numbers only. */
+  async function signInEvent(status, { authState, waitMinutes, source } = {}) {
+    await c.call('POST', `/v1/collect/weeks/${closedWeek}/signin`, { json: { status, ...(source && source !== 'shopify' ? { source } : {}),
+      ...(authState ? { authState } : {}), ...(Number.isInteger(waitMinutes) ? { waitMinutes } : {}) } });
   }
   /** Which ship dates the APS mapping covers (the collector's backfill window). null when unreachable. */
   async function apsCoverage() {

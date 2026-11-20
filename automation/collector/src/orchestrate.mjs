@@ -33,6 +33,8 @@ import { acquireRunLock, releaseRunLock } from './runLock.mjs';
 export const EXIT = Object.freeze({ OK: 0, ALREADY_RUNNING: 5, NOT_DUE: 0, PARTIAL: 40, SIGNIN_REQUIRED: 41, DEFERRED: 42 });
 /** Shopify outcomes that only a person can resolve (two-step code, human check). */
 const SIGNIN_STATUSES = new Set(['needs_2fa', 'needs_human_captcha']);
+/** ShipStation job outcomes that need a person to sign in → the auth state reported to the Worker. */
+const SS_SIGNIN_AUTH = Object.freeze({ login_failed: 'login_required', signin_blocked: 'login_required', needs_2fa: 'two_factor_required', needs_human_captcha: 'captcha' });
 
 /** Local record of what this PC delivered per week (sources and statuses only). */
 export function loadState(file, fsImpl = fs) { try { return JSON.parse(fsImpl.readFileSync(file, 'utf8')); } catch { return {}; } }
@@ -44,12 +46,15 @@ const addDaysIso = (iso, n) => { const t = new Date(`${iso}T00:00:00Z`); t.setUT
 /**
  * Mid-week Shipping Cost Report refresh. The Monday report ends on the closed week's Sunday, so that week's
  * orders shipped on Monday or later have no ShipStation cost until the next Monday's report, and the week stays
- * held below the coverage gate for a week. While the closed week is NOT published, ONE extra report is collected
- * per closed week, once ship dates through the Tuesday after the week are complete in the report's time zone
- * (Wednesday there; the Thursday 07:20 ICT start), ending on yesterday — a complete day: the Worker refuses a
- * report whose last ship date is the export date (possible_incomplete_trailing_date). It is skipped only when
- * this PC knows the week's ShipStation coverage already passes the gate (recorded from a compute); an unknown
- * coverage (e.g. the week was computed before this PC recorded it) does not prevent the refresh.
+ * held below the coverage gate for a week. While the closed week is NOT published, an extra report is collected
+ * once ship dates through the Tuesday after the week are complete in the report's time zone (Wednesday there; the
+ * Thursday 07:20 ICT start), ending on yesterday — a complete day: the Worker refuses a report whose last ship date
+ * is the export date (possible_incomplete_trailing_date). It is skipped only when this PC knows the week's
+ * ShipStation coverage already passes the gate (recorded from a compute); an unknown coverage (e.g. the week was
+ * computed before this PC recorded it) does not prevent the first refresh.
+ * After an accepted refresh, another one is due on a later day (ending on the new yesterday) only while the week's
+ * coverage, recorded from the compute after that refresh, is KNOWN and still below the gate, and only through the
+ * Saturday after the week: the next Monday's report covers the following week's ship dates anyway.
  * @param {{ weekEnd: string }} o.week                  the closed week
  * @param {object} o.entry                               this PC's state for the week (shipStationCoverage, midweekReport)
  * @param {boolean} [o.published]                        the Worker says the week's newest draft is published
@@ -59,11 +64,17 @@ export function midweekReportDue({ week, entry, now, timeZone = 'America/Los_Ang
   if (published === true) return null;
   // 'ok': the added dates are accepted; 'awaiting': uploaded and held for review (never re-uploaded while it waits).
   // 'rejected' (refused by the Worker's checks) is due again.
-  if (['ok', 'awaiting'].includes(entry?.midweekReport?.status)) return null;
+  const last = entry?.midweekReport;
+  if (last?.status === 'awaiting') return null;
   const cov = entry?.shipStationCoverage;
-  if (cov && cov.required >= 0 && Number.isInteger(cov.valid) && (cov.required === 0 || cov.valid / cov.required + 1e-9 >= threshold)) return null;
+  const known = cov && cov.required >= 0 && Number.isInteger(cov.valid);
+  if (known && (cov.required === 0 || cov.valid / cov.required + 1e-9 >= threshold)) return null;
   const yesterday = addDaysIso(ymdIn(now, timeZone), -1);
   if (yesterday < addDaysIso(week.weekEnd, 2)) return null;
+  if (last?.status === 'ok') {
+    // A further refresh: a later last ship date, coverage known and still short, before the next Monday's report.
+    if (!known || !(typeof last.to === 'string' && last.to < yesterday) || yesterday > addDaysIso(week.weekEnd, 6)) return null;
+  }
   return yesterday;
 }
 
@@ -283,6 +294,7 @@ export async function runWeeklyCollection(d) {
                sources: { shipping_cost_report: 'ok', shopify: 'ok' }, compute });
     }
 
+    const signInEvent = async (status, detail) => { if (d.signInEvent) { try { await d.signInEvent(status, detail); } catch { /* status only */ } } };
     // 1. ShipStation (browser A), upload deferred
     let pending = null;
     if (needReport) {
@@ -290,6 +302,8 @@ export async function runWeeklyCollection(d) {
       const r = await guarded(() => d.shipstation.collect(refreshTo ? { reportTo: refreshTo } : {}));
       if (r.status === 'prepared' && r.pending) pending = r.pending;
       else sources.shipping_cost_report = r.status === 'ok' ? 'ok' : `${r.status} (exit ${r.exitCode})`;
+      // ShipStation needs a person to sign in: the dashboard says so until a report arrives (codes only).
+      if (SS_SIGNIN_AUTH[r.status]) await signInEvent('needs_person', { source: 'shipstation', authState: SS_SIGNIN_AUTH[r.status] });
     } else sources.shipping_cost_report = 'ok';
     // APS mapping right after the report, still before Shopify's browser (one browser at a time).
     await apsStep(pending?.prep?.sanitizedText || null, pending?.prep?.payload || null);
@@ -306,7 +320,6 @@ export async function runWeeklyCollection(d) {
     // 2–4. Shopify (browser B); the ShipStation upload happens during the email wait, or before a wait
     // for a person to finish Shopify's sign-in (so that progress is kept whatever happens next).
     let uploadedNow = !!pending, signInNeeded = false;
-    const signInEvent = async (status, detail) => { if (d.signInEvent) { try { await d.signInEvent(status, detail); } catch { /* status only */ } } };
     if (needShopify) {
       log('shopify: requesting export');
       const onSignInRequired = async ({ state, waitMinutes }) => {
