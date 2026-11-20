@@ -154,15 +154,22 @@ export function adjacentPeriod(kind, key, weekList, dir, opts) {
  * held below the ShipStation coverage gate ("shipping costs in for 120 of 200 orders (60%); publishes at 95%"),
  * another hold, or no revision yet. `status` (GET /v1/weeks/:week/status), when given, adds what blocks it now:
  * ShipStation waiting for a person to sign in on the reporting laptop, or the first pending step.
- * `pendingText`: { code → words } for the pending codes. → string or null (nothing known).
+ * `pendingText`: { code → words } for the pending codes. `today`: the Los Angeles date (YYYY-MM-DD), so a week without
+ * a revision reads "week not started", "week not finished" or, once it has ended, "not computed yet".
+ * → string or null (nothing known).
  */
-export function gapReason(g, weekList, status = null, pendingText = {}) {
+export const laToday = (now = new Date()) => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+export function gapReason(g, weekList, status = null, pendingText = {}, { today = laToday() } = {}) {
   if (!g || g.reason !== 'not_published') return null;
   const w = (weekList || []).find(x => x.weekStart === g.weekStart);
   const r = (w?.revisions || [])[0];
   const parts = [];
   const pend = (status?.pending || []).map(p => p.code || p)[0];
-  if (pend) parts.push(pendingText[pend] || String(pend).replace(/_/g, ' '));
+  // A week that has not started, or is still running (Mon–Sun, Los Angeles dates), has nothing to compute yet.
+  const notStarted = !r && g.weekStart > today, running = !r && !notStarted && addDays(g.weekStart, 6) >= today;
+  if (notStarted) parts.push('week not started');
+  else if (running || pend === 'week_open') parts.push('week not finished');
+  else if (pend) parts.push(pendingText[pend] || String(pend).replace(/_/g, ' '));
   else if (!r) parts.push('not computed yet');
   else {
     const hold = r.hold || [];

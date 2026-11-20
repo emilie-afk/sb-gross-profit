@@ -78,7 +78,7 @@ export function renderWeekList(weeks) {
  * Calendar months (Los Angeles) that published weeks touch, newest first, with the days published
  * weeks cover. Amounts are shown in the opened report (they are summed from the month's own orders).
  */
-export function renderMonthList(weeks) {
+export function renderMonthList(weeks, { today } = {}) {
   const list = Array.isArray(weeks) ? weeks : [];
   const months = monthsOf(list);
   if (!months.length) return '<p class="meta">No monthly reports yet: a month appears once a published week covers part of it.</p>';
@@ -86,7 +86,7 @@ export function renderMonthList(weeks) {
     const plan = periodPlan('month', m, list);
     const days = daysBetween(plan.period.from, plan.period.to);
     const covered = plan.weeks.reduce((n, w) => n + daysBetween(w.days.from, w.days.to), 0);
-    const gaps = plan.gaps.map(g => `${fmtRange(g)} (${g.reason === 'before_reporting' ? 'before reporting starts' : `not published${(r => r ? `: ${r}` : '')(gapReason(g, list))}`})`).join('; ');
+    const gaps = plan.gaps.map(g => `${fmtRange(g)} (${g.reason === 'before_reporting' ? 'before reporting starts' : `not published${(r => r ? `: ${r}` : '')(gapReason(g, list, null, {}, today ? { today } : {}))}`})`).join('; ');
     return `<tr><td><button class="logout-btn" onclick="weeklyReports.openReport('month', '${esc(m)}')" title="Open the full report">${esc(monthLabel(m))}</button></td>
       <td>${esc(plan.weeks.map(w => `${fmtRange(w.days)} (r${w.published.revision})`).join(', '))}</td>
       <td style="text-align:right">${covered} of ${days}${covered < days ? ' · partial' : ''}</td><td>${esc(gaps || '—')}</td></tr>`;
