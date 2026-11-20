@@ -272,6 +272,11 @@ a { color: var(--gp-accent); text-decoration: none; }
 .gp-chip[aria-pressed="true"] { border-color: var(--gp-brand); background: var(--gp-brand-soft);
                                 color: var(--gp-accent); font-weight: 600; }
 
+/* A table label that opens its rows elsewhere (Shipping tables → Order detail; Subscription P&L SKU → its deliveries). */
+.gp-link { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-align: left; cursor: pointer;
+           text-decoration: underline; text-decoration-color: var(--gp-border-strong); text-underline-offset: 3px; }
+.gp-link:hover { color: var(--gp-accent); text-decoration-color: var(--gp-accent); }
+
 /* ── Report tiles ─────────────────────────────────────────────────────────── */
 .gp-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
 .gp-tile { background: var(--gp-inset); border: 1px solid var(--gp-border);
@@ -458,6 +463,8 @@ a { color: var(--gp-accent); text-decoration: none; }
 .gp-period-switch select { border: none; background: none; font: inherit; font-size: 13px; font-weight: 600;
   color: var(--gp-text); padding: 4px 2px; max-width: 220px; cursor: pointer; }
 .gp-range-pick[hidden] { display: none; }
+.gp-filter-row[hidden], #sub-sku-focus[hidden] { display: none; }
+#shiporders-table td.wrap-cell { white-space: normal; min-width: 170px; max-width: 260px; }
 /* The picker takes its own row under the switcher, so the toolbar never grows sideways. */
 .gp-header-actions:has(.gp-range-pick:not([hidden])) { flex-wrap: wrap; justify-content: flex-end; }
 .gp-range-pick { order: 10; flex-basis: 100%; justify-content: flex-end; }

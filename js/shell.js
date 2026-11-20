@@ -286,6 +286,9 @@ export function renderShipping(s) {
 // ─── Shipping: where the net comes from, and by vendor (js/shippingBreakdown.js) ─────────────────────
 
 /** Renders the two breakdown tables; `b` is shippingBreakdown(lines) or null (cards hidden). */
+// A table row's label opens its orders in Order detail → Shipping view (window.openShippingOrders, index.html).
+const orderLink = (kind, r) => `<button type="button" class="gp-link" data-ship-kind="${kind}" data-ship-key="${esc(r.key)}"
+  onclick="openShippingOrders(this.dataset.shipKind, this.dataset.shipKey)" title="Show these orders in Order detail">${esc(r.label)}</button>`;
 export function renderShippingBreakdown(b) {
   const tone = n => n < 0 ? ' style="color:var(--gp-neg)"' : (n > 0 ? ' style="color:var(--gp-pos)"' : ' style="color:var(--gp-text3)"');
   const num = (r, extra = '') => `<td class="num">${r.orders.toLocaleString()}</td><td class="num">${money(r.collected)}</td>
@@ -297,26 +300,24 @@ export function renderShippingBreakdown(b) {
   if (cause) cause.innerHTML = `
     <thead><tr><th>Where the shipping net comes from</th><th class="num">Orders</th><th class="num">Collected</th>
       <th class="num">Paid</th><th class="num">Net</th></tr></thead>
-    <tbody>${b.causes.map(r => `<tr><td>${esc(r.label)}</td>${num(r)}</tr>`).join('')}</tbody>
+    <tbody>${b.causes.map(r => `<tr><td>${orderLink('causes', r)}</td>${num(r)}</tr>`).join('')}</tbody>
     <tfoot><tr><td>Total</td>${num(t)}</tr></tfoot>`;
   const loss = b.causes.filter(r => r.net < 0).reduce((s, r) => s + r.net, 0);
   const cm = $('ship-cause-meta');
-  if (cm) cm.textContent = `Every order's shipping sorted by cause · losses ${money(loss)} · total net ${money(t.net)}`;
+  if (cm) cm.textContent = `Every order's shipping sorted by cause · losses ${money(loss)} · total net ${money(t.net)} · click a row for its orders`;
   const vend = $('ship-vendor-table');
   if (vend) vend.innerHTML = `
     <thead><tr><th>Vendor (who ships)</th><th class="num">Orders</th><th class="num">Collected</th>
       <th class="num">Paid</th><th class="num">Avg paid / order</th><th class="num">Net</th></tr></thead>
-    <tbody>${b.vendors.map(r => `<tr${r.measured ? '' : ' style="color:var(--gp-text3)"'}><td>${esc(r.label)}</td>${num(r, `<td class="num">${r.measured ? money(r.avgPaid) : '—'}</td>`)}</tr>`).join('')}</tbody>
+    <tbody>${b.vendors.map(r => `<tr${r.measured ? '' : ' style="color:var(--gp-text3)"'}><td>${orderLink('vendors', r)}</td>${num(r, `<td class="num">${r.measured ? money(r.avgPaid) : '—'}</td>`)}</tr>`).join('')}</tbody>
     <tfoot><tr><td>Total</td>${num(t, '<td class="num"></td>')}</tr></tfoot>`;
   const vm = $('ship-vendor-meta');
-  if (vm) vm.textContent = 'Label cost by the vendor whose items were shipped; orders with several shipping vendors are shown as mixed, not split; pass-through shipping is not measured';
+  if (vm) vm.textContent = 'Label cost by the vendor whose items were shipped; orders with several shipping vendors are shown as mixed, not split; pass-through shipping is not measured · click a row for its orders';
 }
 
 // ─── Reports screen ───────────────────────────────────────────────────────────
 
 const TILES = [
-  { id: 'subpl', name: 'Subscription P&L',
-    desc: 'Per-delivery unit economics by subscription type — price, COGS, shipping and net GP.' },
   { id: 'lowsku', name: 'Low margin SKUs',
     desc: 'Products whose gross margin sits below your threshold, aggregated by SKU.' },
   { id: 'giftcard', name: 'Gift cards & influencer',
@@ -332,7 +333,7 @@ export function renderReports(lines, s, openReport) {
   const subscribers = new Set(subLines.filter(l => (l.lineRevenue || 0) > 0).map(l => l.orderNum)).size;
   const attributed = s.productRevenue || 0;
 
-  const kpis = $('report-kpis');
+  const kpis = $('sub-kpis');                                       // Order detail → Subscriptions
   if (kpis) kpis.innerHTML = `
     <div class="gp-kpi gp-kpi-sm"><div class="label">Subscription revenue</div>
       <div class="value">${money(subRev)}</div>

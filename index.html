@@ -26,6 +26,7 @@
 <link rel="modulepreload" href="./js/weeklyReports.js">
 <link rel="modulepreload" href="./js/storedReport.js">
 <link rel="modulepreload" href="./js/shippingBreakdown.js">
+<link rel="modulepreload" href="./js/subscriptionPl.js">
 <link rel="modulepreload" href="./js/refunds.js">
 <link rel="modulepreload" href="./js/scenarioModels.js">
 <link rel="modulepreload" href="./js/shippingScenarios.js">
@@ -695,6 +696,16 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
                   <option value="">All stores</option></select>
                 <select class="gp-select" id="filter-channel" onchange="filterTable()" aria-label="Channel">
                   <option value="">All channels</option></select>
+                <select class="gp-select" id="filter-shipvendor" onchange="filterTable()" aria-label="Shipping vendor"
+                        title="Orders by the vendor whose items were shipped (as in Shipping → Shipping by vendor)">
+                  <option value="">All shipping vendors</option></select>
+                <select class="gp-select" id="filter-sub" onchange="filterTable()" aria-label="Subscriptions">
+                  <option value="">All orders</option>
+                  <option value="sub">Subscription orders</option>
+                  <option value="paid">Subscriptions: new and prepaid</option>
+                  <option value="renewal">Subscriptions: renewals</option>
+                  <option value="nonsub">Non-subscription orders</option>
+                </select>
                 <select class="gp-select" id="filter-cost" onchange="filterTable()" aria-label="Cost status">
                   <option value="">All cost status</option>
                   <option value="missing">Plants – no cost</option>
@@ -716,6 +727,11 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
                 <span class="t3" style="font-size:12px">Quick filters</span>
                 <div class="gp-chips" id="quick-chips"></div>
               </div>
+              <div class="gp-filter-row" id="ship-focus-row" hidden>
+                <span class="t3" style="font-size:12px">Shipping</span>
+                <span class="gp-chip" aria-pressed="true" id="ship-focus-label"></span>
+                <button class="gp-btn gp-btn-sm" onclick="clearShipFocus()">Show all orders</button>
+              </div>
             </div>
           </div>
 
@@ -724,6 +740,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
               <div class="gp-seg" role="group" aria-label="Table shape">
                 <button id="seg-sku" aria-pressed="true" onclick="setTableView('sku')">SKU view</button>
                 <button id="seg-order" aria-pressed="false" onclick="setTableView('order')">Order view</button>
+                <button id="seg-ship" aria-pressed="false" onclick="setTableView('ship')">Shipping view</button>
               </div>
               <span class="meta" id="row-count"></span>
               <div class="right"><button class="gp-btn gp-btn-sm" onclick="downloadDetailCSV()">Download CSV</button></div>
@@ -771,20 +788,6 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
       <select class="filter-select" id="ord-filter-store" onchange="applyOrdFilters()" style="min-width:130px">
         <option value="">All stores</option>
       </select>
-      <div id="ord-sub-toggle" style="display:none;align-items:center;gap:12px">
-        <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
-          <input type="radio" name="ord-sub-radio" id="ord-filter-sub-all" value="all" onchange="applyOrdFilters()" checked>
-          All
-        </label>
-        <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
-          <input type="radio" name="ord-sub-radio" id="ord-filter-sub-yes" value="sub" onchange="applyOrdFilters()">
-          Subscriptions only
-        </label>
-        <label style="font-size:.8rem;color:var(--muted);white-space:nowrap;display:flex;align-items:center;gap:4px;cursor:pointer">
-          <input type="radio" name="ord-sub-radio" id="ord-filter-sub-no" value="nonsub" onchange="applyOrdFilters()">
-          Non-subscriptions only
-        </label>
-      </div>
       <span id="ord-filter-count" style="font-size:.78rem;color:var(--muted);margin-left:4px"></span>
       <button class="logout-btn" id="ord-download-btn" onclick="downloadOrderViewCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto;display:none">↓ Download CSV</button>
     </div>
@@ -820,6 +823,38 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div>
     </div><!-- /view-order -->
 
+    <!-- Shipping view: one row per order, the orders behind the Shipping screen's tables -->
+    <div id="view-shiporders" style="display:none">
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;flex-wrap:wrap">
+      <span class="meta" id="shiporders-meta"></span>
+      <button class="logout-btn" onclick="downloadShipOrdersCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
+    </div>
+    <div class="table-wrap">
+      <table id="shiporders-table">
+        <thead>
+          <tr>
+            <th onclick="sortShipOrders('order')">Order <span class="sort-icon">↕</span></th>
+            <th onclick="sortShipOrders('date')">Date <span class="sort-icon">↕</span></th>
+            <th onclick="sortShipOrders('channel')">Channel <span class="sort-icon">↕</span></th>
+            <th onclick="sortShipOrders('vendorLabel')">Shipping vendor <span class="sort-icon">↕</span></th>
+            <th onclick="sortShipOrders('causeLabel')">Where the shipping net comes from <span class="sort-icon">↕</span></th>
+            <th onclick="sortShipOrders('collected')" class="num">Collected <span class="sort-icon">↕</span></th>
+            <th onclick="sortShipOrders('paid')" class="num" title="Label cost plus pass-through">Paid <span class="sort-icon">↕</span></th>
+            <th onclick="sortShipOrders('passThrough')" class="num" title="Pass-through shipping: not measured, $0 net by rule">Pass-through <span class="sort-icon">↕</span></th>
+            <th onclick="sortShipOrders('net')" class="num">Net <span class="sort-icon">↕</span></th>
+          </tr>
+        </thead>
+        <tbody id="shiporders-body"></tbody>
+        <tfoot id="shiporders-tfoot"></tfoot>
+      </table>
+    </div>
+    <div class="pagination">
+      <button id="btn-prev-shipord" onclick="changeShipOrdersPage(-1)">← Prev</button>
+      <span class="page-info" id="page-info-shipord"></span>
+      <button id="btn-next-shipord" onclick="changeShipOrdersPage(1)">Next →</button>
+    </div>
+    </div><!-- /view-shiporders -->
+
     <div id="view-refunds" style="display:none">
     <div class="table-wrap">
       <table id="refund-table">
@@ -841,33 +876,27 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
     </div><!-- /view-refunds -->
 
     <div id="view-sub" style="display:none">
-    <div style="display:flex;align-items:center;padding:8px 16px 4px;gap:8px">
-      <span style="font-size:.85rem;font-weight:600">📦 Subscription Economics by Type</span>
-      <span style="font-size:.75rem;color:var(--muted)">(revenue normalized to per-delivery month)</span>
+    <div class="gp-kpi-row" id="sub-kpis" style="padding:10px 12px 4px"></div>
+    <div style="display:flex;align-items:center;padding:8px 16px 4px;gap:10px;flex-wrap:wrap">
+      <span style="font-size:.85rem;font-weight:600">Subscription P&amp;L per delivery</span>
+      <div class="gp-seg" role="group" aria-label="Group the P&amp;L by">
+        <button id="subpl-by-sku" aria-pressed="true" onclick="setSubPlGroup('sku')">By SKU</button>
+        <button id="subpl-by-type" aria-pressed="false" onclick="setSubPlGroup('type')">By type</button>
+      </div>
+      <span class="meta" id="subpl-note"></span>
+      <button class="logout-btn" onclick="downloadSubPLCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
     </div>
     <div style="overflow-x:auto;margin:0 8px 12px">
-      <table id="sub-type-table" style="width:100%;border-collapse:collapse;font-size:.78rem">
-        <thead>
-          <tr style="border-bottom:1px solid var(--border);color:var(--muted);text-align:right">
-            <th style="text-align:left;padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('type')">Type <span id="sth-type"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('orders')"># Orders <span id="sth-orders"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('revMo')">Rev/mo <span id="sth-revMo"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('cogsMo')">COGS/mo <span id="sth-cogsMo"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('gpMo')">GP$/mo <span id="sth-gpMo"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('gpPct')">GP% <span id="sth-gpPct"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('shipColl')">Ship Coll/mo <span id="sth-shipColl"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('expShip')">Exp Ship/mo <span id="sth-expShip"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('ssCost')">SS Cost/mo <span id="sth-ssCost"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('shipLoss')">Ship Loss/mo <span id="sth-shipLoss"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('netGpMo')">Net GP$/mo <span id="sth-netGpMo"></span></th>
-            <th style="padding:4px 10px;white-space:nowrap;cursor:pointer" onclick="sortSubType('netGpPct')">Net GP% <span id="sth-netGpPct"></span></th>
-          </tr>
-        </thead>
-        <tbody id="sub-type-body"></tbody>
+      <table id="subpl-table" style="width:100%;border-collapse:collapse;font-size:.78rem">
+        <thead id="subpl-head"></thead>
+        <tbody id="subpl-body"></tbody>
+        <tfoot id="subpl-foot"></tfoot>
       </table>
     </div>
     <div style="display:flex;align-items:center;padding:4px 16px 4px;gap:8px;border-top:1px solid var(--border)">
       <span style="font-size:.8rem;color:var(--muted)" id="sub-summary"></span>
+      <span id="sub-sku-focus" hidden><span class="gp-chip" aria-pressed="true" id="sub-sku-focus-label"></span>
+        <button class="gp-btn gp-btn-sm" onclick="setSubSkuFocus('')">All SKUs</button></span>
       <button class="logout-btn" onclick="downloadSubCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
     </div>
     <div class="table-wrap">
@@ -1160,7 +1189,6 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
         <!-- ══ Reports ══ -->
         <section id="screen-reports" class="gp-screen" hidden
                  style="display:none;flex-direction:column;gap:24px">
-          <div class="gp-kpi-row" id="report-kpis"></div>
           <div class="gp-card" id="automation-card">
             <div class="gp-card-head"><h3>Weekly automation</h3>
               <span class="meta">Collection, retries and sources for the last closed week · nothing publishes automatically</span>
@@ -1173,35 +1201,7 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <div class="gp-card-body"><div class="gp-tiles" id="report-tiles"></div></div>
           </div>
           <div id="report-pane">
-    <!-- Sub P&L view -->
-    <div id="view-subpl" style="display:none">
-    <div style="display:flex;align-items:center;padding:8px 16px 6px;gap:12px">
-      <span style="font-size:.85rem;font-weight:600">📊 Subscription P&amp;L — Monthly Revenue vs Actual Cost</span>
-      <span style="font-size:.75rem;color:var(--muted)">Per-unit averages by subscription type</span>
-      <span id="subpl-note" style="font-size:.75rem;color:var(--muted)" hidden></span>
-      <button class="logout-btn" onclick="downloadSubPLCSV()" style="font-size:.75rem;white-space:nowrap;margin-left:auto">↓ Download CSV</button>
-    </div>
-    <div style="overflow-x:auto;padding:0 8px 16px">
-      <table id="subpl-table" style="width:100%;border-collapse:collapse;font-size:.8rem">
-        <thead>
-          <tr style="color:var(--muted);text-align:right;border-bottom:2px solid var(--border)">
-            <th style="text-align:left;padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('type')">Subscription Type <span id="splh-type"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('deliveries')"># Deliveries <span id="splh-deliveries"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('price')">Avg Price/mo <span id="splh-price"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('cogs')">Avg COGS/mo <span id="splh-cogs"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('ss')">Avg SS Cost/mo <span id="splh-ss"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('totalCost')">Avg Total Cost/mo <span id="splh-totalCost"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('gp')">Avg GP/mo <span id="splh-gp"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('gpPct')">GP% <span id="splh-gpPct"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('shipColl')">Avg Ship Coll/mo <span id="splh-shipColl"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('netGp')">Net GP/mo <span id="splh-netGp"></span></th>
-            <th style="padding:5px 12px;white-space:nowrap;cursor:pointer" onclick="sortSubPL('netGpPct')">Net GP% <span id="splh-netGpPct"></span></th>
-          </tr>
-        </thead>
-        <tbody id="subpl-body"></tbody>
-      </table>
-    </div>
-    </div><!-- /view-subpl -->
+
 
           </div>
         </section>
@@ -1589,12 +1589,17 @@ import { renderAutomationStatus, automationStatusError } from './js/automationSt
 import { SCREENS, initTheme, toggleTheme, initRouter, showScreen, currentScreen,
          buildAlerts, renderAlerts, renderStoreBars, renderChannelDonut,
          renderShipping as renderShippingScreen, renderShippingBreakdown, renderReports, markNegatives, disclosureHint } from './js/shell.js';
-import { shippingBreakdown, breakdownCsv } from './js/shippingBreakdown.js';
+import { shippingBreakdown, breakdownCsv, shippingOrderRows, orderInRow, shippingOrdersCsv } from './js/shippingBreakdown.js';
+import { subscriptionPl, subscriptionPlCsv, subTypeName, isSubSku } from './js/subscriptionPl.js';
 import { loadPrivateRules, privateRulesError, applyScenarioDiscountDefaults, applyScenarioInputDefaults, renderVendorLegend } from './js/privateRules.js';
 
 // Private business rules (supplier costs, tiers, rate cards, SKU mappings) load before anything calculates.
 await loadPrivateRules();
 let _lastShipBreakdown = null;   // the Shipping screen's breakdown tables (js/shippingBreakdown.js), for their CSV export
+// Per order (whole orders, from all lines of the report): its shipping row (Shipping view, shipping-vendor filter,
+// table drill-down) and its subscription flags (subscription filter). Rebuilt with the report.
+let _shipOrders = [], _shipOrderBy = new Map(), _orderSub = new Map();
+let _shipFocus = null;           // { kind: 'causes'|'vendors', key, label } from a Shipping table row
 applyScenarioDiscountDefaults();
 applyScenarioInputDefaults();
 renderVendorLegend();
@@ -2810,6 +2815,16 @@ function renderDashboard(lines) {
   // Where the shipping net comes from, and by vendor: the same lines sorted, never a new amount.
   try { _lastShipBreakdown = shippingBreakdown(lines); } catch { _lastShipBreakdown = null; }
   renderShippingBreakdown(_lastShipBreakdown);
+  try { _shipOrders = shippingOrderRows(lines); } catch { _shipOrders = []; }
+  _shipOrderBy = new Map(_shipOrders.map(o => [o.order, o]));
+  _orderSub = new Map();
+  for (const l of lines) {
+    if (!isSubSku(l.sku)) continue;
+    const f = _orderSub.get(l.orderNum) || { paid: false, renewal: false };
+    if ((l.lineRevenue || 0) > 0) f.paid = true; else f.renewal = true;
+    _orderSub.set(l.orderNum, f);
+  }
+  _shipFocus = null;
   renderReports(lines, s, openReport);
   renderChannelBreakdown(s, Object.values(s.byChannel).reduce((a, v) => a + v.revenue, 0));
   renderVendorBreakdown();
@@ -2846,9 +2861,8 @@ window.inspectChannel = (name) => {
 };
 window.downloadMissingSkus = () => window.downloadMissingCosts();
 
-/** Report tiles deep-link to the filtered order table; Sub P&L is its own view. */
+/** Report tiles deep-link to the filtered order table (Subscription P&L is in Order detail → Subscriptions). */
 function openReport(id) {
-  if (id === 'subpl') { renderSubPLView(); document.getElementById('view-subpl').style.display = ''; return; }
   const map = { lowsku: 'lowsku', giftcard: 'giftcard', missing: 'missing' };
   showScreen('orders');
   setQuick(map[id] || 'all');
@@ -2950,6 +2964,13 @@ function buildFilters(lines) {
   const chanEl    = document.getElementById('filter-channel');
   storeEl.innerHTML   = '<option value="">All stores</option>'   + stores.map(s => `<option>${s}</option>`).join('');
   chanEl.innerHTML    = '<option value="">All channels</option>' + channels.map(c => `<option>${c}</option>`).join('');
+  // Shipping vendors: the rows of Shipping → Shipping by vendor (single vendors, mixed sets, pass-through).
+  const svEl = document.getElementById('filter-shipvendor');
+  if (svEl) svEl.innerHTML = '<option value="">All shipping vendors</option>' +
+    (_lastShipBreakdown?.vendors || []).map(v => `<option value="${esc(v.key)}">${esc(v.label)} (${v.orders})</option>`).join('');
+  const subEl = document.getElementById('filter-sub');
+  if (subEl) subEl.value = '';
+  syncShipFocus();
 }
 
 window.filterTable = () => {
@@ -2965,8 +2986,31 @@ window.filterTable = () => {
   const excludeGiftCard = chk('filter-exclude-giftcard');
   const dateFrom      = document.getElementById('filter-date-from').value;
   const dateTo        = document.getElementById('filter-date-to').value;
+  const shipVendor    = document.getElementById('filter-shipvendor')?.value || '';
+  const subMode       = document.getElementById('filter-sub')?.value || '';
+  // Whole-order filters (shipping vendor, subscription, a Shipping table row): every line of a matching order.
+  const orderOk = new Map();
+  const keepOrder = name => {
+    if (orderOk.has(name)) return orderOk.get(name);
+    let ok = true;
+    if (shipVendor || _shipFocus) {
+      const o = _shipOrderBy.get(name);
+      if (!o) ok = false;
+      else {
+        if (shipVendor && !orderInRow(o, 'vendors', shipVendor)) ok = false;
+        if (_shipFocus && !orderInRow(o, _shipFocus.kind, _shipFocus.key)) ok = false;
+      }
+    }
+    if (ok && subMode) {
+      const f = _orderSub.get(name);
+      ok = subMode === 'nonsub' ? !f : subMode === 'sub' ? !!f : subMode === 'paid' ? !!f?.paid : !!f?.renewal;
+    }
+    orderOk.set(name, ok);
+    return ok;
+  };
 
   filteredLines = allLines.filter(li => {
+    if ((shipVendor || subMode || _shipFocus) && !keepOrder(li.orderNum)) return false;
     if (store && li.store !== store) return false;
     if (chan  && li.source !== chan)  return false;
     if (cost === 'missing'    && li.costSource !== 'COST MISSING')    return false;
@@ -3004,6 +3048,7 @@ window.filterTable = () => {
   renderPage();
   const pane = currentPane();
   if (pane === 'order')      renderOrderView();
+  if (pane === 'shiporders') renderShipOrdersView();
   if (pane === 'sub')        renderSubView();
   if (pane === 'lowmargin')  renderLowMarginView();
   if (pane === 'lowsku')     renderLowSkuView();
@@ -3203,7 +3248,7 @@ window.downloadMissingCosts = () => {
 
 window.downloadOrderViewCSV = () => {
   const store   = document.getElementById('ord-filter-store').value || 'all';
-  const subMode = (document.querySelector('input[name="ord-sub-radio"]:checked') || {}).value || 'all';
+  const subMode = document.getElementById('filter-sub')?.value || 'all';
   const from    = document.getElementById('filter-date-from').value || 'all';
   const to      = document.getElementById('filter-date-to').value   || 'all';
   const suffix  = [store !== 'all' ? store : '', subMode !== 'all' ? subMode : ''].filter(Boolean).join('_');
@@ -3239,6 +3284,84 @@ window.downloadShipBreakdown = kind => {
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(breakdownCsv([...rows, total], kind)));
   a.download = kind === 'vendors' ? 'shipping_by_vendor.csv' : 'shipping_net_by_cause.csv';
+  a.click();
+};
+
+// ─── Shipping view (Order detail): the orders behind the Shipping screen's tables ─────────────────────
+const SHIPORD_PAGE_SIZE = 100;
+let shipOrdRows = [], shipOrdSortKey = 'net', shipOrdSortAsc = true, shipOrdPage = 1;
+/** A Shipping table row's orders: Order detail, Shipping view, filtered to that row (other filters reset). */
+window.openShippingOrders = (kind, key) => {
+  const rows = kind === 'vendors' ? _lastShipBreakdown?.vendors : _lastShipBreakdown?.causes;
+  const r = (rows || []).find(x => x.key === key);
+  _shipFocus = r ? { kind, key, label: `${kind === 'vendors' ? 'Vendor' : 'Cause'}: ${r.label}` } : null;
+  for (const id of ['search']) { const el = document.getElementById(id); if (el) el.value = ''; }
+  for (const id of ['filter-store', 'filter-channel', 'filter-cost', 'filter-shipvendor', 'filter-sub']) { const el = document.getElementById(id); if (el) el.value = ''; }
+  refundFilter = 'all'; syncRefundButtons();
+  syncShipFocus();
+  showScreen('orders');
+  quickFilter = 'all';
+  document.querySelectorAll('[data-quick]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.quick === 'all')));
+  shipOrdSortKey = 'net'; shipOrdSortAsc = true;
+  window.setTableView('ship');
+  applyQuick();
+};
+window.clearShipFocus = () => { _shipFocus = null; syncShipFocus(); applyQuick(); };
+function syncShipFocus() {
+  const row = document.getElementById('ship-focus-row');
+  if (!row) return;
+  row.hidden = !_shipFocus;
+  document.getElementById('ship-focus-label').textContent = _shipFocus ? _shipFocus.label : '';
+}
+window.sortShipOrders = key => {
+  if (shipOrdSortKey === key) shipOrdSortAsc = !shipOrdSortAsc; else { shipOrdSortKey = key; shipOrdSortAsc = !['collected', 'paid', 'passThrough'].includes(key); }
+  renderShipOrdersView();
+};
+window.changeShipOrdersPage = dir => {
+  const max = Math.max(1, Math.ceil(shipOrdRows.length / SHIPORD_PAGE_SIZE));
+  shipOrdPage = Math.max(1, Math.min(max, shipOrdPage + dir));
+  renderShipOrdersPage();
+};
+function renderShipOrdersView() {
+  // Whole orders (their shipping is order-level): every order that has a line in the filtered table.
+  const names = new Set(filteredLines.map(l => l.orderNum));
+  shipOrdRows = _shipOrders.filter(o => names.has(o.order));
+  const k = shipOrdSortKey, asc = shipOrdSortAsc;
+  shipOrdRows.sort((a, b) => {
+    const va = a[k], vb = b[k];
+    if (typeof va === 'string' || typeof vb === 'string') return asc ? String(va ?? '').localeCompare(String(vb ?? '')) : String(vb ?? '').localeCompare(String(va ?? ''));
+    return asc ? (va ?? 0) - (vb ?? 0) : (vb ?? 0) - (va ?? 0);
+  });
+  shipOrdPage = 1;
+  const sum = f => Math.round(shipOrdRows.reduce((t, o) => t + Math.round(o[f] * 100), 0)) / 100;
+  const t = { collected: sum('collected'), paid: sum('paid'), passThrough: sum('passThrough'), net: sum('net') };
+  const missing = shipOrdRows.filter(o => o.labelMissing).length;
+  document.getElementById('shiporders-meta').textContent = `${shipOrdRows.length.toLocaleString()} orders · net ${fmt(t.net)}`
+    + (missing ? ` · ${missing} without a label cost yet` : '') + ' · biggest loss first; click a column to sort';
+  document.getElementById('shiporders-tfoot').innerHTML = shipOrdRows.length ? `<tr class="totals-row"><td colspan="5">Total — ${shipOrdRows.length.toLocaleString()} orders</td>
+    <td class="num">${fmt(t.collected)}</td><td class="num">${fmt(t.paid)}</td><td class="num">${fmt(t.passThrough)}</td><td class="num">${fmt(t.net)}</td></tr>` : '';
+  renderShipOrdersPage();
+}
+function renderShipOrdersPage() {
+  const start = (shipOrdPage - 1) * SHIPORD_PAGE_SIZE;
+  const page = shipOrdRows.slice(start, start + SHIPORD_PAGE_SIZE);
+  const max = Math.max(1, Math.ceil(shipOrdRows.length / SHIPORD_PAGE_SIZE));
+  document.getElementById('shiporders-body').innerHTML = page.length ? page.map(o => `<tr>
+      <td>${esc(o.order)}</td><td>${esc(o.date)}</td><td>${esc(o.channel)}</td><td class="wrap-cell">${esc(o.vendorLabel)}</td>
+      <td class="wrap-cell">${esc(o.causeLabel)}${o.labelMissing ? ' <span class="badge" title="The ShipStation label cost is not in yet">label cost not in yet</span>' : ''}</td>
+      <td class="num">${fmt(o.collected)}</td><td class="num">${fmt(o.paid)}</td>
+      <td class="num" style="color:var(--muted)">${o.passThrough ? fmt(o.passThrough) : ''}</td>
+      <td class="num ${o.net < 0 ? 'neg' : o.net > 0 ? 'pos' : ''}">${fmt(o.net)}</td></tr>`).join('')
+    : '<tr><td colspan="9" style="padding:20px;text-align:center;color:var(--muted)">No orders in the current filters.</td></tr>';
+  document.getElementById('page-info-shipord').textContent = `Page ${shipOrdPage} of ${max}`;
+  document.getElementById('btn-prev-shipord').disabled = shipOrdPage <= 1;
+  document.getElementById('btn-next-shipord').disabled = shipOrdPage >= max;
+}
+window.downloadShipOrdersCSV = () => {
+  const from = document.getElementById('filter-date-from').value || 'all', to = document.getElementById('filter-date-to').value || 'all';
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(shippingOrdersCsv(shipOrdRows)));
+  a.download = `shipping_orders_${from}_to_${to}.csv`;
   a.click();
 };
 
@@ -3306,21 +3429,11 @@ const ORDER_PAGE_SIZE = 100;
 let ordFilteredLines = [];  // filteredLines after order-view-local filters
 
 window.applyOrdFilters = () => {
+  // The subscription filter is the order table's own (Subscriptions select above), for every store.
   const store = document.getElementById('ord-filter-store').value;
-  const isMcg = store.includes('17381');
-  document.getElementById('ord-sub-toggle').style.display = isMcg ? 'flex' : 'none';
-  const subMode = isMcg
-    ? (document.querySelector('input[name="ord-sub-radio"]:checked') || {}).value || 'all'
-    : 'all';
-  if (!isMcg) document.getElementById('ord-filter-sub-all').checked = true;
-  const isFiltered = !!(store || (isMcg && subMode !== 'all'));
+  const isFiltered = !!(store || document.getElementById('filter-sub')?.value);
   document.getElementById('ord-download-btn').style.display = isFiltered ? '' : 'none';
-  ordFilteredLines = filteredLines.filter(li => {
-    if (store && li.store !== store) return false;
-    if (subMode === 'sub'    && !/^(SUB|GSUB)/i.test(li.sku || '')) return false;
-    if (subMode === 'nonsub' &&  /^(SUB|GSUB)/i.test(li.sku || '')) return false;
-    return true;
-  });
+  ordFilteredLines = filteredLines.filter(li => !(store && li.store !== store));
   orderPage = 1;
   ordExpanded.clear();
   _renderOrderViewFromLines();
@@ -3349,10 +3462,11 @@ const QUICK = [
 const QUICK_VIEW = { lowmargin: 'lowmargin', lowsku: 'lowsku', giftcard: 'giftcard',
                      sub: 'sub', influencer: 'influencer', freeship: 'freeship',
                      hpd: 'hpd', aps: 'aps' };
-const ALL_PANES = ['sku','order','sub','subpl','lowmargin','giftcard','influencer',
+const ALL_PANES = ['sku','order','shiporders','sub','lowmargin','giftcard','influencer',
                    'freeship','hpd','aps','lowsku','refunds'];
-const currentPane = () => { const p = QUICK_VIEW[quickFilter] || tableView; return p === 'order' && refundFilter === 'refunded' ? 'refunds' : p; };
-const CSV_ONLY_BASE = new Set(['sub', 'hpd', 'aps']);
+const currentPane = () => { const p = QUICK_VIEW[quickFilter] || (tableView === 'ship' ? 'shiporders' : tableView); return p === 'order' && refundFilter === 'refunded' ? 'refunds' : p; };
+// Subscriptions works on saved reports too (storedReport.storedLines carries the subscription fields).
+const CSV_ONLY_BASE = new Set(['hpd', 'aps']);
 const CSV_ONLY = { has: id => CSV_ONLY_BASE.has(id) && !(id === 'aps' && storedState?.aps?.coverage?.available) };
 
 let tableView = 'sku', quickFilter = 'all';
@@ -3377,6 +3491,7 @@ window.setTableView = (v) => {
   tableView = v;
   document.getElementById('seg-sku').setAttribute('aria-pressed', String(v === 'sku'));
   document.getElementById('seg-order').setAttribute('aria-pressed', String(v === 'order'));
+  document.getElementById('seg-ship')?.setAttribute('aria-pressed', String(v === 'ship'));
   if (quickFilter === 'all' || quickFilter === 'missing') applyQuick();
 };
 
@@ -3408,7 +3523,6 @@ function applyQuick() {
 // Screens that need a render when first shown.
 initRouter((screen) => {
   if (screen === 'orders')    applyQuick();
-  if (screen === 'reports')   renderSubPLView();
   if (screen === 'scenarios') renderScenarioView();
 });
 
@@ -3488,8 +3602,6 @@ function renderOrderView() {
   const stores = [...new Set(filteredLines.map(l => l.store).filter(Boolean))].sort();
   storeEl.innerHTML = '<option value="">All stores</option>' +
     stores.map(s => `<option value="${s}"${s === prevStore ? ' selected' : ''}>${s}</option>`).join('');
-  const isMcg = storeEl.value === '17381';
-  document.getElementById('ord-sub-toggle').style.display = isMcg ? 'flex' : 'none';
   // Apply filters and render
   applyOrdFilters();
 }
@@ -3604,13 +3716,6 @@ window.clearDates = () => {
 // ─── Subscription View ────────────────────────────────────────────
 const SUB_PAGE_SIZE = 100;
 let subSortKey = 'date', subSortAsc = false, subPage = 1, subRows = [];
-let subTypeSortKey = 'type', subTypeSortAsc = true;
-
-window.sortSubType = key => {
-  if (subTypeSortKey === key) subTypeSortAsc = !subTypeSortAsc;
-  else { subTypeSortKey = key; subTypeSortAsc = key === 'type'; }
-  renderSubTypeSummary();
-};
 
 window.sortSubBy = key => {
   if (subSortKey === key) subSortAsc = !subSortAsc; else { subSortKey = key; subSortAsc = false; }
@@ -3622,254 +3727,89 @@ window.changeSubPage = dir => {
   renderSubPage();
 };
 
-// ─── Subscription P&L View ────────────────────────────────────────────────────
 
-let subPLSortKey = 'type', subPLSortAsc = true;
-window.sortSubPL = key => {
-  if (subPLSortKey === key) subPLSortAsc = !subPLSortAsc;
-  else { subPLSortKey = key; subPLSortAsc = key === 'type'; }
-  renderSubPLView();
+// e.g. SUB2-2-6 → "2 succs/mo", GSUBPot-3-3 → "3 succs/mo + clay pot (gift)"
+function getSubTypeName(sku) { return subTypeName(sku); }   // js/subscriptionPl.js
+
+// Subscription P&L per delivery (js/subscriptionPl.js): by exact SKU (default) or by type, over the subscription
+// lines of the filtered order table. A SKU opens its deliveries in the list below (setSubSkuFocus).
+let subPlGroup = 'sku', subPlSortKey = 'deliveries', subPlSortAsc = false, subSkuFocus = '', _lastSubPl = null;
+const SUBPL_COLS = [
+  ['label', 'SKU', 'text'], ['type', 'Type', 'text'], ['product', 'Product', 'text'], ['months', 'Months', 'months'],
+  ['deliveries', 'Deliveries', 'int'], ['paid', 'Paid orders', 'int'], ['renewals', 'Renewals', 'int'],
+  ['price', 'Price/mo', 'money'], ['cogs', 'COGS/delivery', 'money'], ['ss', 'Label cost/delivery', 'money'],
+  ['shipColl', 'Ship collected/mo', 'money'], ['expShip', 'Expected ship/mo', 'money'], ['shipLoss', 'Ship loss/mo', 'loss'],
+  ['gp', 'GP/mo', 'gp'], ['gpPct', 'GP %', 'pct'], ['netGp', 'Net GP/mo', 'gp'], ['netGpPct', 'Net GP %', 'pct'],
+];
+window.setSubPlGroup = g => {
+  subPlGroup = g === 'type' ? 'type' : 'sku';
+  document.getElementById('subpl-by-sku').setAttribute('aria-pressed', String(subPlGroup === 'sku'));
+  document.getElementById('subpl-by-type').setAttribute('aria-pressed', String(subPlGroup === 'type'));
+  renderSubPl();
 };
-
-function renderSubPLView() {
-  const subLines = filteredLines.filter(l => /^(SUB|GSUB)/i.test(l.sku || ''));
-
-  // Revenue: avg monthly price from paid orders (lineRevenue / subMonths where lineRevenue > 0)
-  // COGS:    avg across ALL deliveries (we fulfill every month)
-  // Ship collected: avg subShipMo from paid orders only
-  const types = {};
-
-  for (const l of subLines) {
-    const type = getSubTypeName(l.sku);
-    if (!types[type]) types[type] = {
-      type,
-      deliveries: 0,
-      revSamples: [], cogsSamples: [], ssSamples: [], shipCollSamples: []
-    };
-    const g = types[type];
-    g.deliveries++;
-    g.cogsSamples.push(l.lineCogs || 0);
-    if (l.subSSCostMo !== null) g.ssSamples.push(l.subSSCostMo);
-
-    // Revenue and ship collected only from paid deliveries
-    if ((l.lineRevenue || 0) > 0 && l.subMonths) {
-      g.revSamples.push(l.lineRevenue / l.subMonths);
-      if (l.subShipMo !== null) g.shipCollSamples.push(l.subShipMo);
-    }
-  }
-
-  const avg  = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
-  const r2   = v => v !== null ? Math.round(v * 100) / 100 : null;
-
-  // Compute all values first so we can sort
-  const rows = Object.values(types).map(g => {
-    const price     = r2(avg(g.revSamples));
-    const cogs      = r2(avg(g.cogsSamples));
-    const ss        = g.ssSamples.length ? r2(avg(g.ssSamples)) : null;
-    const shipColl  = g.shipCollSamples.length ? r2(avg(g.shipCollSamples)) : null;
-    const totalCost = (cogs !== null && ss !== null) ? r2(cogs + ss) : cogs;
-    const gp        = (price !== null && cogs !== null) ? r2(price - cogs) : null;
-    const gpPct     = (gp !== null && price) ? Math.round(gp / price * 1000) / 10 : null;
-    const netGp     = (gp !== null && ss !== null && shipColl !== null) ? r2(gp - ss + shipColl) : null;
-    const totalRevForNet = (price !== null && shipColl !== null) ? price + shipColl : price;
-    const netGpPct  = (netGp !== null && totalRevForNet) ? Math.round(netGp / totalRevForNet * 1000) / 10 : null;
-    return { type: g.type, deliveries: g.deliveries, price, cogs, ss, totalCost, gp, gpPct, shipColl, netGp, netGpPct, totalRevForNet };
-  });
-
-  // Sort
-  const k = subPLSortKey, asc = subPLSortAsc;
-  rows.sort((a, b) => {
-    let va = a[k], vb = b[k];
-    if (va === null || va === undefined) va = asc ?  Infinity : -Infinity;
-    if (vb === null || vb === undefined) vb = asc ?  Infinity : -Infinity;
+window.sortSubPl = key => {
+  if (subPlSortKey === key) subPlSortAsc = !subPlSortAsc; else { subPlSortKey = key; subPlSortAsc = ['label', 'type', 'product'].includes(key); }
+  renderSubPl();
+};
+window.setSubSkuFocus = sku => { subSkuFocus = sku || ''; renderSubView(); };
+function renderSubPl() {
+  const subAll = filteredLines.filter(l => isSubSku(l.sku));
+  const pl = subscriptionPl(subAll, { groupBy: subPlGroup });
+  _lastSubPl = { ...pl, groupBy: subPlGroup };
+  const cols = subPlGroup === 'type' ? SUBPL_COLS.filter(([k]) => k !== 'type' && k !== 'product').map(c => (c[0] === 'label' ? ['label', 'Type', 'text'] : c)) : SUBPL_COLS;
+  const k = subPlSortKey, asc = subPlSortAsc;
+  const rows = [...pl.rows].sort((x, y) => {
+    let va = x[k], vb = y[k];
+    if (Array.isArray(va)) va = va[0]; if (Array.isArray(vb)) vb = vb[0];
+    if (va === null || va === undefined) va = asc ? Infinity : -Infinity;
+    if (vb === null || vb === undefined) vb = asc ? Infinity : -Infinity;
     if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
     return asc ? va - vb : vb - va;
   });
-
-  // Update header indicators
-  ['type','deliveries','price','cogs','ss','totalCost','gp','gpPct','shipColl','netGp','netGpPct']
-    .forEach(col => {
-      const el = document.getElementById(`splh-${col}`);
-      if (el) el.textContent = col === k ? (asc ? ' ▲' : ' ▼') : '';
-    });
-
-  const cell = (v, posGood = true) => {
-    if (v === null) return '<td style="padding:5px 12px;text-align:right;color:var(--muted)">—</td>';
-    const cl = v > 0 ? (posGood ? 'color:var(--green)' : 'color:var(--red)')
-             : v < 0 ? (posGood ? 'color:var(--red)'   : 'color:var(--green)') : '';
-    return `<td style="padding:5px 12px;text-align:right;${cl}">${fmt(v)}</td>`;
+  const tone = (v, good = true) => (v === null || v === undefined || v === 0 ? '' : (v > 0) === good ? 'color:var(--gp-pos)' : 'color:var(--gp-neg)');
+  const cell = (r, [key, , kind], total = false) => {
+    const v = r[key];
+    const td = (txt, style = '') => `<td style="padding:5px 10px;${kind === 'text' ? 'text-align:left;white-space:nowrap' : 'text-align:right'};${style}">${txt}</td>`;
+    if (kind === 'text') {
+      if (key === 'label' && !total && subPlGroup === 'sku') return td(`<button type="button" class="gp-link" data-sku="${esc(v)}" onclick="setSubSkuFocus(this.dataset.sku)" title="Show these deliveries below">${esc(v)}</button>`, 'font-weight:500');
+      if (key === 'product') return `<td style="padding:5px 10px;text-align:left;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(v)}">${esc(v)}</td>`;
+      return td(esc(v ?? ''), key === 'label' ? 'font-weight:500' : '');
+    }
+    if (v === null || v === undefined) return td('—', 'color:var(--muted)');
+    if (kind === 'months') return td(esc(v.join(' / ')));
+    if (kind === 'int') return td(Number(v).toLocaleString(), 'color:var(--muted)');
+    if (kind === 'pct') return td(`${v.toFixed(1)}%`, tone(v));
+    if (kind === 'gp') return td(fmt(v), tone(v));
+    if (kind === 'loss') return td(fmt(v), tone(v, false));
+    return td(fmt(v));
   };
-  const pctCell = (pct) => {
-    if (pct === null) return '<td style="padding:5px 12px;text-align:right;color:var(--muted)">—</td>';
-    const cl = pct >= 0 ? 'color:var(--green)' : 'color:var(--red)';
-    return `<td style="padding:5px 12px;text-align:right;${cl}">${pct.toFixed(1)}%</td>`;
-  };
-
-  const html = rows.map(r => `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:5px 12px;white-space:nowrap;font-weight:500">${r.type}</td>
-      <td style="padding:5px 12px;text-align:right;color:var(--muted)">${r.deliveries}</td>
-      ${cell(r.price, false)}
-      ${cell(r.cogs, false)}
-      ${cell(r.ss, false)}
-      ${cell(r.totalCost, false)}
-      ${cell(r.gp)}
-      ${pctCell(r.gpPct)}
-      ${cell(r.shipColl, false)}
-      ${cell(r.netGp)}
-      ${pctCell(r.netGpPct)}
-    </tr>`).join('');
-
-  const unsplit = subLines.filter(l => l.subShipUnavailable).length, note = document.getElementById('subpl-note');
-  if (note) {
-    note.hidden = !unsplit;
-    note.textContent = unsplit ? `· ${unsplit} deliver${unsplit === 1 ? 'y is' : 'ies are'} in orders with several subscriptions: shipping is not split between them, so they are left out of the shipping and Net GP averages` : '';
-  }
-  document.getElementById('subpl-body').innerHTML = html ||
-    `<tr><td colspan="11" style="padding:24px;text-align:center;color:var(--muted)">No subscription data in current date range.</td></tr>`;
+  document.getElementById('subpl-head').innerHTML = `<tr style="border-bottom:1px solid var(--border);color:var(--muted);text-align:right">${cols.map(([key, h, kind]) =>
+    `<th style="padding:4px 10px;white-space:nowrap;cursor:pointer;${kind === 'text' ? 'text-align:left' : ''}" onclick="sortSubPl('${key}')">${h}${key === k ? (asc ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr>`;
+  document.getElementById('subpl-body').innerHTML = rows.length
+    ? rows.map(r => `<tr style="border-bottom:1px solid var(--border)${subSkuFocus && r.sku === subSkuFocus ? ';background:var(--gp-brand-soft)' : ''}">${cols.map(c => cell(r, c)).join('')}</tr>`).join('')
+    : `<tr><td colspan="${cols.length}" style="padding:20px;text-align:center;color:var(--muted)">No subscription deliveries in the current filters.</td></tr>`;
+  document.getElementById('subpl-foot').innerHTML = rows.length
+    ? `<tr style="font-weight:600;border-top:2px solid var(--border)">${cols.map((c, i) => (i === 0 ? `<td style="padding:5px 10px">All subscriptions</td>` : cell({ ...pl.total, type: '', product: '' }, c, true))).join('')}</tr>` : '';
+  const t = pl.total, notes = [];
+  if (t.missingCost) notes.push(`${t.missingCost} without a product cost (left out of COGS)`);
+  if (t.unsplit) notes.push(`${t.unsplit} in orders with several subscriptions (shipping not split: left out of the shipping averages)`);
+  document.getElementById('subpl-note').textContent = `Averages per delivery; price and shipping collected per month of the plan${notes.length ? ` · ${notes.join(' · ')}` : ''}`;
 }
 
 window.downloadSubPLCSV = () => {
-  const subLines = filteredLines.filter(l => /^(SUB|GSUB)/i.test(l.sku || ''));
-  const types = {};
-  for (const l of subLines) {
-    const type = getSubTypeName(l.sku);
-    if (!types[type]) types[type] = { type, deliveries:0, revSamples:[], cogsSamples:[], ssSamples:[], shipCollSamples:[] };
-    const g = types[type];
-    g.deliveries++;
-    g.cogsSamples.push(l.lineCogs || 0);
-    if (l.subSSCostMo !== null) g.ssSamples.push(l.subSSCostMo);
-    if ((l.lineRevenue || 0) > 0 && l.subMonths) {
-      g.revSamples.push(l.lineRevenue / l.subMonths);
-      if (l.subShipMo !== null) g.shipCollSamples.push(l.subShipMo);
-    }
-  }
-  const avg  = arr => arr.length ? arr.reduce((s,v) => s+v, 0) / arr.length : null;
-  const r2   = v => v !== null ? Math.round(v * 100) / 100 : null;
-  const sorted = Object.values(types).sort((a,b) => a.type.localeCompare(b.type));
-  const headers = ['Subscription Type','# Deliveries','Avg Price/mo','Avg COGS/mo','Avg SS Cost/mo','Avg Total Cost/mo','Avg GP/mo','GP%','Avg Ship Coll/mo','Net GP/mo','Net GP%'];
-  const csvRows = [headers, ...sorted.map(g => {
-    const price    = r2(avg(g.revSamples));
-    const cogs     = r2(avg(g.cogsSamples));
-    const ss       = g.ssSamples.length ? r2(avg(g.ssSamples)) : null;
-    const shipColl = g.shipCollSamples.length ? r2(avg(g.shipCollSamples)) : null;
-    const totalCost = (cogs !== null && ss !== null) ? r2(cogs + ss) : cogs;
-    const gp       = (price !== null && cogs !== null) ? r2(price - cogs) : null;
-    const gpPct    = (gp !== null && price) ? (Math.round(gp/price*1000)/10)+'%' : '';
-    const netGp    = (gp !== null && ss !== null && shipColl !== null) ? r2(gp - ss + shipColl) : null;
-    const rev4net  = (price !== null && shipColl !== null) ? price + shipColl : price;
-    const netPct   = (netGp !== null && rev4net) ? (Math.round(netGp/rev4net*1000)/10)+'%' : '';
-    return [g.type, g.deliveries, price??'', cogs??'', ss??'', totalCost??'', gp??'', gpPct, shipColl??'', netGp??'', netPct];
-  })];
-  const csv = csvRows.map(row => row.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(',')).join('\n');
+  if (!_lastSubPl) renderSubPl();
+  const csv = subscriptionPlCsv(_lastSubPl, { groupBy: _lastSubPl.groupBy });
+  const from = document.getElementById('filter-date-from').value || 'all', to = document.getElementById('filter-date-to').value || 'all';
   const a = document.createElement('a');
   a.href = 'data:text/csv;charset=utf-8,' + encodeURIComponent(gpCsvWithProvenance(csv));
-  a.download = `sub_pl_by_type.csv`;
+  a.download = `subscription_pl_by_${_lastSubPl.groupBy}_${from}_to_${to}.csv`;
   a.click();
 };
 
-// e.g. SUB2-2-6 → "2 succs/mo", GSUBPot-3-3 → "3 succs/mo + clay pot (gift)"
-function getSubTypeName(sku) {
-  const s = (sku || '').toUpperCase();
-  const isGift = s.startsWith('GSUB');
-  const hasPot = s.includes('POT') || s.includes('UPGRADE');
-  const nums = s.split('-').map(p => parseInt(p, 10)).filter(n => !isNaN(n) && n > 0 && n <= 50);
-  const plants = nums.length >= 2 ? nums[nums.length - 2] : (nums[0] || 1);
-  const plantStr = plants === 1 ? '1 succ' : `${plants} succs`;
-  return `${plantStr}/mo${hasPot ? ' + clay pot' : ''}${isGift ? ' (gift)' : ''}`;
-}
-
-function renderSubTypeSummary() {
-  // revMo / shipColl: only from PAID deliveries (lineRevenue > 0) → gives the actual monthly price charged
-  // cogs / ssCost:    from ALL deliveries → we fulfil every month regardless of payment
-  const groups = {};
-  for (const l of subRows) {
-    const type = getSubTypeName(l.sku);
-    if (!groups[type]) groups[type] = {
-      orders: new Set(),
-      revMo: [], shipColl: [],       // paid deliveries only
-      cogs: [], ssCost: [],           // all deliveries
-      expShip: null,
-    };
-    const g = groups[type];
-    g.orders.add(l.orderNum);
-
-    // Paid delivery: revenue > 0 means customer paid this month (1-mo sub) or upfront (multi-mo)
-    const isPaid = (l.lineRevenue || 0) > 0;
-    if (isPaid && l.subMonths) {
-      g.revMo.push(l.lineRevenue / l.subMonths);
-      if (l.subShipMo !== null) g.shipColl.push(l.subShipMo);
-    }
-
-    if (l.lineCogs    !== null) g.cogs.push(l.lineCogs);
-    if (l.subSSCostMo !== null) g.ssCost.push(l.subSSCostMo);
-
-    // Expected ship rate is fixed per type — just grab from first row
-    if (g.expShip === null && l.expSubShipMo !== null) g.expShip = l.expSubShipMo;
-  }
-
-  const avg = arr => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
-  const r2  = v => v !== null ? Math.round(v * 100) / 100 : null;
-
-  const rows = Object.keys(groups).map(type => {
-    const g        = groups[type];
-    const revMo    = r2(avg(g.revMo));
-    const cogsMo   = r2(avg(g.cogs));
-    const gpMo     = revMo !== null && cogsMo !== null ? r2(revMo - cogsMo) : null;
-    const gpPct    = gpMo !== null && revMo ? Math.round(gpMo / revMo * 1000) / 10 : null;
-    const shipColl = r2(avg(g.shipColl));
-    const ssCost   = r2(avg(g.ssCost));
-    const shipLoss = ssCost !== null && shipColl !== null ? r2(ssCost - shipColl) : null;
-    const netGpMo  = gpMo !== null && shipColl !== null && ssCost !== null
-                       ? r2(gpMo + shipColl - ssCost) : null;
-    const totalRevNet = revMo !== null && shipColl !== null ? revMo + shipColl : null;
-    const netGpPct = netGpMo !== null && totalRevNet ? Math.round(netGpMo / totalRevNet * 1000) / 10 : null;
-    return { type, orders: g.orders.size, revMo, cogsMo, gpMo, gpPct,
-             shipColl, expShip: g.expShip, ssCost, shipLoss, netGpMo, netGpPct };
-  });
-
-  // Sort
-  const k = subTypeSortKey, asc = subTypeSortAsc;
-  rows.sort((a, b) => {
-    let va = a[k], vb = b[k];
-    if (va === null || va === undefined) va = asc ?  Infinity : -Infinity;
-    if (vb === null || vb === undefined) vb = asc ?  Infinity : -Infinity;
-    if (typeof va === 'string') return asc ? va.localeCompare(vb) : vb.localeCompare(va);
-    return asc ? va - vb : vb - va;
-  });
-
-  // Update header sort indicators
-  ['type','orders','revMo','cogsMo','gpMo','gpPct','shipColl','expShip','ssCost','shipLoss','netGpMo','netGpPct']
-    .forEach(col => {
-      const el = document.getElementById(`sth-${col}`);
-      if (el) el.textContent = col === k ? (asc ? ' ▲' : ' ▼') : '';
-    });
-
-  const cl = (v, posGood = true) => {
-    if (v === null || v === undefined) return '';
-    if (v > 0) return posGood ? 'color:var(--green)' : 'color:var(--red)';
-    if (v < 0) return posGood ? 'color:var(--red)'   : 'color:var(--green)';
-    return '';
-  };
-
-  document.getElementById('sub-type-body').innerHTML = rows.map(r => `<tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:5px 10px;white-space:nowrap;font-weight:500">${r.type}</td>
-      <td style="padding:5px 10px;text-align:right;color:var(--muted)">${r.orders}</td>
-      <td style="padding:5px 10px;text-align:right">${fmt(r.revMo)}</td>
-      <td style="padding:5px 10px;text-align:right">${fmt(r.cogsMo)}</td>
-      <td style="padding:5px 10px;text-align:right;${cl(r.gpMo)}">${fmt(r.gpMo)}</td>
-      <td style="padding:5px 10px;text-align:right;${cl(r.gpPct)}">${r.gpPct!==null?r.gpPct.toFixed(1)+'%':'—'}</td>
-      <td style="padding:5px 10px;text-align:right">${r.shipColl!==null?fmt(r.shipColl):'—'}</td>
-      <td style="padding:5px 10px;text-align:right">${r.expShip!==null?fmt(r.expShip):'—'}</td>
-      <td style="padding:5px 10px;text-align:right">${r.ssCost!==null?fmt(r.ssCost):'—'}</td>
-      <td style="padding:5px 10px;text-align:right;${cl(r.shipLoss, false)}">${r.shipLoss!==null?fmt(r.shipLoss):'—'}</td>
-      <td style="padding:5px 10px;text-align:right;${cl(r.netGpMo)}">${fmt(r.netGpMo)}</td>
-      <td style="padding:5px 10px;text-align:right;${cl(r.netGpPct)}">${r.netGpPct!==null?r.netGpPct.toFixed(1)+'%':'—'}</td>
-    </tr>`).join('');
-}
-
 function renderSubView() {
-  const _s = l => (l.sku || '').toUpperCase();
-  subRows = filteredLines.filter(l => _s(l).startsWith('SUB') || _s(l).startsWith('GSUB'));
+  subRows = filteredLines.filter(l => isSubSku(l.sku) && (!subSkuFocus || String(l.sku).trim().toUpperCase() === subSkuFocus));
+  const focus = document.getElementById('sub-sku-focus');
+  if (focus) { focus.hidden = !subSkuFocus; document.getElementById('sub-sku-focus-label').textContent = subSkuFocus ? `SKU ${subSkuFocus}` : ''; }
   subRows.sort((a, b) => {
     let va = a[subSortKey], vb = b[subSortKey];
     if (va === null || va === undefined) va = subSortAsc ? Infinity : -Infinity;
@@ -3878,7 +3818,7 @@ function renderSubView() {
     return subSortAsc ? va - vb : vb - va;
   });
   subPage = 1;
-  renderSubTypeSummary();
+  renderSubPl();
   renderSubPage();
 }
 

@@ -130,3 +130,51 @@ test('CSV export of both tables', () => {
   assert.equal(vendors[0], 'Vendor,Orders,Collected,Paid,Net,Average paid per order,Measured');
   assert.equal(vendors[1], `${vendorName(MCG)},1,5.00,8.00,-3.00,8.00,yes`);
 });
+
+// ─── Order list behind the tables (Order detail → Shipping view) ──────────────────────────────────────
+import { shippingOrderRows, orderInRow, shippingOrdersCsv } from '../js/shippingBreakdown.js';
+
+function mixedLines() {
+  return [
+    ...order({ ship: { collected: 0, ss: 6.5 }, items: [{ store: MCG, revenue: 0, isSubRenewal: true }] }),
+    ...order({ ship: { collected: 5, ss: 8 }, items: [{ store: MCG, revenue: 30 }] }),
+    ...order({ ship: { collected: 9, ss: 7.25 }, items: [{ store: L2G, revenue: 30 }] }),
+    ...order({ cat: 'Pure HP Dropship', ship: { collected: 12, paid: 12, hp: 12, note: 'HPD pass-through (Shopify shipping)' }, items: [{ store: HPD }] }),
+    ...order({ cat: 'Mixed (17381 + HP Dropship)', ship: { collected: 15, paid: 15, ss: 8, hp: 7, note: 'Mixed HPD shipping (SS $8.00 + HPD pass-through $7.00)' }, items: [{ store: MCG }, { store: HPD }] }),
+    ...order({ ship: { collected: 10, ss: 12 }, items: [{ store: MCG, revenue: 20 }, { store: L2G, revenue: 20 }] }),
+    ...order({ ship: { collected: 6, paid: null, ss: 0, status: 'missing_shipstation_rate' }, items: [{ store: MCG, revenue: 30 }] }),
+    ...order({ ship: { collected: 8, paid: 8, lr: 8 }, items: [{ store: LR, revenue: 30 }] }),
+  ];
+}
+
+test('order rows: one per order; each table row equals the orders it holds (counts and measured amounts)', () => {
+  const lines = mixedLines();
+  const b = shippingBreakdown(lines), rows = shippingOrderRows(lines);
+  assert.equal(rows.length, b.total.orders);
+  const c = x => Math.round(x * 100);
+  assert.equal(rows.reduce((s, o) => s + c(o.net), 0), c(b.total.net), 'order nets add up to the total');
+  for (const [kind, tableRows] of [['causes', b.causes], ['vendors', b.vendors]]) {
+    for (const r of tableRows) {
+      const mine = rows.filter(o => orderInRow(o, kind, r.key));
+      assert.equal(mine.length, r.orders, `${kind} ${r.key}: orders`);
+      if (r.key === 'pass_through' || String(r.key).startsWith('pass:')) {
+        assert.equal(mine.reduce((s, o) => s + c(o.passThrough), 0), c(r.paid), `${kind} ${r.key}: pass-through amount`);
+      } else {
+        assert.equal(mine.reduce((s, o) => s + c(o.measuredCollected), 0), c(r.collected), `${kind} ${r.key}: collected`);
+        assert.equal(mine.reduce((s, o) => s + c(o.measuredPaid), 0), c(r.paid), `${kind} ${r.key}: paid`);
+      }
+    }
+  }
+  const pureHp = rows.find(o => o.cause === 'pass_through' && o.passVendors.includes(HPD));
+  assert.match(pureHp.vendorLabel, /not measured/);
+  const mixed = rows.find(o => o.vendorKey.startsWith('mixed:'));
+  assert.match(mixed.vendorLabel, /^Mixed, not split:/);
+  assert.equal(rows.filter(o => o.labelMissing).length, 1);
+});
+
+test('order rows CSV: header and one line per order', () => {
+  const rows = shippingOrderRows(mixedLines());
+  const csv = shippingOrdersCsv(rows).trim().split('\n');
+  assert.match(csv[0], /^Order,Date,Channel,Shipping vendor,Where the shipping net comes from,Collected,/);
+  assert.equal(csv.length, rows.length + 1);
+});

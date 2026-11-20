@@ -117,53 +117,116 @@ const row = () => ({ orders: 0, collected: 0, paid: 0 });
 const add = (m, key, part, extra = {}) => { const x = m.get(key) || m.set(key, { key, ...extra, ...row(), names: new Set() }).get(key); x.collected += part.collected; x.paid += part.paid; x.names.add(part.name); };
 const finish = x => { const { names, ...rest } = x; return { ...rest, orders: names.size, collected: dollars(x.collected), paid: dollars(x.paid), net: dollars(x.collected - x.paid) }; };
 
+/** Settings → { threshold, cutoffs } for causeOf. */
+function configOf(settings = {}) {
+  const s = { ...DEFAULT_POLICY_SETTINGS, ...settings };
+  return { threshold: Number(s.mcg_free_shipping_threshold),
+    cutoffs: Object.fromEntries(Object.entries(s.vendor_first_paid_shipping_dates || {}).map(([k, v]) => [toCode(k), v])) };
+}
+const passLabelOf = vendor => `${vendorName(vendor)} (pass-through, not measured)`;
+
+/**
+ * One order's shipping split into its parts (cents): pass-through parts ({ vendor, collected, paid }) and the measured
+ * part ({ collected, paid, cause, vendorKey, vendor, label }) or null when the order has none (pass-through only).
+ * The Shipping screen's tables and the order list are both built from this, so they always agree.
+ */
+function orderParts(r, cfg) {
+  const paid = r.paid ?? 0;
+  // Pass-through parts: their expense equals what the customer paid for them (never more than the order's).
+  const pass = [];
+  for (const [amount, vendor] of [[r.hpPass, HPD], [r.lrPass, LR]]) if (amount > 0) pass.push({ vendor, collected: amount, paid: amount });
+  const passTotal = pass.reduce((t, p) => t + p.paid, 0);
+  // Vendors whose labels make up the measured part: not the pass-through vendors.
+  const shipped = r.vendors.filter(v => !(v === HPD && r.hpRule) && !(v === LR && r.lrRule));
+  const passOnly = !shipped.length && (r.hpRule || r.lrRule);
+  if (passOnly && !pass.length) pass.push({ vendor: r.hpRule ? HPD : LR, collected: 0, paid: 0 });   // nothing charged: $0 by rule too
+  const m = { collected: r.collected - passTotal, paid: paid - passTotal };
+  const present = r.labelMissing || m.collected !== 0 || m.paid !== 0 || (!passTotal && !passOnly);
+  let measured = null;
+  if (present) {
+    const sorted = [...shipped].sort();
+    measured = { ...m, cause: causeOf(r, m, cfg),
+      vendorKey: shipped.length === 1 ? shipped[0] : shipped.length ? `mixed:${sorted.join('+')}` : 'none',
+      vendor: shipped.length === 1 ? shipped[0] : null,
+      label: shipped.length === 1 ? vendorName(shipped[0]) : shipped.length ? `Mixed, not split: ${sorted.map(vendorName).join(' + ')}` : 'No shipped items' };
+  }
+  return { pass, measured, paid };
+}
+
 /**
  * @param {object[]} lines     calculator-shape line items (the Shipping screen's)
  * @param {object} [settings]  { mcg_free_shipping_threshold, vendor_first_paid_shipping_dates } (shippingPolicy defaults)
  * @returns {{ causes: object[], vendors: object[], total: { orders, collected, paid, net } }} dollars; each table sums to total
  */
 export function shippingBreakdown(lines, settings = {}) {
-  const s = { ...DEFAULT_POLICY_SETTINGS, ...settings };
-  const cfg = { threshold: Number(s.mcg_free_shipping_threshold),
-    cutoffs: Object.fromEntries(Object.entries(s.vendor_first_paid_shipping_dates || {}).map(([k, v]) => [toCode(k), v])) };
+  const cfg = configOf(settings);
   const causes = new Map(), vendors = new Map();
   const total = { ...row(), names: new Set() };
   for (const r of shippingOrders(lines)) {
-    const paid = r.paid ?? 0;
-    // Pass-through parts: their expense equals what the customer paid for them (never more than the order's).
-    const pass = [];
-    for (const [amount, vendor] of [[r.hpPass, HPD], [r.lrPass, LR]]) if (amount > 0) pass.push({ name: r.name, vendor, collected: amount, paid: amount });
-    const passTotal = pass.reduce((t, p) => t + p.paid, 0);
-    const measured = { name: r.name, collected: r.collected - passTotal, paid: paid - passTotal };
+    const { pass, measured, paid } = orderParts(r, cfg);
     for (const p of pass) {
-      add(causes, 'pass_through', p);
-      add(vendors, `pass:${p.vendor}`, p, { vendor: p.vendor, label: `${vendorName(p.vendor)} (pass-through, not measured)`, measured: false });
+      const part = { name: r.name, collected: p.collected, paid: p.paid };
+      add(causes, 'pass_through', part);
+      add(vendors, `pass:${p.vendor}`, part, { vendor: p.vendor, label: passLabelOf(p.vendor), measured: false });
     }
-    // Vendors whose labels make up the measured part: not the pass-through vendors.
-    const shipped = r.vendors.filter(v => !(v === HPD && r.hpRule) && !(v === LR && r.lrRule));
-    const passOnly = !shipped.length && (r.hpRule || r.lrRule);
-    if (passOnly && !pass.length) {                           // pass-through order with nothing charged: $0 by rule too
-      const vendor = r.hpRule ? HPD : LR, p = { name: r.name, collected: 0, paid: 0 };
-      add(causes, 'pass_through', p);
-      add(vendors, `pass:${vendor}`, p, { vendor, label: `${vendorName(vendor)} (pass-through, not measured)`, measured: false });
-    }
-    const measuredPresent = r.labelMissing || measured.collected !== 0 || measured.paid !== 0 || (!pass.length && !passOnly);
-    if (measuredPresent) {
-      add(causes, causeOf(r, measured, cfg), measured);
-      const key = shipped.length === 1 ? shipped[0] : shipped.length ? `mixed:${[...shipped].sort().join('+')}` : 'none';
-      const label = shipped.length === 1 ? vendorName(shipped[0])
-        : shipped.length ? `Mixed, not split: ${[...shipped].sort().map(vendorName).join(' + ')}` : 'No shipped items';
-      add(vendors, key, measured, { vendor: shipped.length === 1 ? shipped[0] : null, label, measured: true, labelMissing: r.labelMissing });
+    if (measured) {
+      const part = { name: r.name, collected: measured.collected, paid: measured.paid };
+      add(causes, measured.cause, part);
+      add(vendors, measured.vendorKey, part, { vendor: measured.vendor, label: measured.label, measured: true, labelMissing: r.labelMissing });
     }
     total.collected += r.collected; total.paid += paid; total.names.add(r.name);
   }
-  const order = new Map(CAUSES.map((c, i) => [c.key, i]));
   const passLabel = `Pass-through: ${vendorName(HPD)} and ${vendorName(LR)} (not measured, $0 by rule)`;   // names from the private legend
+  const order = new Map(CAUSES.map((c, i) => [c.key, i]));
   const causeRows = [...causes.values()].map(finish).map(x => ({ ...x, label: x.key === 'pass_through' ? passLabel : CAUSE_LABEL[x.key] }))
     .sort((a, b) => order.get(a.key) - order.get(b.key));
   const vendorRows = [...vendors.values()].map(finish).map(x => ({ ...x, avgPaid: x.orders ? Math.round(x.paid / x.orders * 100) / 100 : 0 }))
     .sort((a, b) => (a.measured === b.measured ? b.paid - a.paid : a.measured ? -1 : 1));
   return { causes: causeRows, vendors: vendorRows, total: finish(total) };
+}
+
+/**
+ * One row per order with its shipping (dollars), for the order list behind the Shipping screen's tables:
+ *   { order, date, channel, category, collected, paid, net, measuredCollected, measuredPaid, measuredNet, passThrough,
+ *     cause, causeLabel, vendorKey, vendorLabel, passVendors: [codes], labelMissing }
+ * cause / vendorKey are the measured part's (the row it sits in in each table); an order with only pass-through
+ * shipping has cause 'pass_through' and vendorKey 'pass:<code>'. Its pass-through vendors are in passVendors, so a
+ * filter on a pass-through table row finds every order that has that pass-through part.
+ */
+export function shippingOrderRows(lines, settings = {}) {
+  const cfg = configOf(settings);
+  const passLabel = `Pass-through: ${vendorName(HPD)} and ${vendorName(LR)} (not measured, $0 by rule)`;
+  return shippingOrders(lines).map(r => {
+    const { pass, measured, paid } = orderParts(r, cfg);
+    const passAmt = pass.reduce((t, p) => t + p.paid, 0);
+    const first = pass[0]?.vendor;
+    return {
+      order: r.name, date: r.date, channel: r.channel, category: r.category,
+      collected: dollars(r.collected), paid: dollars(paid), net: dollars(r.collected - paid),
+      measuredCollected: measured ? dollars(measured.collected) : 0, measuredPaid: measured ? dollars(measured.paid) : 0,
+      measuredNet: measured ? dollars(measured.collected - measured.paid) : 0, passThrough: dollars(passAmt),
+      cause: measured ? measured.cause : 'pass_through', causeLabel: measured ? CAUSE_LABEL[measured.cause] : passLabel,
+      vendorKey: measured ? measured.vendorKey : `pass:${first}`, vendorLabel: measured ? measured.label : passLabelOf(first),
+      passVendors: pass.map(p => p.vendor), labelMissing: r.labelMissing,
+    };
+  });
+}
+
+/** Does an order row belong to a table row? kind 'causes' | 'vendors', key as in shippingBreakdown's rows. */
+export function orderInRow(o, kind, key) {
+  if (kind === 'causes') return key === 'pass_through' ? o.passVendors.length > 0 || o.cause === 'pass_through' : o.cause === key;
+  if (String(key).startsWith('pass:')) return o.passVendors.includes(key.slice(5));
+  return o.vendorKey === key;
+}
+
+/** CSV of order rows (the Shipping view). */
+export function shippingOrdersCsv(rows) {
+  const q = v => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+  const head = ['Order', 'Date', 'Channel', 'Shipping vendor', 'Where the shipping net comes from', 'Collected', 'Paid (label + pass-through)', 'Net',
+                'Pass-through (not measured)', 'Label cost in'];
+  const body = rows.map(o => [o.order, o.date, o.channel, o.vendorLabel, o.causeLabel, o.collected.toFixed(2), o.paid.toFixed(2), o.net.toFixed(2),
+                              o.passThrough.toFixed(2), o.labelMissing ? 'no' : 'yes'].map(q).join(','));
+  return [head.join(','), ...body].join('\n') + '\n';
 }
 
 /** CSV text for one of the two tables (rows as returned by shippingBreakdown). */
