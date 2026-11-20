@@ -544,25 +544,64 @@ const money = n => (n === null || n === undefined || Number.isNaN(n)) ? '—'
   : (n < 0 ? '-' : '') + '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 /**
- * Load a period's stored rows: each planned week's latest published revision, part by part.
- * `client`: { snapshot(week), reportPart(week, k, snapshotId), weekStatus?(week) }. Bounded: ≤ 40 orders
- * per request, a few requests in flight. → { plan, weeks: [{ weekStart, snapshotId, revision, head, orders, lines }] }
+ * Load a period's stored rows: each planned week's readable revision, part by part.
+ * `client`: { snapshot(week, prov), reportPart(week, k, snapshotId, prov), reportParts?(week, from, count, snapshotId, prov) }.
+ * All weeks load at once: the heads in parallel, then every week's parts through ONE pool of `concurrency` requests.
+ * With `reportParts` (GET /report-parts, ≤ 8 parts per request) a month opens in a few requests; a Worker without that
+ * route (404/400) makes the loader use single parts for the rest of the call. `cache` (a Map, optional) keeps loaded
+ * weeks by snapshot id: a revision change gives a new id, so a cached week is never stale; the newest `cacheMax`
+ * weeks are kept. → { plan, weeks: [{ weekStart, snapshotId, revision, head, orders, lines, ... }] } in plan order.
  */
-export async function loadPeriod(client, plan, { concurrency = 4 } = {}) {
-  const weeks = [];
-  for (const w of plan.weeks) {
-    // A provisional plan reads unpublished weeks with ?provisional=1; the Worker still answers a published
-    // revision whenever the week has one (it may have been published since the list was read).
-    const prov = !!plan.provisional;
-    const head = await client.snapshot(w.weekStart, prov);
-    const first = await client.reportPart(w.weekStart, 0, head.snapshotId, prov);
-    const parts = [first];
-    const ks = Array.from({ length: Math.max(0, first.parts - 1) }, (_, i) => i + 1);
-    for (let i = 0; i < ks.length; i += concurrency)
-      parts.push(...await Promise.all(ks.slice(i, i + concurrency).map(k => client.reportPart(w.weekStart, k, head.snapshotId, prov))));
-    weeks.push({ weekStart: w.weekStart, snapshotId: head.snapshotId, revision: head.revision, head, days: w.days,
+export const PARTS_PER_REQUEST = 8;
+export async function loadPeriod(client, plan, { concurrency = 8, cache = null, cacheMax = 16 } = {}) {
+  // A provisional plan reads unpublished weeks with ?provisional=1; the Worker still answers a published
+  // revision whenever the week has one (it may have been published since the list was read).
+  const prov = !!plan.provisional;
+  const heads = await Promise.all(plan.weeks.map(w => client.snapshot(w.weekStart, prov)));
+  let bundles = typeof client.reportParts === 'function';
+  const pool = []; let running = 0;
+  const run = fn => new Promise((resolve, reject) => {
+    const go = () => { running++; fn().then(resolve, reject).finally(() => { running--; const next = pool.shift(); if (next) next(); }); };
+    if (running < concurrency) go(); else pool.push(go);
+  });
+  // Parts from..from+count-1 of one week → [{ part, parts, o, l, skuVendors? }].
+  const fetchParts = async (week, from, count, id) => {
+    if (bundles) {
+      try {
+        const r = await run(() => client.reportParts(week, from, count, id, prov));
+        return (r.items || []).map(it => ({ ...it, parts: r.parts }));
+      } catch (e) {
+        if (!(e && (e.status === 404 || e.status === 400) && e.code !== 'part_unknown' && e.code !== 'week_unknown')) throw e;
+        bundles = false;                                  // this Worker has no bundled route: single parts from now on
+      }
+    }
+    // Single parts. The first one gives the part count, so nothing past the last part is asked for.
+    const first = await run(() => client.reportPart(week, from, id, prov)).then(r => ({ ...r, part: from }));
+    const ks = [];
+    for (let k = from + 1; k < Math.min(from + count, first.parts ?? 0); k++) ks.push(k);
+    return [first, ...await Promise.all(ks.map(k => run(() => client.reportPart(week, k, id, prov)).then(r => ({ ...r, part: k }))))];
+  };
+  const loadWeek = async (w, head) => {
+    const hit = cache?.get(head.snapshotId);
+    if (hit) { cache.delete(head.snapshotId); cache.set(head.snapshotId, hit); return hit; }
+    const first = await fetchParts(w.weekStart, 0, bundles ? PARTS_PER_REQUEST : 1, head.snapshotId);
+    const n = first[0]?.parts ?? 0;
+    const got = [...first];
+    const rest = [];
+    for (let k = got.length; k < n; k += bundles ? PARTS_PER_REQUEST : 1) rest.push(fetchParts(w.weekStart, k, Math.min(bundles ? PARTS_PER_REQUEST : 1, n - k), head.snapshotId));
+    for (const r of await Promise.all(rest)) got.push(...r);
+    got.sort((a, b) => a.part - b.part);
+    const rows = { orders: got.flatMap(p => p.o?.orders || []), lines: got.flatMap(p => p.l?.lines || []), skuVendors: got[0]?.skuVendors || {} };
+    if (cache) { cache.set(head.snapshotId, rows); while (cache.size > cacheMax) cache.delete(cache.keys().next().value); }
+    return rows;
+  };
+  const loaded = await Promise.all(plan.weeks.map((w, i) => loadWeek(w, heads[i])));
+  if (cache) while (cache.size > cacheMax) cache.delete(cache.keys().next().value);
+  const weeks = plan.weeks.map((w, i) => {
+    const head = heads[i];
+    return { weekStart: w.weekStart, snapshotId: head.snapshotId, revision: head.revision, head, days: w.days,
       provisional: head.status !== 'published' && !!head.provisional, hold: head.provisional ? (head.hold || []) : [],
-      orders: parts.flatMap(p => p.o?.orders || []), lines: parts.flatMap(p => p.l?.lines || []), skuVendors: first.skuVendors || {} });
-  }
+      orders: loaded[i].orders, lines: loaded[i].lines, skuVendors: loaded[i].skuVendors };
+  });
   return { plan, weeks };
 }

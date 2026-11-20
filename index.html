@@ -20,6 +20,7 @@
 <link rel="modulepreload" href="./shared/catalog.js">
 <link rel="modulepreload" href="./js/scenarioUI.js">
 <link rel="modulepreload" href="./js/workerClient.js">
+<link rel="modulepreload" href="./js/costTables.js">
 <link rel="modulepreload" href="./js/apsModel.js">
 <link rel="modulepreload" href="./shared/apsMapping.js">
 <link rel="modulepreload" href="./js/weeklyReports.js">
@@ -1575,7 +1576,8 @@ import { toCsvText } from './shared/adapters/shopifyCsv.js';
 import { unmatchedShippingOrders, exportPeriodOf, shippingCostBridge, filterUnmatched, unmatchedCsv, UNMATCHED_REASON, EXCLUDED_PENDING_MATCH } from './js/unmatchedShipping.js';
 import { catalogRevOf } from './shared/catalog.js';
 import { initScenarioView, renderScenarioView, scenarioCurrentActual } from './js/scenarioUI.js';
-import { automationStatus, snapshot as apiSnapshot, reportPart as apiReportPart, weekStatus as apiWeekStatus, apsInput as apiApsInput, weeks as apiWeeks } from './js/workerClient.js';
+import { createCostTableLoader, MCG_EXTRA } from './js/costTables.js';
+import { automationStatus, snapshot as apiSnapshot, reportPart as apiReportPart, reportParts as apiReportParts, weekStatus as apiWeekStatus, apsInput as apiApsInput, weeks as apiWeeks } from './js/workerClient.js';
 import { apsOrders, apsCoverage, mergeApsInputs, apsProjection, apsExclusions, apsDiscount, csvApsCosts } from './js/apsModel.js';
 import { buildApsMap } from './shared/apsMapping.js';
 import { createWeeklyReports, reportFlagsText, failureMessage as reportFailure } from './js/weeklyReports.js';
@@ -1768,22 +1770,35 @@ const GAP_TEXT = { gate_failed: 'held by the publication checks', compute_pendin
   verification_mismatch: 'verification found a difference', shipping_report_partial: 'shipping cost report incomplete', week_open: 'week not finished',
   shopify_export_pending: 'orders not collected yet' };
 
+// Loaded weeks by snapshot id for this tab (memory only, never stored on disk): reopening a report, or switching between
+// a month and its weeks, reads no parts again. A new revision has a new snapshot id, so nothing cached is ever stale.
+const _periodCache = new Map();
+// Cost tables for scenarios: the same for every saved report in this tab, loaded in parallel with the report.
+// js/costTables.js keeps a table that loaded (also an empty one) and never one whose request failed: a failed
+// table is asked for again by the next report open.
+const _costLoader = createCostTableLoader();
+
 async function openStoredReport(kind, key, weekList, { provisional = false } = {}) {
   const switching = !!storedState;
   showLoading(kind === 'week' ? `Loading the week of ${key}…` : `Loading ${periodLabel(kind, key)}…`);
   try {
     const plan = SR.periodPlan(kind, key, weekList, { provisional });
     if (!plan.weeks.length) throw Object.assign(new Error(plan.provisional ? 'No published or verified week covers these dates.' : 'No published week covers this period.'), { status: 0 });
-    // Why each missing week is missing (codes only), and each included week's report flags.
-    await Promise.all(plan.gaps.filter(g => g.reason === 'not_published').map(async g => {
+    const costsP = _costLoader.all();
+    const mcgExtraP = _costLoader.one(MCG_EXTRA);                        // not awaited: scenarios pick it up when it arrives
+    // Everything below runs at once: the weeks' parts (one request pool), each included week's status (report
+    // flags), why each missing week is missing (codes only), and the APS input.
+    const client = { snapshot: (w, p) => apiSnapshot(w, { provisional: p }), reportPart: (w, k, id, p) => apiReportPart(w, k, id, { provisional: p }),
+                     reportParts: (w, from, count, id, p) => apiReportParts(w, from, count, id, { provisional: p }) };
+    const gapsP = Promise.all(plan.gaps.filter(g => g.reason === 'not_published').map(async g => {
       let st = null;
       try { st = await apiWeekStatus(g.weekStart); } catch { /* reason from the week list only */ }
       const why = SR.gapReason(g, weekList, st, GAP_TEXT);
       if (why) g.detail = why;
     }));
-    const client = { snapshot: (w, p) => apiSnapshot(w, { provisional: p }), reportPart: (w, k, id, p) => apiReportPart(w, k, id, { provisional: p }) };
-    const data = await SR.loadPeriod(client, plan);
-    const statuses = await Promise.all(data.weeks.map(w => apiWeekStatus(w.weekStart).catch(() => null)));
+    const statusesP = Promise.all(plan.weeks.map(w => apiWeekStatus(w.weekStart).catch(() => null)));
+    const apsP = Promise.all(plan.weeks.map(w => apiApsInput(w.weekStart))).then(parts => ({ parts }), e => ({ error: e }));
+    const [data, statuses, apsParts] = await Promise.all([SR.loadPeriod(client, plan, { cache: _periodCache }), statusesP, apsP, gapsP]);
     const agg = SR.aggregate(data.weeks, plan.period);
     const inPeriod = o => o.business_date >= plan.period.from && o.business_date <= plan.period.to && o.business_date >= SR.PUBLICATION_EARLIEST;
     const lines = data.weeks.flatMap(w => {
@@ -1797,8 +1812,8 @@ async function openStoredReport(kind, key, weekList, { provisional = false } = {
     const disc = SR.disclosures({ plan, totals: agg.totals, weekInfo });
     let aps;
     try {
-      const parts = await Promise.all(plan.weeks.map(w => apiApsInput(w.weekStart)));
-      const merged = mergeApsInputs(parts);
+      if (apsParts.error) throw apsParts.error;
+      const merged = mergeApsInputs(apsParts.parts);
       const days = plan.weeks.flatMap(w => [w.days.from, w.days.to]).sort();
       aps = { ...merged, coverage: apsCoverage({ from: days[0], to: days[days.length - 1] }, merged.versions) };
     } catch (e) {
@@ -1809,12 +1824,15 @@ async function openStoredReport(kind, key, weekList, { provisional = false } = {
     allLines = lines;
     // Inputs only a CSV upload provides are cleared, never carried over from an earlier upload in this tab.
     apsShipCosts = new Map(); hpdData = null; c3Preview = null; csvAps = null;
-    const [mcgT, prodT, hpSupp, sbT, hpByNameT, aliasT, vcT, viT, packT] = await Promise.all(['mcg_total', 'product_costs', 'hp_supplement', 'sb_costs',
-      'hp_by_name', 'sku_alias', 'vendor_costs', 'vendor_index', 'mcg_pack'].map(n => loadSiteTable(`${n}.json`, { orNull: n === 'mcg_pack' })));
-    const mcgExtraT = await fetchMcgExtraCosts().catch(() => ({}));
+    const { tables: ct, failed: costFailed } = await costsP;
+    if (costFailed.length) console.warn(`Cost tables not loaded (asked for again when the next report opens): ${costFailed.join(', ')}`);
+    const { mcg_total: mcgT, product_costs: prodT, hp_supplement: hpSupp, sb_costs: sbT, hp_by_name: hpByNameT, sku_alias: aliasT,
+            vendor_costs: vcT, vendor_index: viT, mcg_pack: packT } = ct;
     _projMcgCosts = mcgT; _projProductCosts = prodT; _projAdditionalCosts = { ...hpSupp, ...sbT }; _projHpByName = hpByNameT; _projSkuAlias = aliasT;
-    _costTables = { mcgCosts: mcgT, productCosts: prodT, additionalCosts: { ...hpSupp, ...sbT }, hpByName: hpByNameT, skuAlias: aliasT, mcgExtra: mcgExtraT,
-                    vendorCosts: Object.keys(vcT).length ? vcT : null, vendorIndex: Object.keys(viT).length ? viT : null, mcgPack: packT };
+    const tables = { mcgCosts: mcgT, productCosts: prodT, additionalCosts: { ...hpSupp, ...sbT }, hpByName: hpByNameT, skuAlias: aliasT, mcgExtra: {},
+                     vendorCosts: Object.keys(vcT).length ? vcT : null, vendorIndex: Object.keys(viT).length ? viT : null, mcgPack: packT };
+    _costTables = tables;
+    mcgExtraP.then(r => { if (r.ok) tables.mcgExtra = r.value || {}; });   // the same object: scenarios read it when they run
     initScenarioView(document.getElementById('view-scenario'), () => allLines);
     showReportShell(kind === 'week' ? `Week of ${key} (Mon–Sun, Los Angeles time)` : `${periodLabel(kind, key)} (Los Angeles time)`, plan.period);
     window.closeStoredRange();
@@ -1825,10 +1843,6 @@ async function openStoredReport(kind, key, weekList, { provisional = false } = {
     console.error(e);
   }
   hideLoading();
-}
-
-async function loadSiteTable(name, { orNull = false } = {}) {
-  try { const r = await fetch('./data/' + name); return r.ok ? await r.json() : (orNull ? null : {}); } catch { return orNull ? null : {}; }
 }
 
 /** Render the dashboard shell for the current allLines (CSV or automatic) and switch to it. */

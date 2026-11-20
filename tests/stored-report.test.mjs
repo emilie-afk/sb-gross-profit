@@ -175,6 +175,52 @@ test('report-part route: bounded parts, published only for readers, pinned revis
   assert.deepEqual([noDrafts.status, noDrafts.json.error], [404, 'week_unknown']);
 });
 
+test('loadPeriod: weeks load together; bundled parts when the client has them, single parts otherwise; a snapshot-id cache', async () => {
+  const env = run.env;
+  const plan = SR.periodPlan('range', `${rows[0].weekStart}_${SR.addDays(rows[1].weekStart, 6)}`,
+    rows.map(r => ({ weekStart: r.weekStart, revisions: [{ revision: r.revision, status: 'published', snapshotId: r.snapshotId }] })), { earliest: '2000-01-03' });
+  let single = 0, bundled = 0;
+  const one = async (week, k, id) => {
+    const r = await api(env, 'GET', `/v1/snapshot/${week}/report-part/${k}${Q}&snapshot=${id}`);
+    if (r.status !== 200) throw Object.assign(new Error(r.json?.message || 'error'), { status: r.status, code: r.json?.error });
+    return r.json;
+  };
+  const base = { snapshot: async week => (await api(env, 'GET', `/v1/snapshot/${week}${Q}`)).json,
+                 reportPart: async (week, k, id) => { single++; return one(week, k, id); } };
+  // A bundled client built from single parts (the shape GET /report-parts answers).
+  const withBundles = { ...base, reportParts: async (week, from, count, id) => {
+    bundled++;
+    const first = await one(week, from, id);
+    const items = [first];
+    for (let k = from + 1; k < Math.min(from + count, first.parts); k++) items.push(await one(week, k, id));
+    return { snapshotId: id, parts: first.parts, from, items: items.map((r, i) => ({ part: from + i, o: r.o, l: r.l, ...(r.skuVendors ? { skuVendors: r.skuVendors } : {}) })) };
+  } };
+  const a = await SR.loadPeriod(base, plan);
+  const before = single;
+  assert.equal(before, rows[0].parts.length + rows[1].parts.length, 'one request per part, none past the last');
+  assert.ok(rows.some(r => r.parts.length < 8), 'a week with fewer parts than one bundle');
+  const b = await SR.loadPeriod(withBundles, plan);
+  assert.equal(single, before, 'no single-part requests when bundles answer');
+  assert.ok(bundled > 0 && bundled < before);
+  assert.deepEqual(b.weeks.map(w => [w.weekStart, w.orders, w.lines, w.skuVendors]), a.weeks.map(w => [w.weekStart, w.orders, w.lines, w.skuVendors]));
+  const missing = { ...base, reportParts: async () => { throw Object.assign(new Error('No such route'), { status: 404, code: 'not_found' }); } };
+  single = 0;
+  const c = await SR.loadPeriod(missing, plan);
+  assert.deepEqual(c.weeks.map(w => [w.orders, w.lines]), a.weeks.map(w => [w.orders, w.lines]), 'a Worker without the route: single parts');
+  assert.equal(single, before, 'the fallback asks for no part past the last');
+  const refused = { ...base, reportParts: async () => { throw Object.assign(new Error('changed'), { status: 409, code: 'snapshot_changed' }); } };
+  await assert.rejects(SR.loadPeriod(refused, plan), e => e.status === 409, 'other errors are not hidden');
+  const cache = new Map();
+  await SR.loadPeriod(withBundles, plan, { cache });
+  const n = bundled;
+  const again = await SR.loadPeriod(withBundles, plan, { cache });
+  assert.equal(bundled, n, 'cached weeks read no parts again');
+  assert.deepEqual(again.weeks.map(w => w.orders), a.weeks.map(w => w.orders));
+  assert.equal(cache.size, 2);
+  await SR.loadPeriod(withBundles, plan, { cache, cacheMax: 1 });
+  assert.equal(cache.size, 1, 'bounded');
+});
+
 // ─── Refunds (js/refunds.js): already in the figures, read and grouped, never subtracted again ─────
 
 test('refunds from stored weeks: per-order amounts are the stored line shares; filters partition the orders; totals unchanged', () => {

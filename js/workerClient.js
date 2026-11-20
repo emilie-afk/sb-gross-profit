@@ -47,5 +47,11 @@ export const automationStatus = (weekStart, o) => workerApi(`/automation/status$
  */
 export const reportPart = (weekStart, k, snapshotId, { provisional = false, ...o } = {}) =>
   workerApi(`/snapshot/${weekStart}/report-part/${Number(k) || 0}${snapshotId ? `?snapshot=${encodeURIComponent(snapshotId)}${pq(provisional, '&')}` : pq(provisional)}`, o);
+/**
+ * Parts from … from+count-1 (count ≤ 8) of a week's stored results in one request (GET /report-parts), pinned to
+ * `snapshotId`. A Worker without the route answers 404; js/storedReport.js loadPeriod then uses reportPart.
+ */
+export const reportParts = (weekStart, from, count, snapshotId, { provisional = false, ...o } = {}) =>
+  workerApi(`/snapshot/${weekStart}/report-parts?from=${Number(from) || 0}&count=${Number(count) || 1}${snapshotId ? `&snapshot=${encodeURIComponent(snapshotId)}` : ''}${pq(provisional, '&')}`, o);
 /** APS scenario input for a published week (the line-item export's per-order mapping; separate from results). */
 export const apsInput = (weekStart, o) => workerApi(`/aps/${weekStart}`, o);
