@@ -429,6 +429,63 @@ export async function reportPart(request, env, reader, weekStart, k) {
   return jsonText(`${head(n)},"o":${JSON.stringify({ orders })},"l":${JSON.stringify({ lines })}${vendors ? `,"skuVendors":${JSON.stringify(vendors)}` : ''}}`);
 }
 
+/**
+ * GET /v1/snapshot/:week/report-parts?from=k&count=n[&snapshot=<id>] — parts k … k+n-1 (n ≤ REPORT_PARTS_MAX) of the
+ * week's readable snapshot in ONE response, so a month opens in a few requests instead of one per 40 orders. Same
+ * rules as report-part (readable revision, pinned snapshot, 409 snapshot_changed); parts past the last are left out.
+ * Collector-computed weeks: the stored part text is concatenated as is (nothing parsed). Reads: the snapshot row,
+ * the part count and the 2n (+1) part rows in one batch.
+ * Body: { snapshotId, weekStart, revision, from, parts, items: [{ part, o: { orders }, l: { lines }, skuVendors? }] }.
+ */
+export const REPORT_PARTS_MAX = 8;
+export async function reportParts(request, env, reader, weekStart) {
+  const url = new URL(request.url);
+  const from = Number(url.searchParams.get('from') ?? 0), count = Number(url.searchParams.get('count') ?? REPORT_PARTS_MAX);
+  if (!Number.isInteger(from) || from < 0 || from > 9999 || !Number.isInteger(count) || count < 1 || count > REPORT_PARTS_MAX)
+    throw new ApiError(400, 'bad_query', `from must be 0–9999 and count 1–${REPORT_PARTS_MAX}`);
+  const s = await pickSnapshot(env.DB, weekStart, url, reader, env);
+  const pin = url.searchParams.get('snapshot');
+  if (pin && pin !== s.snapshot_id) throw new ApiError(409, 'snapshot_changed', 'The week has a newer readable revision; reload the report');
+  const head = n => `{"snapshotId":${JSON.stringify(s.snapshot_id)},"weekStart":${JSON.stringify(s.week_start)},"revision":${Number(s.revision)},"from":${from},"parts":${n}`;
+  if (s.storage !== 'chunked') {
+    // Worker-computed weeks (rows): each part as report-part builds it.
+    const items = [];
+    let n = null;
+    for (let k = from; k < from + count; k++) {
+      let r;
+      try { r = JSON.parse(await (await reportPart(new Request(`${url.origin}/x?snapshot=${s.snapshot_id}${url.searchParams.get('provisional') ? '&provisional=1' : ''}${url.searchParams.get('includeDrafts') ? '&includeDrafts=1' : ''}`), env, reader, weekStart, k)).text()); }
+      catch (e) { if (e?.code === 'part_unknown') break; throw e; }
+      n = r.parts;
+      items.push({ part: k, o: r.o, l: r.l, ...(r.skuVendors ? { skuVendors: r.skuVendors } : {}) });
+    }
+    if (n === null) n = Math.ceil(((await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshot_order WHERE snapshot_id = ?1').bind(s.snapshot_id).first())?.n || 0) / ORDERS_PER_PART);
+    if (from >= n) throw new ApiError(404, 'part_unknown', `This snapshot has ${n} order parts`);
+    return jsonText(`${head(n)},"items":${JSON.stringify(items)}}`);
+  }
+  const ks = Array.from({ length: count }, (_, i) => from + i);
+  const names = ks.flatMap(k => [`orders:${k}`, `lines:${k}`]).concat(from === 0 ? ['sections'] : []);
+  const [cnt, rows] = await env.DB.batch([
+    env.DB.prepare("SELECT COUNT(*) AS n FROM snapshot_blob WHERE snapshot_id = ?1 AND part >= 'orders:' AND part < 'orders;'").bind(s.snapshot_id),
+    env.DB.prepare('SELECT part, body_text, CASE WHEN body_text IS NULL THEN body END AS body FROM snapshot_blob WHERE snapshot_id = ?1 AND part IN (SELECT value FROM json_each(?2))')
+      .bind(s.snapshot_id, JSON.stringify(names)),
+  ]);
+  const n = cnt.results?.[0]?.n || 0;
+  if (from >= n) throw new ApiError(404, 'part_unknown', `This snapshot has ${n} order parts`);
+  const byName = new Map((rows.results || []).map(r => [r.part, r]));
+  const text = async name => {
+    const r = byName.get(name);
+    if (!r) throw new ApiError(500, 'snapshot_part_missing', 'A stored part of this snapshot is missing');
+    return r.body_text ?? await gunzipCapped(blobBytes(r.body), PART_CAP);
+  };
+  const items = [];
+  for (const k of ks) {
+    if (k >= n) break;
+    const vendors = k === 0 ? skuVendors(JSON.parse(await text('sections')).breakdowns) : null;
+    items.push(`{"part":${k},"o":${await text(`orders:${k}`)},"l":${await text(`lines:${k}`)}${vendors ? `,"skuVendors":${JSON.stringify(vendors)}` : ''}}`);
+  }
+  return jsonText(`${head(n)},"items":[${items.join(',')}]}`);
+}
+
 /** SKU breakdown rows → { normalized SKU: vendor } (the vendor each SKU was reported under; a SKU under two vendors is left out). */
 function skuVendors(breakdowns) {
   const m = new Map();

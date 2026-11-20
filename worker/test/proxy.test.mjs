@@ -142,6 +142,9 @@ test('one sign-in: a valid gate session reads published weeks; anything else rea
   const part = await get(`/snapshot/${WEEK}/report-part/0`, withGate);
   assert.deepEqual([part.status, (await part.json()).error], [404, 'not_published']);
   assert.equal((await get(`/snapshot/${WEEK}/report-part/x`, withGate)).status, 404);
+  const parts = await get(`/snapshot/${WEEK}/report-parts?from=0&count=8`, withGate);
+  assert.deepEqual([parts.status, (await parts.json()).error], [404, 'not_published'], 'bundled parts reach the Worker, published only');
+  assert.equal((await get(`/snapshot/${WEEK}/report-parts/0`, withGate)).status, 404);
 
   // Not signed in: no cookie, a forged one, the old sha256(password) cookie, an expired, wrong-epoch or foreign-key token,
   // or the reader secret sent by a browser. Nothing is forwarded at all.
