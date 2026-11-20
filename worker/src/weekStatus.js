@@ -30,6 +30,8 @@ export const PENDING_LABELS = Object.freeze({
   verification_unavailable: 'Verification could not run yet; it will be retried',
   verification_mismatch: 'Verification found differences; the draft stays provisional',
 });
+/** Attention only (never a reason to wait): ShipStation's sign-in on the reporting laptop needs a person. */
+export const SHIPSTATION_SIGNIN_LABEL = 'ShipStation needs a person to sign in on the reporting laptop: shipping costs for orders shipped since the last report cannot be collected until then.';
 
 export async function weekStatus(db, weekStart, now = new Date()) {
   const s = await getSettings(db);
@@ -49,6 +51,12 @@ export async function weekStatus(db, weekStart, now = new Date()) {
   if (!shopifyAfterClose && signInNeeded) pending.push('shopify_signin_required');
   if (!shopifyAfterClose) pending.push('shopify_export_pending');
   const basis = await scrBasis(db, weekStart, win.endUtcExclusive);
+  // ShipStation's sign-in needs a person: shown until a Shipping Cost Report arrives after it (or "signed in").
+  const ssSignIn = await db.prepare(`SELECT status, detail, at FROM automation_event WHERE week_start = ?1 AND step = ?2 ORDER BY at DESC LIMIT 1`)
+    .bind(weekStart, SS_SIGNIN_STEP).first();
+  const ssReportAfter = ssSignIn?.status === 'needs_person'
+    ? await db.prepare('SELECT 1 AS r FROM scr_version WHERE imported_at >= ?1 LIMIT 1').bind(ssSignIn.at).first() : null;
+  const ssSignInNeeded = ssSignIn?.status === 'needs_person' && !ssReportAfter;
   // The newest automatically rejected version covering the week (failed automated checks), if any.
   const bad = await db.prepare(`SELECT version_id, imported_at, json_extract(outcome, '$.invalidReasons') AS reasons FROM scr_version
       WHERE status = 'rejected' AND requested_from <= ?2 AND requested_to >= ?1 AND json_extract(outcome, '$.automatic') = 1 ORDER BY imported_at DESC LIMIT 1`).bind(weekStart, weekEnd).first();
@@ -96,7 +104,10 @@ export async function weekStatus(db, weekStart, now = new Date()) {
     label: published ? 'Verified and published (provisional)' : verified ? 'Verified draft (not published)' : PENDING_LABELS[pending[0]],
     pending: pending.map(code => ({ code, label: PENDING_LABELS[code] })),
     ...(signInNeeded && !shopifyAfterClose ? { attention: { code: 'shopify_signin_required', since: signIn.at, authState: JSON.parse(signIn.detail || '{}').authState || null,
-                                                            label: PENDING_LABELS.shopify_signin_required } } : {}),
+                                                            label: PENDING_LABELS.shopify_signin_required } }
+      : ssSignInNeeded ? { attention: { code: 'shipstation_signin_required', since: ssSignIn.at, authState: JSON.parse(ssSignIn.detail || '{}').authState || null,
+                                        label: SHIPSTATION_SIGNIN_LABEL } } : {}),
+    ...(ssSignInNeeded ? { shipStationSignIn: { since: ssSignIn.at, authState: JSON.parse(ssSignIn.detail || '{}').authState || null } } : {}),
     sources: { shopifyReceivedAt: shop?.sealed_at || null,
                shippingReport: { status: basis.basisStatus, label: basis.label || null, newerPending: (basis.newerPending || []).length,
                                  flags: reportFlags, changedDates, omittedDates,
@@ -108,25 +119,29 @@ export async function weekStatus(db, weekStart, now = new Date()) {
 }
 
 export const SIGNIN_STEP = 'collector:shopify_signin';
+export const SS_SIGNIN_STEP = 'collector:shipstation_signin';
 const SIGNIN_STATUSES = new Set(['needs_person', 'signed_in']);
-const SIGNIN_AUTH_STATES = new Set(['two_factor_required', 'captcha']);
+const SIGNIN_AUTH_STATES = { shopify: new Set(['two_factor_required', 'captcha']), shipstation: new Set(['login_required', 'two_factor_required', 'captcha']) };
 
 /**
- * POST /v1/collect/weeks/:week/signin { status: 'needs_person' | 'signed_in', authState?, waitMinutes? } (ingest):
- * the collector says that Shopify's sign-in needs a person (and while it waits for them), or that it
- * was finished. Codes and numbers only; shown on the week's status until the export arrives.
+ * POST /v1/collect/weeks/:week/signin { status: 'needs_person' | 'signed_in', source?, authState?, waitMinutes? } (ingest):
+ * the collector says that a sign-in needs a person (and while it waits for them), or that it was finished.
+ * source 'shopify' (default): shown as pending until the export arrives. source 'shipstation': shown as attention
+ * (never a reason to wait) until a Shipping Cost Report arrives. Codes and numbers only.
  */
 export async function postSignInEvent(request, env, weekStart) {
   if (!WEEK_RE.test(weekStart)) throw new ApiError(400, 'bad_query', 'week must be YYYY-MM-DD');
   let b; try { b = await request.json(); } catch { throw new ApiError(400, 'bad_payload', 'JSON body required'); }
   if (!SIGNIN_STATUSES.has(b?.status)) throw new ApiError(400, 'bad_payload', 'status must be needs_person or signed_in');
-  if (b.authState != null && !SIGNIN_AUTH_STATES.has(b.authState)) throw new ApiError(400, 'bad_payload', 'authState must be two_factor_required or captcha');
+  const source = b.source == null ? 'shopify' : b.source;
+  if (!SIGNIN_AUTH_STATES[source]) throw new ApiError(400, 'bad_payload', 'source must be shopify or shipstation');
+  if (b.authState != null && !SIGNIN_AUTH_STATES[source].has(b.authState)) throw new ApiError(400, 'bad_payload', `authState must be one of ${[...SIGNIN_AUTH_STATES[source]].join(', ')}`);
   if (b.waitMinutes != null && !(Number.isInteger(b.waitMinutes) && b.waitMinutes >= 0 && b.waitMinutes <= 120)) throw new ApiError(400, 'bad_payload', 'waitMinutes must be 0–120');
-  const detail = { source: 'shopify', ...(b.authState ? { authState: b.authState } : {}), ...(b.waitMinutes != null ? { waitMinutes: b.waitMinutes } : {}) };
+  const detail = { source, ...(b.authState ? { authState: b.authState } : {}), ...(b.waitMinutes != null ? { waitMinutes: b.waitMinutes } : {}) };
   const at = new Date().toISOString();
   await env.DB.prepare(`INSERT INTO automation_event (event_id, week_start, step, status, detail, correlation_id, actor_class, actor_label, at)
-      VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'ingest_secret', 'collector', ?6)`).bind(newId('evt'), weekStart, SIGNIN_STEP, b.status, JSON.stringify(detail), at).run();
-  return json({ weekStart, status: b.status, at });
+      VALUES (?1, ?2, ?3, ?4, ?5, NULL, 'ingest_secret', 'collector', ?6)`).bind(newId('evt'), weekStart, source === 'shipstation' ? SS_SIGNIN_STEP : SIGNIN_STEP, b.status, JSON.stringify(detail), at).run();
+  return json({ weekStart, status: b.status, source, at });
 }
 
 export async function getWeekStatus(env, weekStart) {

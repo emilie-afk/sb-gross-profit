@@ -45,3 +45,30 @@ test('sign-in status: needs a person → shown first on the week; signed in or a
   assert.equal(done.attention, undefined);
   assert.ok(!done.pending.some(p => p.code === 'shopify_signin_required' || p.code === 'shopify_export_pending'), JSON.stringify(done.pending));
 });
+
+test('ShipStation sign-in (2026-11-20): shown as attention, never a reason to wait; a later Shipping Cost Report clears it', async () => {
+  const d = dataset({ n: 40 });
+  const env = await freeTierEnv();
+  const W = d.week.weekStart;
+  const status = async () => (await ok(api(env, 'GET', `/v1/collect/weeks/${W}/status`, undefined, 'ingest'), 'status'));
+  for (const bad of [{ status: 'needs_person', source: 'gmail' }, { status: 'needs_person', source: 'shipstation', authState: 'password' }]) {
+    assert.equal((await api(env, 'POST', `/v1/collect/weeks/${W}/signin`, bad, 'ingest')).status, 400, JSON.stringify(bad));
+  }
+  const ft = FT.freeTierPipeline({ workerUrl: ORIGIN, ingestSecret: env.INGEST_SECRET, closedWeek: W, fetchImpl: bridge(env), sleep: async () => {} });
+  const before = await status();
+  await ft.signInEvent('needs_person', { source: 'shipstation', authState: 'login_required' });
+  const s = await status();
+  assert.deepEqual([s.attention.code, s.attention.authState, typeof s.attention.since], ['shipstation_signin_required', 'login_required', 'string']);
+  assert.deepEqual(s.pending.map(p => p.code), before.pending.map(p => p.code), 'not a reason to wait');
+  assert.equal(s.shipStationSignIn.authState, 'login_required');
+  assert.match(renderAutomationStatus({ weekStart: W, freeTier: s }), /Action needed.*ShipStation needs a person to sign in/);
+  // The Shopify sign-in event stays separate: a Shopify "signed in" does not clear ShipStation's.
+  await ft.signInEvent('signed_in');
+  assert.equal((await status()).attention.code, 'shipstation_signin_required');
+  // A report received afterwards clears it.
+  await new Promise(r => setTimeout(r, 5));
+  await FT.uploadShippingCostReport(ft.client, d.scr);
+  const after = await status();
+  assert.equal(after.attention, undefined);
+  assert.equal(after.shipStationSignIn, undefined);
+});
