@@ -1776,7 +1776,10 @@ async function openStoredReport(kind, key, weekList, { provisional = false } = {
     if (!plan.weeks.length) throw Object.assign(new Error(plan.provisional ? 'No published or verified week covers these dates.' : 'No published week covers this period.'), { status: 0 });
     // Why each missing week is missing (codes only), and each included week's report flags.
     await Promise.all(plan.gaps.filter(g => g.reason === 'not_published').map(async g => {
-      try { const st = await apiWeekStatus(g.weekStart); const code = (st.pending || []).map(p => p.code || p)[0]; if (code) g.detail = GAP_TEXT[code] || String(code).replace(/_/g, ' '); } catch { /* reason unknown: stays generic */ }
+      let st = null;
+      try { st = await apiWeekStatus(g.weekStart); } catch { /* reason from the week list only */ }
+      const why = SR.gapReason(g, weekList, st, GAP_TEXT);
+      if (why) g.detail = why;
     }));
     const client = { snapshot: (w, p) => apiSnapshot(w, { provisional: p }), reportPart: (w, k, id, p) => apiReportPart(w, k, id, { provisional: p }) };
     const data = await SR.loadPeriod(client, plan);

@@ -150,6 +150,36 @@ export function adjacentPeriod(kind, key, weekList, dir, opts) {
 }
 
 /**
+ * Why a week of a period is not included, in words (codes and counts only). From the week list's newest revision:
+ * held below the ShipStation coverage gate ("shipping costs in for 120 of 200 orders (60%); publishes at 95%"),
+ * another hold, or no revision yet. `status` (GET /v1/weeks/:week/status), when given, adds what blocks it now:
+ * ShipStation waiting for a person to sign in on the reporting laptop, or the first pending step.
+ * `pendingText`: { code → words } for the pending codes. → string or null (nothing known).
+ */
+export function gapReason(g, weekList, status = null, pendingText = {}) {
+  if (!g || g.reason !== 'not_published') return null;
+  const w = (weekList || []).find(x => x.weekStart === g.weekStart);
+  const r = (w?.revisions || [])[0];
+  const parts = [];
+  const pend = (status?.pending || []).map(p => p.code || p)[0];
+  if (pend) parts.push(pendingText[pend] || String(pend).replace(/_/g, ' '));
+  else if (!r) parts.push('not computed yet');
+  else {
+    const hold = r.hold || [];
+    const cov = hold.find(h => h.code === 'ss_coverage');
+    const sc = r.shippingCoverage;
+    if (cov && sc && sc.ordersRequiringCost > 0) {
+      const gate = /(\d+(?:\.\d+)?)% threshold/.exec(cov.message || '');
+      parts.push(`shipping costs in for ${sc.ordersWithCost} of ${sc.ordersRequiringCost} orders (${Math.floor(sc.ordersWithCost / sc.ordersRequiringCost * 100)}%)${gate ? `; publishes at ${gate[1]}%` : ''}`);
+    } else if (cov) parts.push('ShipStation costs below the publication threshold');
+    for (const h of hold) if (h !== cov) parts.push(String(h.code || '').replace(/_/g, ' '));
+    if (!hold.length && r.status !== 'published') parts.push(r.verification === 'verified' ? 'verified, waiting for publication' : 'verification pending');
+  }
+  if (status?.attention?.code === 'shipstation_signin_required') parts.push('waiting for ShipStation sign-in on the reporting laptop');
+  return parts.filter(Boolean).join(' · ') || null;
+}
+
+/**
  * What a period needs. kind 'week' (key = Monday), 'month' (key = YYYY-MM) or 'range' (key = 'YYYY-MM-DD_YYYY-MM-DD').
  * → { kind, key, period, weeks: [{ weekStart, days: {from,to} (inside the period), published }],
  *     gaps: [{ from, to, weekStart, reason }] (days of the period no published week covers) }

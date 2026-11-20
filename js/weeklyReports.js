@@ -10,7 +10,7 @@
  * Every value is escaped; money is shown as stored.
  */
 import * as api from './workerClient.js';
-import { monthsOf, periodPlan, monthLabel, fmtRange, daysBetween, addDays, checkRange, publishedSpan, rangeLabel } from './storedReport.js';
+import { monthsOf, periodPlan, monthLabel, fmtRange, daysBetween, addDays, checkRange, publishedSpan, rangeLabel, gapReason } from './storedReport.js';
 
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = n => (typeof n === 'number' && Number.isFinite(n)) ? (n < 0 ? '−$' : '$') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
@@ -86,7 +86,7 @@ export function renderMonthList(weeks) {
     const plan = periodPlan('month', m, list);
     const days = daysBetween(plan.period.from, plan.period.to);
     const covered = plan.weeks.reduce((n, w) => n + daysBetween(w.days.from, w.days.to), 0);
-    const gaps = plan.gaps.map(g => `${fmtRange(g)} (${g.reason === 'before_reporting' ? 'before reporting starts' : 'not published'})`).join('; ');
+    const gaps = plan.gaps.map(g => `${fmtRange(g)} (${g.reason === 'before_reporting' ? 'before reporting starts' : `not published${(r => r ? `: ${r}` : '')(gapReason(g, list))}`})`).join('; ');
     return `<tr><td><button class="logout-btn" onclick="weeklyReports.openReport('month', '${esc(m)}')" title="Open the full report">${esc(monthLabel(m))}</button></td>
       <td>${esc(plan.weeks.map(w => `${fmtRange(w.days)} (r${w.published.revision})`).join(', '))}</td>
       <td style="text-align:right">${covered} of ${days}${covered < days ? ' · partial' : ''}</td><td>${esc(gaps || '—')}</td></tr>`;
