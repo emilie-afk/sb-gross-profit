@@ -51,9 +51,20 @@ test('by SKU: exact SKUs, paid orders and renewals, months, product, totals', ()
   assert.equal(by['SUB2-1-POT'].type, '1 succ/mo + clay pot');
   assert.equal(by['GSUB3-1-6'].type, '1 succ/mo (gift)'); assert.equal(subTypeName('SUB5-4-12'), '4 succs/mo');
   assert.equal(by['SUB2-1-POT'].expShip, 7.99);
-  assert.equal(by['SUB2-1-1'].shipLoss, Math.round((by['SUB2-1-1'].ss - by['SUB2-1-1'].shipColl) * 100) / 100);
+  assert.equal(by['SUB2-1-1'].shipNet, Math.round((by['SUB2-1-1'].shipColl - by['SUB2-1-1'].ss) * 100) / 100, 'collected − label: negative = a loss');
   assert.equal(total.deliveries, 7);
   assert.equal(rows[0].key, 'SUB2-1-1', 'most deliveries first');
+});
+
+test('ship net = collected − label: negative when the label costs more than the customer paid (a loss)', () => {
+  const by = Object.fromEntries(subscriptionPl(LINES).rows.map(r => [r.key, r]));
+  assert.equal(by['SUB2-1-POT'].shipNet, -1.51, 'collected $7.99, label $9.50: we lose $1.51 a month');
+  assert.equal(by['SUB2-1-12'].shipNet, 0.69, 'collected $6.99, label $6.30 on average: $0.69 left a month');
+  assert.equal(by['GSUB3-1-6'].shipNet, -0.01);
+  assert.ok(!('shipLoss' in by['SUB2-1-1']), 'no inverted-sign figure');
+  const csv = subscriptionPlCsv(subscriptionPl(LINES)).split('\n');
+  assert.match(csv[0], /Ship net\/mo \(collected − label\)/);
+  assert.match(csv.find(l => l.startsWith('SUB2-1-POT,')), /,-1\.51,/);
 });
 
 test('missing costs and unsplit shipping are left out (counted), never treated as $0', () => {

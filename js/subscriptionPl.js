@@ -10,9 +10,10 @@
  *   price        average monthly price over paid lines: revenue ÷ the SKU's months
  *   cogs         average product cost per delivery, KNOWN costs only (a missing cost is counted, never $0)
  *   ss           average ShipStation label cost per delivery (lines whose label cost is in)
- *   shipColl     average shipping collected per month over paid lines
+ *   shipColl     average shipping the CUSTOMER PAID US per month of the plan, over paid lines
  *   expShip      the expected monthly shipping fee for the SKU
- *   shipLoss     ss − shipColl
+ *   shipNet      shipColl − ss: what shipping leaves us per month. Negative = we lose money on shipping
+ *                (the dashboard's sign rule: a negative figure, shown red, is money lost)
  *   gp           price − cogs (per month);  gpPct = gp ÷ price
  *   netGp        gp − ss + shipColl;  netGpPct = netGp ÷ (price + shipColl)
  *   unsplit      deliveries in orders with several subscriptions (shipping not split: left out of ss and shipColl)
@@ -62,7 +63,7 @@ function finish(g) {
   const product = [...g.products.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
   const { orders, products, months, rev, cogs: c, ss: s, ship, exp, ...rest } = g;
   return { ...rest, product, months: [...months].sort((a, b) => a - b), orders: orders.size,
-           price, cogs, ss, shipColl, expShip: exp, shipLoss: ss !== null && shipColl !== null ? r2(ss - shipColl) : null,
+           price, cogs, ss, shipColl, expShip: exp, shipNet: ss !== null && shipColl !== null ? r2(shipColl - ss) : null,
            gp, gpPct: pct(gp, price), netGp, netGpPct: pct(netGp, price !== null && shipColl !== null ? price + shipColl : price) };
 }
 
@@ -87,7 +88,7 @@ export function subscriptionPl(lines, { groupBy = 'sku' } = {}) {
 
 const COLS = [['label', 'SKU'], ['type', 'Type'], ['product', 'Product'], ['months', 'Months'], ['deliveries', 'Deliveries'], ['paid', 'Paid orders'],
   ['renewals', 'Renewals'], ['price', 'Avg price/mo'], ['cogs', 'Avg COGS/delivery'], ['ss', 'Avg label cost/delivery'], ['shipColl', 'Avg ship collected/mo'],
-  ['expShip', 'Expected ship/mo'], ['shipLoss', 'Ship loss/mo'], ['gp', 'GP/mo'], ['gpPct', 'GP %'], ['netGp', 'Net GP/mo'], ['netGpPct', 'Net GP %'],
+  ['expShip', 'Expected ship/mo'], ['shipNet', 'Ship net/mo (collected − label)'], ['gp', 'GP/mo'], ['gpPct', 'GP %'], ['netGp', 'Net GP/mo'], ['netGpPct', 'Net GP %'],
   ['missingCost', 'Missing cost (left out)'], ['unsplit', 'Shipping not split (left out)']];
 
 /** CSV text of a subscriptionPl result (rows then a Total row). */
@@ -98,7 +99,7 @@ export function subscriptionPlCsv({ rows, total }, { groupBy = 'sku' } = {}) {
     const v = r[k];
     if (v === null || v === undefined) return '';
     if (Array.isArray(v)) return v.join('/');
-    if (typeof v === 'number' && ['price', 'cogs', 'ss', 'shipColl', 'expShip', 'shipLoss', 'gp', 'netGp'].includes(k)) return v.toFixed(2);
+    if (typeof v === 'number' && ['price', 'cogs', 'ss', 'shipColl', 'expShip', 'shipNet', 'gp', 'netGp'].includes(k)) return v.toFixed(2);
     return v;
   };
   const body = [...rows, { ...total, label: 'Total', type: '', product: '' }].map(r => cols.map(([k]) => q(cell(r, k))).join(','));

@@ -913,10 +913,10 @@ td.pos{color:var(--green)} td.neg{color:var(--red)}
             <th onclick="sortSubBy('lineCogs')" class="num">COGS <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineGp')" class="num">GP $ <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineGpPct')" class="num">GP% <span class="sort-icon">↕</span></th>
-            <th onclick="sortSubBy('subShipMo')" class="num">Ship Coll/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('subShipMo')" class="num" title="Shipping the customer paid us, per month of the plan">Ship Coll/mo <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('expSubShipMo')" class="num">Exp Ship/mo <span class="sort-icon">↕</span></th>
-            <th onclick="sortSubBy('subSSCostMo')" class="num">SS Cost/mo <span class="sort-icon">↕</span></th>
-            <th onclick="sortSubBy('subShipLoss')" class="num">Ship Loss/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('subSSCostMo')" class="num" title="What we paid for the shipping label (ShipStation), per month">SS Cost/mo <span class="sort-icon">↕</span></th>
+            <th onclick="sortSubBy('subShipNet')" class="num" title="Ship collected − label cost. Negative (red) = we lose money on shipping">Ship net/mo <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('shipDelta')" class="num">Ship Δ/mo <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineNetGp')" class="num">Net GP $ <span class="sort-icon">↕</span></th>
             <th onclick="sortSubBy('lineNetGpPct')" class="num">Net GP% <span class="sort-icon">↕</span></th>
@@ -2944,7 +2944,7 @@ function renderChannelBreakdown(s, totChRev) {
         </table>
       </div>
       <div class="gp-card-body" style="border-top:1px solid var(--gp-border)">
-        <p class="gp-note"><strong>Subscription renewals (prepaid)</strong> shows a loss by design; see Reports for unit economics.</p>
+        <p class="gp-note"><strong>Subscription renewals (prepaid)</strong> shows a loss by design; see Order detail → Subscriptions for per-SKU unit economics.</p>
         ${storedState ? '<p class="gp-note">Automatic report: gross profit and GP % here are known-cost product GP (product lines with a known cost). Revenue without a cost is in the Revenue column but not in this GP. The headline operating GP includes that revenue with no cost deducted, so it can be overstated.' : ''}
       </div>
     </div>`;
@@ -3182,7 +3182,7 @@ function updateSubTotals() {
     ['lineRevenue','lineCogs','lineGp','subShipMo','expSubShipMo','subSSCostMo','subShipLoss','shipDelta','lineNetGp']);
   const gpPct    = t.lineRevenue ? Math.round(t.lineGp    / t.lineRevenue * 1000) / 10 : null;
   const netGpPct = (!hasMissNetGp && t.lineRevenue) ? Math.round(t.lineNetGp / t.lineRevenue * 1000) / 10 : null;
-  const lossClass = t.subShipLoss > 0 ? 'neg' : t.subShipLoss < 0 ? 'pos' : '';
+  const shipNetT = t.subShipLoss === null || t.subShipLoss === undefined ? null : Math.round(-t.subShipLoss * 100) / 100;
   document.getElementById('sub-tfoot').innerHTML = `<tr class="totals-row">
     <td colspan="5">Total (${rows.length.toLocaleString()} lines)</td>
     <td></td>
@@ -3193,7 +3193,7 @@ function updateSubTotals() {
     <td class="num">${fmt(t.subShipMo)}</td>
     <td class="num">${fmt(t.expSubShipMo)}</td>
     <td class="num">${fmt(t.subSSCostMo)}</td>
-    <td class="num ${lossClass}">${fmt(t.subShipLoss)}</td>
+    <td class="num ${gpClass(shipNetT)}">${fmt(shipNetT)}</td>
     <td class="num ${deltaClass(t.shipDelta)}">${fmt(t.shipDelta)}</td>
     <td class="num ${gpClass(t.lineNetGp)}">${hasMissNetGp?'~':''}${fmt(t.lineNetGp)}</td>
     <td class="num ${gpClass(netGpPct)}">${netGpPct!==null?netGpPct.toFixed(1)+'%':'—'}</td>
@@ -3205,6 +3205,8 @@ function fmt(n) {
   if (n === null || n === undefined) return '—';
   return (n < 0 ? '-$' : '$') + Math.abs(n).toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2});
 }
+/** Subscription shipping per month as the dashboard signs money: collected − label cost (negative = a loss). */
+function subShipNet(l) { return l.subShipLoss === null || l.subShipLoss === undefined ? null : Math.round(-l.subShipLoss * 100) / 100; }
 function gpClass(v)    { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg'; }
 function deltaClass(v) { if (v === null) return ''; return v >= 0 ? 'pos' : 'neg'; }
 
@@ -3395,7 +3397,7 @@ window.downloadDetailCSV = () => {
 window.downloadSubCSV = () => {
   const headers = ['Order','Date','Channel','Store','SKU','Product','Months',
                    'Revenue','COGS','GP $','GP %','Cost Source',
-                   'Ship Coll/mo','Exp Ship/mo','SS Cost/mo','Ship Loss/mo',
+                   'Ship Coll/mo','Exp Ship/mo','SS Cost/mo','Ship net/mo (collected - label)',
                    'Ship Δ/mo','Net GP $','Net GP %'];
   const rows = [headers];
   for (const l of subRows) {
@@ -3407,7 +3409,7 @@ window.downloadSubCSV = () => {
       l.subShipUnavailable ? 'n/a' : (l.subShipMo ?? l.shipCollected ?? ''),
       l.expSubShipMo ?? '',
       l.subShipUnavailable ? 'n/a' : (l.subSSCostMo ?? ''),
-      l.subShipUnavailable ? 'n/a' : (l.subShipLoss ?? ''),
+      l.subShipUnavailable ? 'n/a' : (subShipNet(l) ?? ''),
       l.shipDelta ?? '',
       l.lineNetGp ?? '',
       l.lineNetGpPct !== null && l.lineNetGpPct !== undefined ? l.lineNetGpPct + '%' : '',
@@ -3737,8 +3739,11 @@ let subPlGroup = 'sku', subPlSortKey = 'deliveries', subPlSortAsc = false, subSk
 const SUBPL_COLS = [
   ['label', 'SKU', 'text'], ['type', 'Type', 'text'], ['product', 'Product', 'text'], ['months', 'Months', 'months'],
   ['deliveries', 'Deliveries', 'int'], ['paid', 'Paid orders', 'int'], ['renewals', 'Renewals', 'int'],
-  ['price', 'Price/mo', 'money'], ['cogs', 'COGS/delivery', 'money'], ['ss', 'Label cost/delivery', 'money'],
-  ['shipColl', 'Ship collected/mo', 'money'], ['expShip', 'Expected ship/mo', 'money'], ['shipLoss', 'Ship loss/mo', 'loss'],
+  ['price', 'Price/mo', 'money'], ['cogs', 'COGS/delivery', 'money'],
+  ['ss', 'Label cost/delivery', 'money', 'What we paid for the shipping label (ShipStation), per delivery'],
+  ['shipColl', 'Ship collected/mo', 'money', 'Shipping the customer paid us, per month of the plan (paid orders only; a renewal pays nothing now)'],
+  ['expShip', 'Expected ship/mo', 'money', 'The shipping fee this plan should charge per month'],
+  ['shipNet', 'Ship net/mo', 'gp', 'Ship collected − label cost. Negative (red) = we lose money on shipping'],
   ['gp', 'GP/mo', 'gp'], ['gpPct', 'GP %', 'pct'], ['netGp', 'Net GP/mo', 'gp'], ['netGpPct', 'Net GP %', 'pct'],
 ];
 window.setSubPlGroup = g => {
@@ -3780,11 +3785,10 @@ function renderSubPl() {
     if (kind === 'int') return td(Number(v).toLocaleString(), 'color:var(--muted)');
     if (kind === 'pct') return td(`${v.toFixed(1)}%`, tone(v));
     if (kind === 'gp') return td(fmt(v), tone(v));
-    if (kind === 'loss') return td(fmt(v), tone(v, false));
     return td(fmt(v));
   };
-  document.getElementById('subpl-head').innerHTML = `<tr style="border-bottom:1px solid var(--border);color:var(--muted);text-align:right">${cols.map(([key, h, kind]) =>
-    `<th style="padding:4px 10px;white-space:nowrap;cursor:pointer;${kind === 'text' ? 'text-align:left' : ''}" onclick="sortSubPl('${key}')">${h}${key === k ? (asc ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr>`;
+  document.getElementById('subpl-head').innerHTML = `<tr style="border-bottom:1px solid var(--border);color:var(--muted);text-align:right">${cols.map(([key, h, kind, tip]) =>
+    `<th style="padding:4px 10px;white-space:nowrap;cursor:pointer;${kind === 'text' ? 'text-align:left' : ''}"${tip ? ` title="${esc(tip)}"` : ''} onclick="sortSubPl('${key}')">${h}${key === k ? (asc ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr>`;
   document.getElementById('subpl-body').innerHTML = rows.length
     ? rows.map(r => `<tr style="border-bottom:1px solid var(--border)${subSkuFocus && r.sku === subSkuFocus ? ';background:var(--gp-brand-soft)' : ''}">${cols.map(c => cell(r, c)).join('')}</tr>`).join('')
     : `<tr><td colspan="${cols.length}" style="padding:20px;text-align:center;color:var(--muted)">No subscription deliveries in the current filters.</td></tr>`;
@@ -3793,7 +3797,7 @@ function renderSubPl() {
   const t = pl.total, notes = [];
   if (t.missingCost) notes.push(`${t.missingCost} without a product cost (left out of COGS)`);
   if (t.unsplit) notes.push(`${t.unsplit} in orders with several subscriptions (shipping not split: left out of the shipping averages)`);
-  document.getElementById('subpl-note').textContent = `Averages per delivery; price and shipping collected per month of the plan${notes.length ? ` · ${notes.join(' · ')}` : ''}`;
+  document.getElementById('subpl-note').textContent = `Averages per delivery; price and shipping collected (paid by the customer) per month of the plan; red = losing money${notes.length ? ` · ${notes.join(' · ')}` : ''}`;
 }
 
 window.downloadSubPLCSV = () => {
@@ -3811,7 +3815,7 @@ function renderSubView() {
   const focus = document.getElementById('sub-sku-focus');
   if (focus) { focus.hidden = !subSkuFocus; document.getElementById('sub-sku-focus-label').textContent = subSkuFocus ? `SKU ${subSkuFocus}` : ''; }
   subRows.sort((a, b) => {
-    let va = a[subSortKey], vb = b[subSortKey];
+    let va = subSortKey === 'subShipNet' ? subShipNet(a) : a[subSortKey], vb = subSortKey === 'subShipNet' ? subShipNet(b) : b[subSortKey];
     if (va === null || va === undefined) va = subSortAsc ? Infinity : -Infinity;
     if (vb === null || vb === undefined) vb = subSortAsc ? Infinity : -Infinity;
     if (typeof va === 'string') return subSortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
@@ -3844,7 +3848,7 @@ function renderSubPage() {
       <td class="num">${li.subShipUnavailable ? '<span title="Several subscriptions in this order: shipping is not split between them">n/a</span>' : li.subShipMo !== null ? fmt(li.subShipMo) : (li.shipCollected !== null ? fmt(li.shipCollected) : '')}</td>
       <td class="num">${li.expSubShipMo !== null ? fmt(li.expSubShipMo) : ''}</td>
       <td class="num">${li.subShipUnavailable ? 'n/a' : li.subSSCostMo !== null ? fmt(li.subSSCostMo) : '—'}</td>
-      <td class="num ${li.subShipLoss > 0 ? 'neg' : li.subShipLoss < 0 ? 'pos' : ''}">${li.subShipUnavailable ? 'n/a' : li.subShipLoss !== null ? fmt(li.subShipLoss) : '—'}</td>
+      <td class="num ${li.subShipUnavailable || subShipNet(li) === null ? '' : gpClass(subShipNet(li))}">${li.subShipUnavailable ? 'n/a' : subShipNet(li) !== null ? fmt(subShipNet(li)) : '—'}</td>
       <td class="num ${deltaClass(li.shipDelta)}">${li.shipDelta !== null ? fmt(li.shipDelta) : ''}</td>
       <td class="num ${gpClass(li.lineNetGp)}">${li.lineNetGp !== null ? fmt(li.lineNetGp) : '—'}</td>
       <td class="num ${gpClass(li.lineNetGpPct)}">${li.lineNetGpPct !== null ? li.lineNetGpPct.toFixed(1)+'%' : '—'}</td>
