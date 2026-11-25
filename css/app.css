@@ -493,3 +493,9 @@ a { color: var(--gp-accent); text-decoration: none; }
 .gp-bl-row > span:last-child { white-space: nowrap; text-align: right; }
 .gp-bl-row.head { margin-top: 4px; }
 .gp-bl-row.sub { padding-left: 16px; color: var(--gp-text2); font-size: 12px; }
+
+/* Subscription P&L: SKU, Type and Product stay in view while the figures scroll sideways (index.html freezeSubPlCols). */
+#subpl-table .subpl-frozen { position: sticky; z-index: 1; background: var(--gp-surface); }
+#subpl-table thead .subpl-frozen { z-index: 2; }
+#subpl-table tr.subpl-focus .subpl-frozen { background: var(--gp-brand-soft); }
+#subpl-table .subpl-frozen-last { box-shadow: inset -1px 0 0 var(--gp-border); }

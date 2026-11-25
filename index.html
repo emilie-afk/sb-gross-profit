@@ -3790,14 +3790,45 @@ function renderSubPl() {
   document.getElementById('subpl-head').innerHTML = `<tr style="border-bottom:1px solid var(--border);color:var(--muted);text-align:right">${cols.map(([key, h, kind, tip]) =>
     `<th style="padding:4px 10px;white-space:nowrap;cursor:pointer;${kind === 'text' ? 'text-align:left' : ''}"${tip ? ` title="${esc(tip)}"` : ''} onclick="sortSubPl('${key}')">${h}${key === k ? (asc ? ' ▲' : ' ▼') : ''}</th>`).join('')}</tr>`;
   document.getElementById('subpl-body').innerHTML = rows.length
-    ? rows.map(r => `<tr style="border-bottom:1px solid var(--border)${subSkuFocus && r.sku === subSkuFocus ? ';background:var(--gp-brand-soft)' : ''}">${cols.map(c => cell(r, c)).join('')}</tr>`).join('')
+    ? rows.map(r => `<tr${subSkuFocus && r.sku === subSkuFocus ? ' class="subpl-focus"' : ''} style="border-bottom:1px solid var(--border)${subSkuFocus && r.sku === subSkuFocus ? ';background:var(--gp-brand-soft)' : ''}">${cols.map(c => cell(r, c)).join('')}</tr>`).join('')
     : `<tr><td colspan="${cols.length}" style="padding:20px;text-align:center;color:var(--muted)">No subscription deliveries in the current filters.</td></tr>`;
   document.getElementById('subpl-foot').innerHTML = rows.length
     ? `<tr style="font-weight:600;border-top:2px solid var(--border)">${cols.map((c, i) => (i === 0 ? `<td style="padding:5px 10px">All subscriptions</td>` : cell({ ...pl.total, type: '', product: '' }, c, true))).join('')}</tr>` : '';
   const t = pl.total, notes = [];
   if (t.missingCost) notes.push(`${t.missingCost} without a product cost (left out of COGS)`);
   if (t.unsplit) notes.push(`${t.unsplit} in orders with several subscriptions (shipping not split: left out of the shipping averages)`);
+  freezeSubPlCols(cols.filter(([, , kind]) => kind === 'text').length);
   document.getElementById('subpl-note').textContent = `Averages per delivery; price and shipping collected (paid by the customer) per month of the plan; red = losing money${notes.length ? ` · ${notes.join(' · ')}` : ''}`;
+}
+
+// The leading text columns (SKU, Type, Product; Type when grouped by type) stay in view while the numbers scroll
+// sideways. Offsets come from the header cells, so they are measured again whenever the table changes size
+// (including when the Subscriptions view first becomes visible).
+let _subPlFrozen = 0, _subPlObserver = null;
+function freezeSubPlCols(n) {
+  _subPlFrozen = n;
+  const table = document.getElementById('subpl-table');
+  if (!table) return;
+  if (!_subPlObserver && typeof ResizeObserver === 'function') {
+    _subPlObserver = new ResizeObserver(() => placeSubPlFrozen());
+    _subPlObserver.observe(table);
+  }
+  placeSubPlFrozen();
+}
+function placeSubPlFrozen() {
+  const table = document.getElementById('subpl-table');
+  const head = table?.tHead?.rows[0];
+  if (!head) return;
+  const lefts = [];
+  for (let i = 0, x = 0; i < _subPlFrozen && i < head.cells.length; i++) { lefts.push(x); x += head.cells[i].offsetWidth; }
+  for (const tr of table.rows) {
+    for (let i = 0; i < tr.cells.length; i++) {
+      const td = tr.cells[i], on = i < lefts.length && td.colSpan === 1;   // never the "no deliveries" message row
+      td.classList.toggle('subpl-frozen', on);
+      td.classList.toggle('subpl-frozen-last', on && i === lefts.length - 1);
+      td.style.left = on ? `${lefts[i]}px` : '';
+    }
+  }
 }
 
 window.downloadSubPLCSV = () => {

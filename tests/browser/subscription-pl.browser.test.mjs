@@ -38,7 +38,19 @@ test('Subscription P&L: in Order detail → Subscriptions on a saved report, not
   await p.waitForSelector('#view-sub', { state: 'visible' });
   assert.ok(await p.locator('#subpl-head th').count() >= 10, 'P&L columns');
   assert.match(await p.locator('#subpl-head').innerText(), /SKU/i);
+  // SKU, Type and Product stay in view while the figures scroll sideways.
+  const frozen = () => p.$$eval('#subpl-head th', ths => ths.map(th => ({ t: th.textContent.trim(), sticky: getComputedStyle(th).position === 'sticky', left: parseFloat(th.style.left) })).filter(x => x.sticky));
+  const three = await frozen();
+  assert.deepEqual(three.map(x => x.t.replace(/\s*[▲▼]$/, '')), ['SKU', 'Type', 'Product']);
+  assert.equal(three[0].left, 0); assert.ok(three[1].left > 0 && three[2].left > three[1].left, 'side by side');
+  await p.setViewportSize({ width: 700, height: 900 });
+  await p.$eval('#subpl-table', t => { t.parentElement.scrollLeft = 10000; });
+  const box = await p.locator('#subpl-head th').first().boundingBox();
+  const wrap = await p.$eval('#subpl-table', t => t.parentElement.getBoundingClientRect().left);
+  assert.ok(Math.abs(box.x - wrap) < 2, `SKU header still at the left edge after scrolling (${box.x} vs ${wrap})`);
+  await p.setViewportSize({ width: 1360, height: 1000 });
   await p.click('#subpl-by-type');
+  assert.deepEqual((await frozen()).map(x => x.t.replace(/\s*[▲▼]$/, '')), ['Type'], 'by type: only the Type column');
   assert.match(await p.locator('#subpl-head').innerText(), /^TYPE/i);
   assert.ok(await p.locator('#subpl-body tr').count() >= 1, 'rows or the empty message');
   assert.ok(await p.locator('#sub-kpis .gp-kpi').count() === 3, 'subscription KPI cards moved here');
