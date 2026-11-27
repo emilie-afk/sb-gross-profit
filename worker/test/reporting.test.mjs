@@ -199,6 +199,22 @@ test('end to end: a week computed and published by the real path is reported', a
   const sum = k => Math.round(w.days.reduce((a, d) => a + d[k], 0) * 100) / 100;
   assert.ok(Math.abs(sum('gross_profit_revenue_basis') - w.totals.gross_profit_revenue_basis) <= 0.05, `revenue ${sum('gross_profit_revenue_basis')} vs ${w.totals.gross_profit_revenue_basis}`);
   assert.ok(Math.abs(sum('gross_profit') - w.totals.gross_profit) <= 0.05, `gp ${sum('gross_profit')} vs ${w.totals.gross_profit}`);
+  // Vendors by day: over the week they match the app's own store breakdown and the product totals.
+  const byStore = new Map();
+  for (const d of w.days) for (const v of d.vendors) {
+    const b = byStore.get(v.vendor) || byStore.set(v.vendor, { krev: 0, kcogs: 0, mrev: 0, units: 0 }).get(v.vendor);
+    b.krev += v.known_cost_revenue; b.kcogs += v.known_product_cost; b.mrev += v.missing_cost_revenue; b.units += v.units;
+    assert.equal(v.known_cost_gp, Math.round((v.known_cost_revenue - v.known_product_cost) * 100) / 100);
+  }
+  const bd = pub.breakdowns?.store || [];
+  assert.ok(bd.length >= 1, 'the snapshot has a store breakdown');
+  for (const s of bd) {
+    const b = byStore.get(s.key) || { krev: 0, kcogs: 0, mrev: 0, units: 0 };
+    assert.ok(Math.abs(b.krev - s.knownCostRevenue) <= 0.05 && Math.abs(b.kcogs - s.knownCogs) <= 0.05 && Math.abs(b.mrev - s.missingCostRevenue) <= 0.05, `store ${s.key}`);
+    assert.equal(b.units, s.units);
+  }
+  const tot = [...byStore.values()].reduce((a, b) => a + b.krev, 0);
+  assert.ok(Math.abs(tot - pub.totals.knownCostProductRevenue) <= 0.05, `known-cost revenue ${tot} vs ${pub.totals.knownCostProductRevenue}`);
 });
 
 test('days: a chunked week is summed by business date from its stored order parts, inside the week only, with no order data', async () => {
@@ -214,6 +230,37 @@ test('days: a chunked week is summed by business date from its stored order part
   assert.deepEqual(w.days.map(d => [d.date, d.orders, d.gross_profit_revenue_basis, d.product_cost, d.shipping_cost, d.gross_profit]),
     [['2026-09-28', 1, 100, 40, 10, 50], ['2026-10-01', 2, 80, 30, 5, 45]]);           // Oct 9 lies outside the week
   assert.ok(!JSON.stringify(r.json).includes('#90000'), 'no order numbers');
+});
+
+test('days[].vendors: product lines by store and business date; missing cost never counts as profit; no SKUs or orders', async () => {
+  const env = await makeEnv({ REPORTING_SECRET: rnd() });
+  const id = await snap(env, '2026-09-28');
+  const order = (name, date) => ({ order_name: name, business_date: date, operating_revenue: 0, known_product_cogs: 0, ship_paid: 0 });
+  const line = (name, i, store, qty, rev, cogs, flags = { isProductLine: true }) => ({ order_name: name, line_index: i, sku: `SKU-SECRET-${i}`, product: 'Plant',
+    store, qty, contract_revenue: rev, line_cogs: cogs, flags: JSON.stringify(flags) });
+  const parts = [
+    [0, [order('#900011', '2026-09-28'), order('#900012', '2026-09-30')],
+        [line('#900011', 0, 'Store A', 2, 40, 15), line('#900011', 1, 'Store B', 1, 25, null), line('#900011', 2, 'Store A', 1, 5, 0, { isRoute: true }),
+         line('#900012', 0, 'Store A', 1, 10, 4), line('#900012', 1, '', 3, 0, 0)]],
+    [1, [order('#900013', '2026-09-30')], [line('#900013', 0, 'Store A', 1, 20, 8)]],
+  ];
+  for (const [k, orders, lines] of parts) {
+    await env.DB.prepare('INSERT INTO snapshot_blob (snapshot_id, part, sha256, body, body_text) VALUES (?1, ?2, ?3, ?4, ?5)').bind(id, `orders:${k}`, 'x', new Uint8Array([1]), JSON.stringify({ orders })).run();
+    await env.DB.prepare('INSERT INTO snapshot_blob (snapshot_id, part, sha256, body, body_text) VALUES (?1, ?2, ?3, ?4, ?5)').bind(id, `lines:${k}`, 'x', new Uint8Array([1]), JSON.stringify({ lines })).run();
+  }
+  const r = await rep(env);
+  const [w] = r.json.weeks;
+  const v = Object.fromEntries(w.days.map(d => [d.date, d.vendors]));
+  assert.deepEqual(v['2026-09-28'], [
+    { vendor: 'Store A', units: 2, known_cost_revenue: 40, known_product_cost: 15, known_cost_gp: 25, missing_cost_revenue: 0, missing_cost_lines: 0 },
+    { vendor: 'Store B', units: 1, known_cost_revenue: 0, known_product_cost: 0, known_cost_gp: 0, missing_cost_revenue: 25, missing_cost_lines: 1 },
+  ], 'Route lines never count; a missing cost adds to missing_cost_* only');
+  assert.deepEqual(v['2026-09-30'], [
+    { vendor: 'Store A', units: 2, known_cost_revenue: 30, known_product_cost: 12, known_cost_gp: 18, missing_cost_revenue: 0, missing_cost_lines: 0 },
+    { vendor: 'Unknown', units: 3, known_cost_revenue: 0, known_product_cost: 0, known_cost_gp: 0, missing_cost_revenue: 0, missing_cost_lines: 0 },
+  ], 'lines from two parts on the same date add up; a blank store is Unknown');
+  const text = JSON.stringify(r.json);
+  assert.ok(!text.includes('SKU-SECRET') && !text.includes('#90001'), 'no SKUs or order numbers');
 });
 
 test('rotation: REPORTING_SECRET_NEXT is accepted alongside the current key, held to the same rules, and revocable', async () => {

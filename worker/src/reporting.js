@@ -9,8 +9,11 @@
  * Returned per week: stable ids, the reporting dates and timezone, the scope (the Shopify store), completeness,
  * revision and publication times, store-level totals, and the same totals by order date ("days": operating
  * revenue, known product cost, shipping expense and operating GP summed over the week's orders per business date,
- * as the dashboard's period view adds them up). Never returned: orders, order lines, SKUs, customers,
- * catalog or policy detail, verification reports, publication holds, actors, notes or any secret.
+ * as the dashboard's period view adds them up), and per day the product figures by store/vendor ("days[].vendors":
+ * units, known-cost product revenue, known product cost, known-cost product GP before shipping, and the product
+ * revenue and lines whose cost is missing; the same lines and labels as the app's store breakdown). Never
+ * returned: orders, order lines, SKUs, customers, catalog or policy detail, verification reports, publication
+ * holds, actors, notes or any secret.
  *
  * Paginated in week order with an opaque cursor (the last week returned). D1 cost: at most limit + 1 rows.
  */
@@ -69,6 +72,52 @@ async function dayTotals(db, ids) {
   return out;
 }
 
+/**
+ * Product figures per business date and store (the line's store label, as in the app's store breakdown), summed
+ * inside D1: product lines only (Route, gift cards and shipping-only rows never count), each line dated by its
+ * order's business date. Chunked snapshots join each lines:k part to its orders:k part; row snapshots join
+ * snapshot_line to snapshot_order. A line whose cost is missing adds to missing_cost_* only, never to profit.
+ */
+async function vendorDayTotals(db, ids) {
+  const out = new Map();
+  if (!ids.length) return out;
+  const list = JSON.stringify(ids);
+  const select = (src) => `SELECT ln.sid AS id, od.d AS d, COALESCE(NULLIF(TRIM(ln.store), ''), 'Unknown') AS store,
+      SUM(COALESCE(ln.qty, 0)) AS units,
+      SUM(CASE WHEN ln.cogs IS NOT NULL THEN COALESCE(ln.rev, 0) ELSE 0 END) AS krev,
+      SUM(CASE WHEN ln.cogs IS NOT NULL THEN ln.cogs ELSE 0 END) AS kcogs,
+      SUM(CASE WHEN ln.cogs IS NULL THEN COALESCE(ln.rev, 0) ELSE 0 END) AS mrev,
+      SUM(CASE WHEN ln.cogs IS NULL THEN 1 ELSE 0 END) AS mlines
+    FROM ${src}
+    WHERE json_extract(ln.flags, '$.isProductLine') = 1
+    GROUP BY ln.sid, od.d, store`;
+  const [chunked, rows] = await db.batch([
+    db.prepare(select(`(SELECT lb.snapshot_id AS sid, substr(lb.part, 7) AS k, json_extract(l.value, '$.order_name') AS n,
+          json_extract(l.value, '$.store') AS store, json_extract(l.value, '$.qty') AS qty, json_extract(l.value, '$.contract_revenue') AS rev,
+          json_extract(l.value, '$.line_cogs') AS cogs, json_extract(l.value, '$.flags') AS flags
+        FROM snapshot_blob lb, json_each(lb.body_text, '$.lines') l
+        WHERE lb.snapshot_id IN (SELECT value FROM json_each(?1)) AND lb.part >= 'lines:' AND lb.part < 'lines;' AND lb.body_text IS NOT NULL) ln
+      JOIN (SELECT ob.snapshot_id AS sid, substr(ob.part, 8) AS k, json_extract(o.value, '$.order_name') AS n, json_extract(o.value, '$.business_date') AS d
+        FROM snapshot_blob ob, json_each(ob.body_text, '$.orders') o
+        WHERE ob.snapshot_id IN (SELECT value FROM json_each(?1)) AND ob.part >= 'orders:' AND ob.part < 'orders;' AND ob.body_text IS NOT NULL) od
+      ON od.sid = ln.sid AND od.k = ln.k AND od.n = ln.n`)).bind(list),
+    db.prepare(select(`(SELECT snapshot_id AS sid, order_name AS n, store, qty, contract_revenue AS rev, line_cogs AS cogs, flags
+        FROM snapshot_line WHERE snapshot_id IN (SELECT value FROM json_each(?1))) ln
+      JOIN (SELECT snapshot_id AS sid, order_name AS n, business_date AS d FROM snapshot_order WHERE snapshot_id IN (SELECT value FROM json_each(?1))) od
+      ON od.sid = ln.sid AND od.n = ln.n`)).bind(list),
+  ]);
+  for (const r of [...(chunked.results || []), ...(rows.results || [])]) {
+    if (typeof r.d !== 'string' || !WEEK_RE.test(r.d)) continue;
+    const byDay = out.get(r.id) || out.set(r.id, new Map()).get(r.id);
+    const krev = c2(r.krev), kcogs = c2(r.kcogs);
+    (byDay.get(r.d) || byDay.set(r.d, []).get(r.d)).push({ vendor: String(r.store).slice(0, 120), units: Number(r.units) || 0,
+      known_cost_revenue: krev, known_product_cost: kcogs, known_cost_gp: c2(krev - kcogs),
+      missing_cost_revenue: c2(r.mrev), missing_cost_lines: Number(r.mlines) || 0 });
+  }
+  for (const byDay of out.values()) for (const v of byDay.values()) v.sort((a, b) => b.known_cost_revenue - a.known_cost_revenue || (a.vendor < b.vendor ? -1 : 1));
+  return out;
+}
+
 export async function reportingWeeks(request, env) {
   const url = new URL(request.url);
   for (const k of url.searchParams.keys()) if (!['from', 'to', 'cursor', 'limit'].includes(k)) throw new ApiError(400, 'bad_query', `Unknown parameter ${k}`);
@@ -89,6 +138,7 @@ export async function reportingWeeks(request, env) {
 
   const page = rows.slice(0, limit);
   const days = await dayTotals(env.DB, page.map(r => r.snapshot_id));
+  const vendorDays = await vendorDayTotals(env.DB, page.map(r => r.snapshot_id));
   const settings = await getSettings(env.DB);
   const timezone = settings.store_timezone || DEFAULT_REPORTING_TIMEZONE;
   const weeks = page.map(r => {
@@ -115,7 +165,8 @@ export async function reportingWeeks(request, env) {
         orders_requiring_shipping_cost: num(r.orders_requiring_shipstation_rate),
         orders_with_shipping_cost: num(r.orders_with_valid_shipstation_rate),
       },
-      days: (days.get(r.snapshot_id) || []).filter(d => d.date >= (partialWeek?.reportingStart || r.week_start) && d.date <= addDays(r.week_start, 6)),
+      days: (days.get(r.snapshot_id) || []).filter(d => d.date >= (partialWeek?.reportingStart || r.week_start) && d.date <= addDays(r.week_start, 6))
+        .map(d => ({ ...d, vendors: vendorDays.get(r.snapshot_id)?.get(d.date) || [] })),
     };
   });
   return json({
